@@ -53,7 +53,7 @@ const result = await protocol.compliance.init("freeze-and-seize", {
 
 **Returns:** `blacklistNodePolicyId`, stake registration info in `metadata`.
 
-**Example:** [01-init-compliance.ts](../examples/freeze-and-seize/01-init-compliance.ts)
+**Example:** [01-init-compliance.ts](../../examples/freeze-and-seize/01-init-compliance.ts)
 
 ### Register
 
@@ -73,7 +73,7 @@ console.log("Token policy:", result.tokenPolicyId);
 
 **Returns:** `tokenPolicyId`, `metadata` with script hashes.
 
-**Example:** [02-register.ts](../examples/freeze-and-seize/02-register.ts)
+**Example:** [02-register.ts](../../examples/freeze-and-seize/02-register.ts)
 
 ### Transfer
 
@@ -91,7 +91,7 @@ const result = await protocol.transfer({
 
 If the sender is blacklisted, throws: `"Sender ... is blacklisted — transfer denied"`.
 
-**Example:** [03-transfer.ts](../examples/freeze-and-seize/03-transfer.ts)
+**Example:** [03-transfer.ts](../../examples/freeze-and-seize/03-transfer.ts)
 
 ### Mint
 
@@ -107,7 +107,7 @@ const result = await protocol.mint({
 });
 ```
 
-**Example:** [04-mint.ts](../examples/freeze-and-seize/04-mint.ts)
+**Example:** [04-mint.ts](../../examples/freeze-and-seize/04-mint.ts)
 
 ### Burn
 
@@ -124,7 +124,7 @@ const result = await protocol.burn({
 });
 ```
 
-**Example:** [05-burn.ts](../examples/freeze-and-seize/05-burn.ts)
+**Example:** [05-burn.ts](../../examples/freeze-and-seize/05-burn.ts)
 
 ### Freeze
 
@@ -139,7 +139,7 @@ const result = await protocol.compliance.freeze({
 });
 ```
 
-**Example:** [06-freeze.ts](../examples/freeze-and-seize/06-freeze.ts)
+**Example:** [06-freeze.ts](../../examples/freeze-and-seize/06-freeze.ts)
 
 ### Unfreeze
 
@@ -154,7 +154,7 @@ const result = await protocol.compliance.unfreeze({
 });
 ```
 
-**Example:** [09-unfreeze.ts](../examples/freeze-and-seize/09-unfreeze.ts)
+**Example:** [09-unfreeze.ts](../../examples/freeze-and-seize/09-unfreeze.ts)
 
 ### Seize
 
@@ -172,7 +172,7 @@ const result = await protocol.compliance.seize({
 });
 ```
 
-**Example:** [08-seize.ts](../examples/freeze-and-seize/08-seize.ts)
+**Example:** [08-seize.ts](../../examples/freeze-and-seize/08-seize.ts)
 
 ## Asset Name Convention
 
@@ -189,4 +189,4 @@ The CIP-68 prefix is part of the raw name. Only strip it for display purposes.
 
 ## Full Lifecycle
 
-See the [examples/freeze-and-seize/](../examples/freeze-and-seize/) directory for the complete 11-step lifecycle from setup to post-unfreeze transfer.
+See the [examples/freeze-and-seize/](../../examples/freeze-and-seize/) directory for the complete 11-step lifecycle from setup to post-unfreeze transfer.

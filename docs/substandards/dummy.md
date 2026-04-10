@@ -49,4 +49,4 @@ The dummy transfer uses redeemer value 200 and does not check any blacklist.
 
 ## Example
 
-See [examples/dummy/](../examples/dummy/) for runnable scripts.
+See [examples/dummy/](../../examples/dummy/) for runnable scripts.
