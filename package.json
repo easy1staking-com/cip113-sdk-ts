@@ -1,0 +1,53 @@
+{
+  "name": "@easy1staking/cip113-sdk-ts",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for CIP-113 Programmable Tokens on Cardano",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./evolution": "./dist/provider/evolution-adapter.js",
+    "./dummy": "./dist/substandards/dummy/index.js",
+    "./freeze-and-seize": "./dist/substandards/freeze-and-seize/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "peerDependencies": {
+    "@evolution-sdk/evolution": "^0.4.0",
+    "effect": "^3.0.0"
+  },
+  "devDependencies": {
+    "@evolution-sdk/evolution": "^0.4.0",
+    "@types/node": "^25.5.2",
+    "effect": "^3.0.0",
+    "typescript": "^5.5.0"
+  },
+  "files": [
+    "dist",
+    "blueprints"
+  ],
+  "license": "Apache-2.0",
+  "author": "Easy 1 Staking <info@easy1staking.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/easy1staking-com/cip113-sdk-ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/easy1staking-com/cip113-sdk-ts/issues"
+  },
+  "homepage": "https://github.com/easy1staking-com/cip113-sdk-ts#readme",
+  "keywords": [
+    "cardano",
+    "cip113",
+    "programmable-tokens",
+    "smart-tokens",
+    "sdk",
+    "typescript"
+  ]
+}
