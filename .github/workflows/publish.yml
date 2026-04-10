@@ -17,6 +17,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - run: corepack enable && npx npm@11 install -g npm@11
+      - run: npm --version
       - run: npm ci
       - run: npm run build
       - run: npm publish --access public
