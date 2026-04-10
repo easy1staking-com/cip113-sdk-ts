@@ -3,7 +3,7 @@
  *
  * Previously contained a manual CBOR-level workaround for
  * https://github.com/IntersectMBO/evolution-sdk/issues/232
- * Fixed in @evolution-sdk/evolution 0.4.0 — now delegates to the SDK.
+ * Fixed in @evolution-sdk/evolution — now delegates to the SDK.
  */
 
 import { Transaction } from "@evolution-sdk/evolution";

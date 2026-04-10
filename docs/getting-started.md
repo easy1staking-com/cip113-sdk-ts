@@ -92,7 +92,7 @@ npm run fes:register
 npm run fes:transfer
 ```
 
-See [examples/README](../examples/) for the full list.
+See the [README](../README.md#examples) for the full list of available scripts.
 
 ## Next Steps
 

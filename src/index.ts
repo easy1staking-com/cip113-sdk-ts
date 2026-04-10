@@ -3,17 +3,17 @@
  *
  * @example
  * ```ts
- * import { CIP113 } from '@cip113/sdk';
- * import { dummySubstandard } from '@cip113/sdk/dummy';
- * import { freezeAndSeizeSubstandard } from '@cip113/sdk/freeze-and-seize';
+ * import { CIP113, evoClient, preprodChain } from '@easy1staking/cip113-sdk-ts';
+ * import { dummySubstandard } from '@easy1staking/cip113-sdk-ts/dummy';
+ * import { freezeAndSeizeSubstandard } from '@easy1staking/cip113-sdk-ts/freeze-and-seize';
  *
  * // Create Evolution SDK client
- * const evoClient = client(preprod)
- *   .withBlockfrost({ projectId: '...' })
- *   .withAddress(walletAddress);
+ * const client = evoClient(preprodChain)
+ *   .withBlockfrost({ projectId: '...', baseUrl: 'https://cardano-preprod.blockfrost.io/api/v0' })
+ *   .withSeed({ mnemonic: 'your 24 word seed phrase' });
  *
  * const protocol = CIP113.init({
- *   client: evoClient,
+ *   client,
  *   standard: { blueprint: standardBlueprint, deployment: deploymentParams },
  *   substandards: [dummySubstandard({ blueprint: dummyBlueprint })],
  * });
@@ -332,6 +332,6 @@ export {
   Data as EvoData,
 } from "@evolution-sdk/evolution";
 
-// In 0.4.0 `client(chain)` became `Client.make(chain)` — re-export a compatible wrapper
+// Re-export Client.make as evoClient for convenience
 import { Client } from "@evolution-sdk/evolution";
 export const evoClient = Client.make;

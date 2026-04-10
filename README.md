@@ -89,7 +89,7 @@ Each script is standalone — run them sequentially to walk through the complete
 
 ## Peer Dependencies
 
-- `@evolution-sdk/evolution` ^0.4.0
+- `@evolution-sdk/evolution` ^0.5.1
 - `effect` ^3.0.0
 
 ## License
