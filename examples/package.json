@@ -1,0 +1,31 @@
+{
+  "name": "cip113-sdk-examples",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fes:setup":              "tsx freeze-and-seize/00-setup.ts",
+    "fes:init-compliance":    "tsx freeze-and-seize/01-init-compliance.ts",
+    "fes:register":           "tsx freeze-and-seize/02-register.ts",
+    "fes:transfer":           "tsx freeze-and-seize/03-transfer.ts",
+    "fes:mint":               "tsx freeze-and-seize/04-mint.ts",
+    "fes:burn":               "tsx freeze-and-seize/05-burn.ts",
+    "fes:freeze":             "tsx freeze-and-seize/06-freeze.ts",
+    "fes:transfer-blocked":   "tsx freeze-and-seize/07-transfer-blocked.ts",
+    "fes:seize":              "tsx freeze-and-seize/08-seize.ts",
+    "fes:unfreeze":           "tsx freeze-and-seize/09-unfreeze.ts",
+    "fes:transfer-unfrozen":  "tsx freeze-and-seize/10-transfer-after-unfreeze.ts",
+    "dummy:setup":            "tsx dummy/00-setup.ts",
+    "dummy:transfer":         "tsx dummy/01-transfer.ts"
+  },
+  "dependencies": {
+    "@easy1staking/cip113-sdk-ts": "file:..",
+    "@evolution-sdk/evolution": "^0.4.0",
+    "effect": "^3.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
