@@ -26,7 +26,7 @@ import {
 } from "@evolution-sdk/evolution";
 
 const PlutusV3 = Script.Script.members[3] as { new (opts: { bytes: Uint8Array }): Script.Script };
-import * as Label from "@evolution-sdk/evolution/Assets/Label";
+import * as Label from "@evolution-sdk/evolution/assets/Label";
 
 import type { HexString, PlutusScript, ScriptHash, TxInput } from "../types.js";
 
