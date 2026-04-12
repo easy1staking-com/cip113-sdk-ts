@@ -36,7 +36,21 @@ const fes = freezeAndSeizeSubstandard({
 });
 ```
 
+## Signing Pattern
+
+All operations return `{ cbor, txHash, _signBuilder }`. Use `_signBuilder.signAndSubmit()` to sign and submit:
+
+```typescript
+const result = await protocol.transfer({ ... });
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);  // wait for on-chain confirmation
+```
+
+This works for both seed wallets (auto-signs) and CIP-30 browser wallets (prompts user).
+
 ## Operations
+
+> **Important:** Always pass `substandardId: "freeze-and-seize"` when calling `transfer()`, `mint()`, or `burn()`. This routes directly to the FES plugin. Without it, the SDK tries all registered substandards and may produce confusing errors.
 
 ### Init Compliance
 
@@ -49,6 +63,9 @@ const result = await protocol.compliance.init("freeze-and-seize", {
   assetName: "DEMO",             // human-readable name
   bootstrapUtxo: largestUtxo,    // one-shot minting policy input
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Returns:** `blacklistNodePolicyId`, stake registration info in `metadata`.
@@ -68,7 +85,10 @@ const result = await protocol.register("freeze-and-seize", {
   // Optional CIP-68 metadata:
   // cip68Metadata: { name: "Demo Token", ticker: "DEMO", decimals: 6 },
 });
+
 console.log("Token policy:", result.tokenPolicyId);
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Returns:** `tokenPolicyId`, `metadata` with script hashes.
@@ -84,9 +104,13 @@ const result = await protocol.transfer({
   senderAddress: "addr_test1...",
   recipientAddress: "addr_test1...",
   tokenPolicyId: "abcd...",
-  assetName: "hex_asset_name",  // raw hex
+  assetName: "hex_asset_name",          // raw hex
   quantity: 100n,
+  substandardId: "freeze-and-seize",    // required for direct routing
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 If the sender is blacklisted, throws: `"Sender ... is blacklisted — transfer denied"`.
@@ -104,7 +128,11 @@ const result = await protocol.mint({
   assetName: "hex_asset_name",
   quantity: 500_000n,
   recipientAddress: adminAddress,
+  substandardId: "freeze-and-seize",
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Example:** [04-mint.ts](../../examples/freeze-and-seize/04-mint.ts)
@@ -120,8 +148,12 @@ const result = await protocol.burn({
   assetName: "hex_asset_name",
   utxoTxHash: "tx_hash_of_utxo",
   utxoOutputIndex: 0,
-  holderAddress: holderAddr,  // optional, defaults to feePayerAddress
+  holderAddress: holderAddr,             // optional, defaults to feePayerAddress
+  substandardId: "freeze-and-seize",
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Example:** [05-burn.ts](../../examples/freeze-and-seize/05-burn.ts)
@@ -137,6 +169,9 @@ const result = await protocol.compliance.freeze({
   assetName: "hex_asset_name",
   targetAddress: "addr_test1_to_freeze",
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Example:** [06-freeze.ts](../../examples/freeze-and-seize/06-freeze.ts)
@@ -152,7 +187,12 @@ const result = await protocol.compliance.unfreeze({
   assetName: "hex_asset_name",
   targetAddress: "addr_test1_to_unfreeze",
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
+
+> **Note:** After unfreeze, wait ~15 seconds before transferring. Blockfrost needs time to reflect the updated blacklist UTxOs.
 
 **Example:** [09-unfreeze.ts](../../examples/freeze-and-seize/09-unfreeze.ts)
 
@@ -170,6 +210,9 @@ const result = await protocol.compliance.seize({
   destinationAddress: adminAddress,
   holderAddress: "addr_test1_frozen_holder",
 });
+
+const txHash = await result._signBuilder.signAndSubmit();
+await client.awaitTx(txHash);
 ```
 
 **Example:** [08-seize.ts](../../examples/freeze-and-seize/08-seize.ts)
@@ -189,4 +232,20 @@ The CIP-68 prefix is part of the raw name. Only strip it for display purposes.
 
 ## Full Lifecycle
 
-See the [examples/freeze-and-seize/](../../examples/freeze-and-seize/) directory for the complete 11-step lifecycle from setup to post-unfreeze transfer.
+All 11 steps verified on Cardano preprod:
+
+| Step | Script | Operation |
+|------|--------|-----------|
+| 0 | `00-setup` | Validate env, show wallet |
+| 1 | `01-init-compliance` | Create blacklist |
+| 2 | `02-register` | Mint + register token |
+| 3 | `03-transfer` | Transfer tokens |
+| 4 | `04-mint` | Mint more tokens |
+| 5 | `05-burn` | Burn tokens |
+| 6 | `06-freeze` | Blacklist an address |
+| 7 | `07-transfer-blocked` | Transfer denied |
+| 8 | `08-seize` | Seize from frozen address |
+| 9 | `09-unfreeze` | Remove from blacklist |
+| 10 | `10-transfer-after-unfreeze` | Transfer works again |
+
+See [examples/freeze-and-seize/](../../examples/freeze-and-seize/).

@@ -33,8 +33,9 @@ const result = await protocol.transfer({
   senderAddress: "addr_test1...",
   recipientAddress: "addr_test1...",
   tokenPolicyId: "abcd1234...",
-  assetName: "0014df1044454d4f",  // raw hex, CIP-68 prefix included
+  assetName: "0014df1044454d4f",          // raw hex, CIP-68 prefix included
   quantity: 1000n,
+  substandardId: "freeze-and-seize",      // always specify for direct routing
 });
 
 // 4. Sign and submit
