@@ -102,5 +102,30 @@ export function loadDummyBlueprint(): PlutusBlueprint {
 export { PREPROD_DEPLOYMENT } from "./deployment-preprod.js";
 
 export function getTokenName(): string {
-  return getEnv("TOKEN_NAME", false) || "DEMO";
+  const custom = getEnv("TOKEN_NAME", false);
+  if (custom) return custom;
+  // Generate a unique name per run so repeated runs don't collide
+  const ts = Date.now().toString(36).slice(-4).toUpperCase();
+  return `DEMO-${ts}`;
+}
+
+/**
+ * Check if a stake address is registered on-chain via Blockfrost.
+ * Used as `checkStakeRegistration` callback for CIP113.init().
+ */
+export async function checkStakeRegistration(stakeAddress: string): Promise<boolean> {
+  const projectId = getEnv("BLOCKFROST_PROJECT_ID");
+  const network = getNetwork();
+  const baseUrl =
+    getEnv("BLOCKFROST_URL", false) ||
+    `https://cardano-${network}.blockfrost.io/api/v0`;
+
+  try {
+    const res = await fetch(`${baseUrl}/accounts/${stakeAddress}`, {
+      headers: { project_id: projectId },
+    });
+    return res.ok; // 200 = registered, 404 = not registered
+  } catch {
+    return false;
+  }
 }

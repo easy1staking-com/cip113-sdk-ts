@@ -55,6 +55,9 @@ export interface CIP113Config {
 
   /** Substandard plugins to register */
   substandards?: SubstandardPlugin[];
+
+  /** Check if a stake address is registered on-chain. Used by compliance init to avoid re-registering. */
+  checkStakeRegistration?: (stakeAddress: string) => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +141,12 @@ export const CIP113 = {
     const substandards = new Map<string, SubstandardPlugin>();
 
     // Build the substandard context
-    const substandardContext = {
+    const substandardContext: import("./substandards/interface.js").SubstandardContext = {
       client: config.client,
       standardScripts: scripts,
       deployment: config.standard.deployment,
       network: config.client.chain.id === 1 ? "mainnet" : "preprod",
+      checkStakeRegistration: config.checkStakeRegistration,
     };
 
     // Initialize and register provided substandards

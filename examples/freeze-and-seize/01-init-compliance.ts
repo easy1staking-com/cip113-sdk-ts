@@ -27,6 +27,7 @@ import {
   loadStandardBlueprint,
   loadFESBlueprint,
   PREPROD_DEPLOYMENT,
+  checkStakeRegistration,
   getTokenName,
 } from "../shared/config.js";
 import { loadState, updateState, requireState } from "../shared/state.js";
@@ -83,6 +84,7 @@ async function main() {
     client,
     standard: { blueprint: standardBlueprint, deployment: PREPROD_DEPLOYMENT },
     substandards: [fes],
+    checkStakeRegistration,
   });
 
   // Build init compliance tx
