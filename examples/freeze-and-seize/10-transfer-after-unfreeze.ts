@@ -53,6 +53,7 @@ async function main() {
     tokenPolicyId: state.tokenPolicyId!,
     assetName: state.assetNameHex!,
     quantity,
+    substandardId: "freeze-and-seize",
   });
 
   await signSubmitAndWait(result, client, "Transfer");

@@ -57,6 +57,7 @@ async function main() {
       tokenPolicyId: state.tokenPolicyId!,
       assetName: state.assetNameHex!,
       quantity: 1n,
+      substandardId: "freeze-and-seize",
     });
 
     console.error("ERROR: Transfer should have been blocked!");

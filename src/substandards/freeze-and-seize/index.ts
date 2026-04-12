@@ -473,8 +473,8 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
-      return { cbor, txHash, tokenPolicyId };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      return { cbor, txHash, tokenPolicyId, _signBuilder };
     },
 
     // ====================================================================
@@ -562,8 +562,8 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
-      return { cbor, txHash };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      return { cbor, txHash, _signBuilder };
     },
 
     // ====================================================================
@@ -685,8 +685,8 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(senderStakingHash) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, senderAddress, senderWalletUtxos);
-      return { cbor, txHash };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, senderAddress, senderWalletUtxos);
+      return { cbor, txHash, _signBuilder };
     },
 
     // ====================================================================
@@ -834,8 +834,8 @@ export function freezeAndSeizeSubstandard(config: {
       const managerPkh = paymentCredentialHash(feePayerAddress);
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(managerPkh) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
-      return { cbor, txHash };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      return { cbor, txHash, _signBuilder };
     },
 
     // ====================================================================
@@ -895,8 +895,8 @@ export function freezeAndSeizeSubstandard(config: {
       const managerPkh = paymentCredentialHash(feePayerAddress);
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(managerPkh) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
-      return { cbor, txHash };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      return { cbor, txHash, _signBuilder };
     },
 
     // ====================================================================
@@ -1007,8 +1007,8 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
-      return { cbor, txHash };
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      return { cbor, txHash, _signBuilder };
     },
   };
 }

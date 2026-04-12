@@ -5,10 +5,10 @@ type SigningClient = {
 };
 
 /**
- * Submit a transaction and wait for on-chain confirmation.
+ * Sign, submit, and wait for on-chain confirmation.
  *
- * Uses the SDK's `_signBuilder` for signing (seed wallet auto-signs)
- * and the Evolution SDK's `awaitTx` for polling Blockfrost.
+ * Uses the SDK's `_signBuilder.signAndSubmit()` which works for both
+ * seed wallets (auto-signs) and CIP-30 wallets (prompts user).
  */
 export async function signSubmitAndWait(
   result: { _signBuilder?: any; cbor: string; txHash: string },
@@ -18,7 +18,7 @@ export async function signSubmitAndWait(
   console.log(`\n[${label}] Signing and submitting...`);
 
   if (!result._signBuilder) {
-    throw new Error(`No _signBuilder on result — was the client a SigningClient?`);
+    throw new Error(`No _signBuilder on result — ensure the SDK returns it. Was the client a SigningClient?`);
   }
 
   const txHash = await result._signBuilder.signAndSubmit();
@@ -28,7 +28,11 @@ export async function signSubmitAndWait(
   console.log(`[${label}] Submitted: ${txHashHex}`);
   console.log(`[${label}] Waiting for confirmation...`);
 
-  await client.awaitTx(txHash, 3_000, 120_000);
+  await client.awaitTx(
+    EvoTransactionHash.fromHex(txHashHex),
+    3_000,
+    120_000,
+  );
   console.log(`[${label}] Confirmed!\n`);
 
   return txHashHex;

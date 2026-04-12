@@ -14,6 +14,9 @@ import {
   EvoAddress,
   EvoTransactionHash,
 } from "@easy1staking/cip113-sdk-ts";
+import * as Assets from "@evolution-sdk/evolution/Assets";
+import * as PolicyId from "@evolution-sdk/evolution/PolicyId";
+import * as AssetName from "@evolution-sdk/evolution/AssetName";
 import { freezeAndSeizeSubstandard } from "@easy1staking/cip113-sdk-ts/freeze-and-seize";
 import {
   createSigningClient,
@@ -56,16 +59,20 @@ async function main() {
 
   console.log(`Searching for token UTxOs at PLB address: ${plbAddr}`);
   const utxos = await client.getUtxos(EvoAddress.fromBech32(plbAddr));
-  const unit = state.tokenPolicyId! + state.assetNameHex!;
-  const tokenUtxo = utxos.find((u: any) => {
-    const assets = u.assets;
-    for (const [, tokens] of assets) {
-      for (const [name, qty] of tokens) {
-        if (name === unit && qty > 0n) return true;
+
+  // Find a UTxO holding our token
+  function hasToken(utxo: any): boolean {
+    const pols = Assets.policies(utxo.assets);
+    for (const pol of pols) {
+      if (PolicyId.toHex(pol) !== state.tokenPolicyId) continue;
+      const toks = Assets.tokens(utxo.assets, pol);
+      for (const [aname, qty] of toks) {
+        if (AssetName.toHex(aname) === state.assetNameHex && qty > 0n) return true;
       }
     }
     return false;
-  });
+  }
+  const tokenUtxo = utxos.find(hasToken);
 
   if (!tokenUtxo) {
     console.error("No token UTxOs found to burn.");
@@ -82,6 +89,7 @@ async function main() {
     assetName: state.assetNameHex!,
     utxoTxHash: txHash,
     utxoOutputIndex: outputIndex,
+    substandardId: "freeze-and-seize",
   });
 
   await signSubmitAndWait(result, client, "Burn");

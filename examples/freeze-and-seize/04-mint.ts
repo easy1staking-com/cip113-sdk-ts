@@ -53,6 +53,7 @@ async function main() {
     assetName: state.assetNameHex!,
     quantity,
     recipientAddress: state.adminAddress!,
+    substandardId: "freeze-and-seize",
   });
 
   await signSubmitAndWait(result, client, "Mint");

@@ -15,6 +15,9 @@ import {
   EvoTransactionHash,
 } from "@easy1staking/cip113-sdk-ts";
 import { freezeAndSeizeSubstandard } from "@easy1staking/cip113-sdk-ts/freeze-and-seize";
+import * as Assets from "@evolution-sdk/evolution/Assets";
+import * as PolicyId from "@evolution-sdk/evolution/PolicyId";
+import * as AssetName from "@evolution-sdk/evolution/AssetName";
 import {
   createSigningClient,
   loadStandardBlueprint,
@@ -53,19 +56,21 @@ async function main() {
   const plbHash = PREPROD_DEPLOYMENT.programmableLogicBase.scriptHash;
   const networkId = client.chain.id;
   const holderPlbAddr = baseAddress(networkId, plbHash, state.frozenAddress!);
-  const unit = state.tokenPolicyId! + state.assetNameHex!;
-
   console.log(`Searching for tokens at frozen address PLB: ${holderPlbAddr}`);
   const utxos = await client.getUtxos(EvoAddress.fromBech32(holderPlbAddr));
 
-  const tokenUtxo = utxos.find((u: any) => {
-    for (const [, tokens] of u.assets) {
-      for (const [name, qty] of tokens) {
-        if (name === unit && qty > 0n) return true;
+  function hasToken(utxo: any): boolean {
+    const pols = Assets.policies(utxo.assets);
+    for (const pol of pols) {
+      if (PolicyId.toHex(pol) !== state.tokenPolicyId) continue;
+      const toks = Assets.tokens(utxo.assets, pol);
+      for (const [aname, qty] of toks) {
+        if (AssetName.toHex(aname) === state.assetNameHex && qty > 0n) return true;
       }
     }
     return false;
-  });
+  }
+  const tokenUtxo = utxos.find(hasToken);
 
   if (!tokenUtxo) {
     console.log("No tokens found at frozen address — nothing to seize.");

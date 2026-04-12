@@ -69,6 +69,7 @@ async function main() {
     tokenPolicyId: state.tokenPolicyId!,
     assetName: state.assetNameHex!,
     quantity,
+    substandardId: "freeze-and-seize",
   });
 
   const txHash = await signSubmitAndWait(result, client, "Transfer");
