@@ -333,6 +333,7 @@ export {
   Assets as EvoAssets,
   TransactionHash as EvoTransactionHash,
   Transaction as EvoTransaction,
+  TransactionWitnessSet as EvoTransactionWitnessSet,
   Data as EvoData,
 } from "@evolution-sdk/evolution";
 
