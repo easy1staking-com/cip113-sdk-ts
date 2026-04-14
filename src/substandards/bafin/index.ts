@@ -184,8 +184,11 @@ async function findConfigUtxo(
 
 async function findGlobalStateUtxo(
   client: EvoClient, networkId: number, globalStatePolicyId: HexString, globalStateScriptHash: HexString,
+  extraUtxos?: EvoUTxO.UTxO[],
 ): Promise<EvoUTxO.UTxO> {
   const gsUnit = globalStatePolicyId + stringToHex("GlobalState");
+  const extra = findInExtraUtxos(extraUtxos, gsUnit);
+  if (extra) return extra;
   const addr = EvoAddress.fromBech32(scriptAddress(networkId, globalStateScriptHash));
   const utxos = await client.getUtxosWithUnit(addr, gsUnit);
   if (utxos.length > 0) return utxos[0];
@@ -193,7 +196,23 @@ async function findGlobalStateUtxo(
 }
 
 /**
+ * Search for a UTxO with a specific unit in a pool of extra UTxOs (chained outputs).
+ * Returns the first match, or undefined.
+ */
+function findInExtraUtxos(extraUtxos: EvoUTxO.UTxO[] | undefined, unit: string): EvoUTxO.UTxO | undefined {
+  if (!extraUtxos) return undefined;
+  return extraUtxos.find((u) => {
+    try {
+      return Assets.getByUnit(u.assets, unit) > 0n;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
  * Find a power user node by credential hash from the linked list.
+ * Searches extraUtxos first (chained outputs), then on-chain.
  */
 async function findPowerUserNode(
   client: EvoClient,
@@ -201,8 +220,11 @@ async function findPowerUserNode(
   powerUsersSpendHash: HexString,
   powerUsersLLPolicyId: HexString,
   credentialHash: HexString,
+  extraUtxos?: EvoUTxO.UTxO[],
 ): Promise<EvoUTxO.UTxO> {
   const nodeUnit = powerUsersLLPolicyId + LL_NODE_PREFIX_HEX + credentialHash;
+  const extra = findInExtraUtxos(extraUtxos, nodeUnit);
+  if (extra) return extra;
   const addr = EvoAddress.fromBech32(scriptAddress(networkId, powerUsersSpendHash));
   const utxos = await client.getUtxosWithUnit(addr, nodeUnit);
   if (utxos.length > 0) return utxos[0];
@@ -211,11 +233,15 @@ async function findPowerUserNode(
 
 /**
  * Find the root node of a linked list.
+ * Searches extraUtxos first (chained outputs), then on-chain.
  */
 async function findLinkedListRoot(
   client: EvoClient, networkId: number, spendScriptHash: HexString, mintPolicyId: HexString,
+  extraUtxos?: EvoUTxO.UTxO[],
 ): Promise<EvoUTxO.UTxO> {
   const rootUnit = mintPolicyId + LL_ROOT_KEY;
+  const extra = findInExtraUtxos(extraUtxos, rootUnit);
+  if (extra) return extra;
   const addr = EvoAddress.fromBech32(scriptAddress(networkId, spendScriptHash));
   const utxos = await client.getUtxosWithUnit(addr, rootUnit);
   if (utxos.length > 0) return utxos[0];
@@ -333,18 +359,19 @@ function addUserRedeemer(
 
 /**
  * MintingLogicScriptWithdrawRedeemer:
- *   Constr(0, [config_ref_input_index, global_state_input_index,
- *              power_user_node_ref_input_index, minted_amount])
+ *   Constr(0, [global_state_reference, power_user_node_ref_input_index, minted_amount])
+ *
+ * GlobalStateRef:
+ *   GlobalStateReferenceInput = Constr(0, [index])  — global state is an input
+ *   GlobalStateOutputIndex = Constr(1, [index])     — global state is an output (first mint)
  */
 function mintingLogicRedeemer(
-  configRefInputIndex: number,
-  globalStateInputIndex: number,
+  globalStateOutputIndex: number,
   powerUserNodeRefInputIndex: number,
   mintedAmount: bigint,
 ): Data.Data {
   return Data.constr(0n, [
-    Data.int(BigInt(configRefInputIndex)),
-    Data.int(BigInt(globalStateInputIndex)),
+    Data.constr(1n, [Data.int(BigInt(globalStateOutputIndex))]),  // GlobalStateOutputIndex
     Data.int(BigInt(powerUserNodeRefInputIndex)),
     Data.int(mintedAmount),
   ]);
@@ -542,28 +569,15 @@ export function bafinSubstandard(config: {
 
       const puSpendAddr = scriptAddress(networkId, scripts.powerUsersSpend.hash);
       const usersSpendAddr = scriptAddress(networkId, scripts.usersSpend.hash);
-      // Global state NFT goes to address with mint policy hash as payment credential
-      // (the mint validator enforces: output.address.payment_credential == Script(policy_id))
-      const globalStateAddr = scriptAddress(networkId, scripts.globalStatePolicyId);
 
       // Root datums for both linked lists
       const rootDatum = linkedListRootDatum();
 
-      // Global state initial datum
-      const gsDatum = globalStateDatumBuilder(
-        false,                                      // transfers_paused = false
-        1_000_000n,                                 // mintable_amount (initial supply cap)
-        scripts.usersLinkedListPolicyId,
-        scripts.powerUsersLinkedListPolicyId,
-        Data.constr(0n, []),                        // security_info = void (placeholder)
-      );
-
       // NFT units
       const puRootUnit = scripts.powerUsersLinkedListPolicyId + LL_ROOT_KEY;
       const usersRootUnit = scripts.usersLinkedListPolicyId + LL_ROOT_KEY;
-      const gsNftUnit = scripts.globalStatePolicyId + stringToHex("GlobalState");
 
-      // Fetch the 3 bootstrap UTxOs — one-shot mint validators require them as inputs
+      // Fetch the 2 bootstrap UTxOs for linked lists
       const allUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
 
       const findBootstrapUtxo = (txInput: { txHash: string; outputIndex: number }) => {
@@ -575,49 +589,35 @@ export function bafinSubstandard(config: {
         return found;
       };
 
-      const gsBootstrapUtxo = findBootstrapUtxo(dep.globalStateInitTxInput);
       const puBootstrapUtxo = findBootstrapUtxo(dep.powerUsersInitTxInput);
       const usersBootstrapUtxo = findBootstrapUtxo(dep.usersInitTxInput);
 
       // Build transaction
       let tx = client.newTx();
 
-      // Consume all 3 bootstrap UTxOs (one-shot nonces)
-      tx = tx.collectFrom({ inputs: [gsBootstrapUtxo, puBootstrapUtxo, usersBootstrapUtxo] });
-
-      // Mint global state NFT (output at index 0 per mint validator check)
-      tx = tx.mintAssets({
-        assets: mintAssetsFromMap(new Map([[gsNftUnit, 1n]])),
-        redeemer: voidData(),
-      });
+      // Consume both bootstrap UTxOs (one-shot nonces)
+      tx = tx.collectFrom({ inputs: [puBootstrapUtxo, usersBootstrapUtxo] });
 
       // Mint root NFTs for both linked lists
-      // power_users Init redeemer: root at output index 1
+      // power_users Init redeemer: root at output index 0
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[puRootUnit, 1n]])),
-        redeemer: linkedListInitRedeemer(1),
+        redeemer: linkedListInitRedeemer(0),
       });
-      // users Init redeemer: root at output index 2
+      // users Init redeemer: root at output index 1
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[usersRootUnit, 1n]])),
-        redeemer: linkedListInitRedeemer(2),
+        redeemer: linkedListInitRedeemer(1),
       });
 
-      // Output 0: global state UTxO (mint validator enforces first output)
-      tx = tx.payToAddress({
-        address: EvoAddress.fromBech32(globalStateAddr),
-        assets: outputAssets(2_000_000n, new Map([[gsNftUnit, 1n]])),
-        datum: new InlineDatum.InlineDatum({ data: gsDatum }),
-      });
-
-      // Output 1: power_users root node
+      // Output 0: power_users root node
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(puSpendAddr),
         assets: outputAssets(2_000_000n, new Map([[puRootUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: rootDatum }),
       });
 
-      // Output 2: users root node
+      // Output 1: users root node
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(usersSpendAddr),
         assets: outputAssets(2_000_000n, new Map([[usersRootUnit, 1n]])),
@@ -625,7 +625,6 @@ export function bafinSubstandard(config: {
       });
 
       // Attach mint scripts
-      tx = tx.attachScript({ script: buildEvoScript(scripts.globalStateMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.powerUsersMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.usersMint.compiledCode) });
 
@@ -645,7 +644,6 @@ export function bafinSubstandard(config: {
         _signBuilder: built._signBuilder,
         metadata: {
           globalStatePolicyId: scripts.globalStatePolicyId,
-          globalStateAddress: globalStateAddr,
           powerUsersLinkedListPolicyId: scripts.powerUsersLinkedListPolicyId,
           usersLinkedListPolicyId: scripts.usersLinkedListPolicyId,
           powerUsersSpendScriptHash: scripts.powerUsersSpend.hash,
@@ -693,15 +691,18 @@ export function bafinSubstandard(config: {
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
       const issuanceCborHexUtxo = await findIssuanceCborHexUtxo(client, networkId, ctx.deployment);
 
-      // 3. Global state UTxO (SPENT — MintSecurity decrements mintable_amount)
-      // Lives at scriptAddress(globalStatePolicyId) — the mint validator enforced this
-      const globalStateAddr = scriptAddress(networkId, scripts.globalStatePolicyId);
-      const globalStateUtxo = await findGlobalStateUtxo(
-        client, networkId, scripts.globalStatePolicyId, scripts.globalStatePolicyId,
-      );
-      const gsDatum = getInlineDatum(globalStateUtxo);
-      if (!gsDatum) throw new Error("GlobalState UTxO has no inline datum");
-      const gsData = parseGlobalStateDatum(gsDatum);
+      // Use chained UTxOs as extra pool for lookups
+      const extraUtxos = chainedUtxos.length > 0 ? chainedUtxos : undefined;
+
+      // 3. Find bootstrap UTxO for global state mint (one-shot, consumed in this tx)
+      const allWalletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
+      const allAvailable = [...allWalletUtxos, ...(extraUtxos ?? [])];
+      const gsBootstrapUtxo = allAvailable.find((u: EvoUTxO.UTxO) => {
+        const hash = EvoTransactionHash.toHex(u.transactionId);
+        return hash === dep.globalStateInitTxInput.txHash
+          && Number(u.index) === dep.globalStateInitTxInput.outputIndex;
+      });
+      if (!gsBootstrapUtxo) throw new Error(`Global state bootstrap UTxO not found: ${dep.globalStateInitTxInput.txHash}#${dep.globalStateInitTxInput.outputIndex}`);
 
       // 4. Power user node (reference input)
       const powerUserUtxo = await findPowerUserNode(
@@ -709,31 +710,20 @@ export function bafinSubstandard(config: {
         scripts.powerUsersSpend.hash,
         scripts.powerUsersLinkedListPolicyId,
         powerUserCredentialHash,
+        extraUtxos,
       );
 
       // 5. Compute reference input indices (ledger sorts ref inputs)
-      // NOTE: config UTxO removed (placeholder empty). configRefIdx set to 0 as unused placeholder.
       const refInputs = [protocolParamsUtxo, issuanceCborHexUtxo, powerUserUtxo];
       const sortedRefInputs = [...refInputs].sort((a, b) => {
-        const aHash = a.transactionId.toString();
-        const bHash = b.transactionId.toString();
+        const aHash = EvoTransactionHash.toHex(a.transactionId);
+        const bHash = EvoTransactionHash.toHex(b.transactionId);
         if (aHash !== bHash) return aHash < bHash ? -1 : 1;
         return Number(a.index) - Number(b.index);
       });
-      const configRefIdx = 0; // placeholder — config not used yet
       const powerUserRefIdx = sortedRefInputs.indexOf(powerUserUtxo);
 
-      // 6. Compute input indices (global state is spent as input)
-      const inputs = [coveringNodeUtxo, globalStateUtxo];
-      const sortedInputs = [...inputs].sort((a, b) => {
-        const aHash = a.transactionId.toString();
-        const bHash = b.transactionId.toString();
-        if (aHash !== bHash) return aHash < bHash ? -1 : 1;
-        return Number(a.index) - Number(b.index);
-      });
-      const globalStateInputIdx = sortedInputs.indexOf(globalStateUtxo);
-
-      // 7. Build datums
+      // 6. Build datums
       const coveringTransferCred = extractCredentialField(coveringDatum, 2) ?? { type: "key" as const, hash: "" };
       const coveringThirdPartyCred = extractCredentialField(coveringDatum, 3) ?? { type: "key" as const, hash: "" };
 
@@ -753,50 +743,48 @@ export function bafinSubstandard(config: {
         globalStateCs: scripts.globalStatePolicyId,
       });
 
-      // Updated global state: decrement mintable_amount
-      const updatedGsDatum = globalStateDatumBuilder(
-        gsData.transfersPaused,
-        gsData.mintableAmount - quantity,
-        gsData.usersLinkedListPolicyId,
-        gsData.powerUserLinkedListPolicyId,
-        gsData.securityInfo,
+      // Global state datum (fresh — minted in this tx, not spent)
+      const gsDatum = globalStateDatumBuilder(
+        false,                                      // transfers_paused = false
+        quantity,                                   // mintable_amount = what we're minting
+        scripts.usersLinkedListPolicyId,
+        scripts.powerUsersLinkedListPolicyId,
+        Data.constr(0n, []),                        // security_info = void (placeholder)
       );
 
-      // 8. Compute output indices
+      // 7. Compute output indices
+      // Output order: [0] user tokens, [1?] CIP-68 ref, [N] global state, [N+1] covering, [N+2] registry
       const globalStateOutputIndex = hasCIP68 ? 2 : 1;
       const registryOutputIndex = hasCIP68 ? 4 : 3;
 
-      // 9. Compute issuance redeemer index in self.redeemers
-      const issuanceRedeemerIdx = computeIssuanceRedeemerIndex(
-        scripts.issuanceMint.hash,
-        ctx.standardScripts.registryMint.hash,
-      );
-
-      // 10. Build redeemers
+      // 8. Build redeemers
       const issuanceRedeemer = issuanceRedeemerFirstMint(scripts.mintingLogic.hash, registryOutputIndex);
       const registryMintRedeemer = registryInsertRedeemer(scripts.issuanceMint.hash, scripts.mintingLogic.hash);
-      const gsSpendRedeemer = globalStateSpendRedeemer(configRefIdx, globalStateOutputIndex, issuanceRedeemerIdx);
-      const mlRedeemer = mintingLogicRedeemer(configRefIdx, globalStateInputIdx, powerUserRefIdx, quantity);
+      // minting_logic redeemer: GlobalStateOutputIndex (minted in this tx, not an input)
+      const mlRedeemer = mintingLogicRedeemer(globalStateOutputIndex, powerUserRefIdx, quantity);
       const tokenDatum = voidData();
 
-      // 11. Build transaction
+      // 9. Build transaction
       const useChaining = chainedUtxos.length > 0;
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
       const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
       const registryMintPolicyId = ctx.standardScripts.registryMint.hash;
+      const globalStateAddr = scriptAddress(networkId, scripts.globalStatePolicyId);
+      const gsNftUnit = scripts.globalStatePolicyId + stringToHex("GlobalState");
 
       const mintEntries = new Map<string, bigint>([[unit, quantity]]);
       if (hasCIP68 && refUnit) mintEntries.set(refUnit, 1n);
       const tokenAssets = mintAssetsFromMap(mintEntries);
       const registryNftUnit = registryMintPolicyId + scripts.tokenPolicyId;
       const registryNftAssets = mintAssetsFromMap(new Map([[registryNftUnit, 1n]]));
+      const gsNftAssets = mintAssetsFromMap(new Map([[gsNftUnit, 1n]]));
       const coveringNftUnit = findCoveringNodeNftUnit(coveringNodeUtxo, registryMintPolicyId);
 
       let tx = client.newTx();
 
-      // Collect from covering node + global state
+      // Collect from covering node + global state bootstrap (one-shot nonce)
       tx = tx.collectFrom({ inputs: [coveringNodeUtxo], redeemer: voidData() });
-      tx = tx.collectFrom({ inputs: [globalStateUtxo], redeemer: gsSpendRedeemer });
+      tx = tx.collectFrom({ inputs: [gsBootstrapUtxo] });
 
       // Withdraw from minting_logic_script
       tx = tx.withdraw({
@@ -805,9 +793,10 @@ export function bafinSubstandard(config: {
         redeemer: mlRedeemer,
       });
 
-      // Mints
+      // Mints: tokens + registry NFT + global state NFT
       tx = tx.mintAssets({ assets: tokenAssets, redeemer: issuanceRedeemer });
       tx = tx.mintAssets({ assets: registryNftAssets, redeemer: registryMintRedeemer });
+      tx = tx.mintAssets({ assets: gsNftAssets, redeemer: voidData() });
 
       // Output 0: user tokens
       tx = tx.payToAddress({
@@ -827,13 +816,11 @@ export function bafinSubstandard(config: {
         });
       }
 
-      // Output N: updated global state
+      // Output N: global state (minted fresh — mint validator enforces output[0] but we use globalStateOutputIndex)
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(globalStateAddr),
-        assets: outputAssets(utxoLovelace(globalStateUtxo), new Map([
-          [scripts.globalStatePolicyId + stringToHex("GlobalState"), 1n],
-        ])),
-        datum: new InlineDatum.InlineDatum({ data: updatedGsDatum }),
+        assets: outputAssets(2_000_000n, new Map([[gsNftUnit, 1n]])),
+        datum: new InlineDatum.InlineDatum({ data: gsDatum }),
       });
 
       // Output N+1: updated covering node
@@ -855,12 +842,12 @@ export function bafinSubstandard(config: {
       // Reference inputs
       tx = tx.readFrom({ referenceInputs: refInputs });
 
-      // Attach scripts (6 total)
+      // Attach scripts (5 total — no globalStateSpend, we're minting not spending)
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registrySpend.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.mintingLogic.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registryMint.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(scripts.globalStateSpend.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(scripts.globalStateMint.compiledCode) });
 
       // Signer: power user
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(powerUserCredentialHash) });
@@ -915,6 +902,8 @@ export async function addPowerUser(opts: {
   feePayerAddress: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   evaluator?: any;
+  /** Extra UTxOs from prior chained txs (searched before on-chain queries) */
+  extraUtxos?: EvoUTxO.UTxO[];
   ownerCredentialHash: string;
   newPowerUser: {
     credentialHash: HexString;
@@ -930,12 +919,13 @@ export async function addPowerUser(opts: {
 }): Promise<UnsignedTx> {
   const { client, scripts: s, networkId, feePayerAddress, ownerCredentialHash, newPowerUser } = opts;
   const chainedUtxos = opts.chainedUtxos ?? [];
+  const extraUtxos = opts.extraUtxos;
 
   const puSpendAddr = scriptAddress(networkId, s.powerUsersSpend.hash);
 
   // Find the root/anchor node (for first insertion, it's the root)
   const anchorUtxo = await findLinkedListRoot(
-    client, networkId, s.powerUsersSpend.hash, s.powerUsersLinkedListPolicyId,
+    client, networkId, s.powerUsersSpend.hash, s.powerUsersLinkedListPolicyId, extraUtxos,
   );
 
   // Build node datum
@@ -949,18 +939,6 @@ export async function addPowerUser(opts: {
   const anchorOutputIdx = 1;
   const newNodeOutputIdx = 2;
 
-  // We need to figure out the anchor input index after sorting.
-  // For now, since we only have one script input (the anchor), its sorted index
-  // among script inputs depends on whether wallet UTxOs sort before it.
-  // The redeemer anchor_node_input_index refers to self.inputs (ALL sorted inputs).
-  // We'll estimate 0 for now — the anchor is likely the only script input,
-  // but wallet inputs may interleave. This may need adjustment at test time.
-
-  // Build redeemers — use index 0 for anchor (will be adjusted)
-  const mintRedeemer = addPowerUserRedeemer(
-    newPowerUser.credentialHash, 0, anchorOutputIdx, newNodeOutputIdx,
-  );
-
   // Updated anchor datum: root with link pointing to new key
   const updatedAnchorDatum = Data.constr(0n, [
     Data.constr(0n, [Data.constr(0n, [])]),                             // Root { data: void }
@@ -969,13 +947,40 @@ export async function addPowerUser(opts: {
 
   let tx = client.newTx();
 
-  // Spend anchor node (StateTransition redeemer delegates to mint validator)
-  tx = tx.collectFrom({ inputs: [anchorUtxo], redeemer: Data.constr(0n, []) }); // StateTransition = Constr(0, [])
+  // Pick a wallet UTxO for fees and explicitly include it so we control the input set
+  const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
+  const allAvail = [...walletUtxos, ...(extraUtxos ?? [])];
+  // Pick the largest ADA-only UTxO for fees
+  const feeUtxo = allAvail
+    .filter(u => {
+      const key = EvoTransactionHash.toHex(u.transactionId) + "#" + u.index;
+      const anchorKey = EvoTransactionHash.toHex(anchorUtxo.transactionId) + "#" + anchorUtxo.index;
+      return key !== anchorKey; // exclude the anchor itself
+    })
+    .sort((a, b) => Number(Assets.lovelaceOf(b.assets) - Assets.lovelaceOf(a.assets)))[0];
 
-  // Mint node NFT
+  // Explicit inputs: anchor + fee UTxO. Sort to compute anchor index.
+  const explicitInputs = [anchorUtxo, feeUtxo].sort((a, b) => {
+    const aHash = EvoTransactionHash.toHex(a.transactionId);
+    const bHash = EvoTransactionHash.toHex(b.transactionId);
+    if (aHash !== bHash) return aHash < bHash ? -1 : 1;
+    return Number(a.index) - Number(b.index);
+  });
+  const anchorKey = EvoTransactionHash.toHex(anchorUtxo.transactionId) + "#" + anchorUtxo.index;
+  const anchorInputIdx = explicitInputs.findIndex(u =>
+    EvoTransactionHash.toHex(u.transactionId) + "#" + u.index === anchorKey
+  );
+
+  // Spend anchor node (StateTransition) + fee UTxO
+  tx = tx.collectFrom({ inputs: [anchorUtxo], redeemer: Data.constr(0n, []) });
+  tx = tx.collectFrom({ inputs: [feeUtxo] });
+
+  // Mint node NFT with pre-computed anchor index
   tx = tx.mintAssets({
     assets: mintAssetsFromMap(new Map([[nodeUnit, 1n]])),
-    redeemer: mintRedeemer,
+    redeemer: addPowerUserRedeemer(
+      newPowerUser.credentialHash, anchorInputIdx, anchorOutputIdx, newNodeOutputIdx,
+    ),
   });
 
   // Output 0: chain output
@@ -1046,26 +1051,24 @@ export async function addUser(opts: {
   chainedUtxos?: EvoUTxO.UTxO[];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   evaluator?: any;
+  /** Extra UTxOs from prior chained txs (searched before on-chain queries) */
+  extraUtxos?: EvoUTxO.UTxO[];
 }): Promise<UnsignedTx> {
   const { client, scripts: s, networkId, feePayerAddress, powerUserCredentialHash, newUserCredentialHash } = opts;
   const chainedUtxos = opts.chainedUtxos ?? [];
+  const extraUtxos = opts.extraUtxos;
 
   const usersSpendAddr = scriptAddress(networkId, s.usersSpend.hash);
 
   // Find the users root/anchor node
   const anchorUtxo = await findLinkedListRoot(
-    client, networkId, s.usersSpend.hash, s.usersLinkedListPolicyId,
+    client, networkId, s.usersSpend.hash, s.usersLinkedListPolicyId, extraUtxos,
   );
 
   // Find power user node (reference input)
   const powerUserUtxo = await findPowerUserNode(
-    client, networkId, s.powerUsersSpend.hash, s.powerUsersLinkedListPolicyId, powerUserCredentialHash,
+    client, networkId, s.powerUsersSpend.hash, s.powerUsersLinkedListPolicyId, powerUserCredentialHash, extraUtxos,
   );
-
-  // Compute power user ref input index
-  const refInputs = [powerUserUtxo];
-  // Since it's the only ref input, its index is 0
-  const puRefIdx = 0;
 
   // Build user datum
   const uData = userDatum(opts.isVerified, opts.isBlacklisted);
@@ -1077,25 +1080,57 @@ export async function addUser(opts: {
   const anchorOutputIdx = 1;
   const newNodeOutputIdx = 2;
 
-  const mintRedeemer = addUserRedeemer(
-    newUserCredentialHash, 0, anchorOutputIdx, newNodeOutputIdx, puRefIdx,
-  );
-
   // Updated anchor datum: root with link to new user
   const updatedAnchorDatum = Data.constr(0n, [
     Data.constr(0n, [Data.constr(0n, [])]),
     Data.constr(0n, [Data.bytearray(newUserCredentialHash)]),
   ]);
 
+  // Compute power user ref input index — sorted among all ref inputs
+  // For now only one ref input, but using sort for correctness
+  const refInputs = [powerUserUtxo];
+  const sortedRefInputs = [...refInputs].sort((a, b) => {
+    const aHash = a.transactionId.toString();
+    const bHash = b.transactionId.toString();
+    if (aHash !== bHash) return aHash < bHash ? -1 : 1;
+    return Number(a.index) - Number(b.index);
+  });
+  const puRefIdx = sortedRefInputs.indexOf(powerUserUtxo);
+
+  // Pick a wallet UTxO for fees
+  const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
+  const allAvail = [...walletUtxos, ...(extraUtxos ?? [])];
+  const userAnchorKey = EvoTransactionHash.toHex(anchorUtxo.transactionId) + "#" + anchorUtxo.index;
+  const feeUtxo = allAvail
+    .filter(u => {
+      const key = EvoTransactionHash.toHex(u.transactionId) + "#" + u.index;
+      return key !== userAnchorKey;
+    })
+    .sort((a, b) => Number(Assets.lovelaceOf(b.assets) - Assets.lovelaceOf(a.assets)))[0];
+
+  // Explicit inputs: anchor + fee UTxO. Sort to compute anchor index.
+  const explicitInputs = [anchorUtxo, feeUtxo].sort((a, b) => {
+    const aHash = EvoTransactionHash.toHex(a.transactionId);
+    const bHash = EvoTransactionHash.toHex(b.transactionId);
+    if (aHash !== bHash) return aHash < bHash ? -1 : 1;
+    return Number(a.index) - Number(b.index);
+  });
+  const anchorInputIdx = explicitInputs.findIndex(u =>
+    EvoTransactionHash.toHex(u.transactionId) + "#" + u.index === userAnchorKey
+  );
+
   let tx = client.newTx();
 
-  // Spend anchor
+  // Spend anchor (StateTransition) + fee UTxO
   tx = tx.collectFrom({ inputs: [anchorUtxo], redeemer: Data.constr(0n, []) });
+  tx = tx.collectFrom({ inputs: [feeUtxo] });
 
-  // Mint user node NFT
+  // Mint user node NFT with pre-computed indices
   tx = tx.mintAssets({
     assets: mintAssetsFromMap(new Map([[nodeUnit, 1n]])),
-    redeemer: mintRedeemer,
+    redeemer: addUserRedeemer(
+      newUserCredentialHash, anchorInputIdx, anchorOutputIdx, newNodeOutputIdx, puRefIdx,
+    ),
   });
 
   // Output 0: chain output

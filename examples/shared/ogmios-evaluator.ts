@@ -6,7 +6,7 @@
  */
 
 import { Effect } from "effect";
-import { Transaction, Address as EvoAddress, Assets } from "@evolution-sdk/evolution";
+import { Transaction, Address as EvoAddress, Assets, Data } from "@evolution-sdk/evolution";
 import type { Evaluator, EvaluationContext } from "@evolution-sdk/evolution/sdk/builders/TransactionBuilder";
 import { EvaluationError } from "@evolution-sdk/evolution/sdk/builders/TransactionBuilder";
 import type { EvalRedeemer } from "@evolution-sdk/evolution/sdk/EvalRedeemer";
@@ -47,7 +47,7 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
               method: "evaluateTransaction",
               params,
               id: null,
-            }),
+            }, (_key, value) => typeof value === "bigint" ? Number(value) : value),
           });
 
           const json = await resp.json();
@@ -105,7 +105,8 @@ function toOgmiosAdditionalUtxos(utxos: UTxO.UTxO[]): any[] {
     const address = EvoAddress.toBech32(utxo.address);
 
     // Build Ogmios value format: { ada: { lovelace }, ...policyId: { assetName: qty } }
-    const value: any = { ada: { lovelace: Number(Assets.lovelaceOf(utxo.assets)) } };
+    const lovelace = Assets.lovelaceOf(utxo.assets);
+    const value: any = { ada: { lovelace: Number(lovelace) } };
     const units = Assets.getUnits(utxo.assets);
     for (const unit of units) {
       if (unit === "lovelace" || unit === "") continue;
@@ -122,10 +123,12 @@ function toOgmiosAdditionalUtxos(utxos: UTxO.UTxO[]): any[] {
       value,
     };
 
-    // Include inline datum if present
+    // Include inline datum as CBOR hex (Ogmios expects a hex string, not an object)
     const datumOpt = (utxo as any).datumOption;
     if (datumOpt?._tag === "InlineDatum" && datumOpt.data != null) {
-      entry.datum = datumOpt.data;
+      entry.datum = Data.toCBORHex(datumOpt.data);
+    } else if (datumOpt?._tag === "DatumHash" && datumOpt.hash != null) {
+      entry.datumHash = Buffer.from(datumOpt.hash).toString("hex");
     }
 
     return entry;
