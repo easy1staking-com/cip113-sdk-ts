@@ -95,11 +95,28 @@ export function loadDummyBlueprint(): PlutusBlueprint {
   return loadJson("blueprints/substandards/dummy/v0.1.0/plutus.json");
 }
 
+export function loadBaFinBlueprint(): PlutusBlueprint {
+  return loadJson("blueprints/substandards/bafin/v0.0.1/plutus.json");
+}
+
 // ---------------------------------------------------------------------------
 // Deployment Params
 // ---------------------------------------------------------------------------
 
-export { PREPROD_DEPLOYMENT } from "./deployment-preprod.js";
+/** @deprecated Use loadDeployment() instead */
+export const PREPROD_DEPLOYMENT: DeploymentParams = JSON.parse(
+  readFileSync(resolve(__dirname, "deployment-preprod.json"), "utf-8"),
+);
+
+/**
+ * Load CIP-113 standard deployment params from a JSON file matching the current network.
+ * Files: deployment-preprod.json, deployment-preview.json, deployment-mainnet.json
+ */
+export function loadDeployment(): DeploymentParams {
+  const network = getNetwork();
+  const fullPath = resolve(__dirname, `deployment-${network}.json`);
+  return JSON.parse(readFileSync(fullPath, "utf-8"));
+}
 
 export function getTokenName(): string {
   const custom = getEnv("TOKEN_NAME", false);
