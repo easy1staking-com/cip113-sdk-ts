@@ -20,11 +20,11 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "peerDependencies": {
-    "@evolution-sdk/evolution": "^0.5.2",
+    "@evolution-sdk/evolution": "^0.5.3",
     "effect": "^3.0.0"
   },
   "devDependencies": {
-    "@evolution-sdk/evolution": "^0.5.2",
+    "@evolution-sdk/evolution": "file:../evolution-sdk/packages/evolution",
     "@types/node": "^25.5.2",
     "effect": "^3.0.0",
     "typescript": "^5.5.0"

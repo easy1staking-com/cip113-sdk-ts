@@ -28,8 +28,8 @@ async function main() {
     "blacklistNodePolicyId", "blacklistInitTxInput", "frozenAddress");
 
   // Use the frozen address's wallet as sender
-  const secondClient = createSecondClient();
-  const client = secondClient || createSigningClient();
+  const secondClient = await createSecondClient();
+  const client = secondClient || (await createSigningClient());
   const senderAddress = state.frozenAddress!;
 
   console.log(`Attempting transfer from frozen address: ${senderAddress}`);

@@ -15,11 +15,15 @@
     "fes:unfreeze":           "tsx freeze-and-seize/09-unfreeze.ts",
     "fes:transfer-unfrozen":  "tsx freeze-and-seize/10-transfer-after-unfreeze.ts",
     "dummy:setup":            "tsx dummy/00-setup.ts",
-    "dummy:transfer":         "tsx dummy/01-transfer.ts"
+    "dummy:transfer":         "tsx dummy/01-transfer.ts",
+    "yaci:reset":             "tsx shared/yaci-cli.ts reset",
+    "yaci:topup":             "tsx shared/yaci-cli.ts topup",
+    "yaci:bootstrap":         "tsx bafin/00-deploy-standard.ts",
+    "yaci:bafin":             "tsx bafin/run-all.ts"
   },
   "dependencies": {
     "@easy1staking/cip113-sdk-ts": "file:..",
-    "@evolution-sdk/evolution": "^0.5.2",
+    "@evolution-sdk/evolution": "file:../../evolution-sdk/packages/evolution",
     "effect": "^3.0.0",
     "dotenv": "^16.4.0"
   },

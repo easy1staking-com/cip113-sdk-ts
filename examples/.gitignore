@@ -2,3 +2,4 @@
 .state.json
 node_modules/
 dist/
+shared/deployment-yaci.json

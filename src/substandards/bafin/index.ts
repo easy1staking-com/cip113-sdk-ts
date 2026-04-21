@@ -753,8 +753,8 @@ export function bafinSubstandard(config: {
       );
 
       // 7. Compute output indices
-      // Output order: [0] user tokens, [1?] CIP-68 ref, [N] global state, [N+1] covering, [N+2] registry
-      const globalStateOutputIndex = hasCIP68 ? 2 : 1;
+      // Output order: [0] global state, [1] user tokens, [2?] CIP-68 ref, [N] covering, [N+1] registry
+      const globalStateOutputIndex = 0;
       const registryOutputIndex = hasCIP68 ? 4 : 3;
 
       // 8. Build redeemers
@@ -786,9 +786,28 @@ export function bafinSubstandard(config: {
       tx = tx.collectFrom({ inputs: [coveringNodeUtxo], redeemer: voidData() });
       tx = tx.collectFrom({ inputs: [gsBootstrapUtxo] });
 
+      // Register the minting_logic_script stake credential so we can withdraw from it.
+      // The BAFIN validators now allow the publish purpose (returns True).
+      // Conway forbids RegCert + withdraw-0 for the same script cred in one tx, so
+      // skip the RegCert if the cred is already registered (pre-registered via
+      // addUser's `registerStakeScriptHash` option, for example).
+      const mintingLogicStakeCred = Credential.makeScriptHash(
+        new Uint8Array(Buffer.from(scripts.mintingLogic.hash, "hex"))
+      );
+      const mlRewardAddr = rewardAddress(networkId, scripts.mintingLogic.hash);
+      const alreadyRegistered = ctx.checkStakeRegistration
+        ? await ctx.checkStakeRegistration(mlRewardAddr)
+        : false;
+      if (!alreadyRegistered) {
+        tx = tx.registerStake({
+          stakeCredential: mintingLogicStakeCred,
+          redeemer: voidData(),
+        });
+      }
+
       // Withdraw from minting_logic_script
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.mintingLogic.hash, "hex"))),
+        stakeCredential: mintingLogicStakeCred,
         amount: 0n,
         redeemer: mlRedeemer,
       });
@@ -798,14 +817,21 @@ export function bafinSubstandard(config: {
       tx = tx.mintAssets({ assets: registryNftAssets, redeemer: registryMintRedeemer });
       tx = tx.mintAssets({ assets: gsNftAssets, redeemer: voidData() });
 
-      // Output 0: user tokens
+      // Output 0: global state NFT (mint validator enforces output[0])
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(globalStateAddr),
+        assets: outputAssets(2_000_000n, new Map([[gsNftUnit, 1n]])),
+        datum: new InlineDatum.InlineDatum({ data: gsDatum }),
+      });
+
+      // Output 1: user tokens
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
         assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 
-      // Output 1 (CIP-68 only): reference token
+      // Output 2 (CIP-68 only): reference token
       if (hasCIP68 && refUnit) {
         const issuerPlbAddr = baseAddress(networkId, plbHash, feePayerAddress);
         const cip68Datum = buildCIP68FTDatum(params.cip68Metadata!);
@@ -815,13 +841,6 @@ export function bafinSubstandard(config: {
           datum: new InlineDatum.InlineDatum({ data: cip68Datum }),
         });
       }
-
-      // Output N: global state (minted fresh — mint validator enforces output[0] but we use globalStateOutputIndex)
-      tx = tx.payToAddress({
-        address: EvoAddress.fromBech32(globalStateAddr),
-        assets: outputAssets(2_000_000n, new Map([[gsNftUnit, 1n]])),
-        datum: new InlineDatum.InlineDatum({ data: gsDatum }),
-      });
 
       // Output N+1: updated covering node
       const coveringNodeTokenMap = new Map<string, bigint>();
@@ -1174,5 +1193,60 @@ export async function addUser(opts: {
     chainAvailable: built.chainAvailable,
     _signBuilder: built._signBuilder,
     metadata: { userNodeUnit: nodeUnit },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Exported helper: registerMintingLogicStake
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a script's stake credential in a dedicated minimal tx.
+ *
+ * Used to pre-register `minting_logic_script`'s stake credential before
+ * `register()`. Conway ledger rules reject RegCert + withdraw-0 for the same
+ * script cred in one tx, so this runs as a standalone step.
+ *
+ * The script must define a `publish` handler that returns True for its own
+ * RegCert redeemer (BaFin's minting_logic does so unconditionally).
+ */
+export async function registerMintingLogicStake(opts: {
+  client: EvoClient;
+  mintingLogic: PlutusScript;
+  feePayerAddress: string;
+  /**
+   * UTxO refs (txHash#outputIndex) to exclude from coin selection. Typically
+   * the bootstrap/sentinel UTxOs that later steps must consume as one-shot seeds.
+   */
+  excludeUtxoRefs?: ReadonlyArray<{ txHash: string; outputIndex: number }>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  evaluator?: any;
+}): Promise<UnsignedTx> {
+  const { client, mintingLogic, feePayerAddress } = opts;
+  let tx = client.newTx();
+  tx = tx.registerStake({
+    stakeCredential: Credential.makeScriptHash(
+      new Uint8Array(Buffer.from(mintingLogic.hash, "hex")),
+    ),
+    redeemer: voidData(),
+  });
+  tx = tx.attachScript({ script: buildEvoScript(mintingLogic.compiledCode) });
+
+  let available: EvoUTxO.UTxO[] | undefined;
+  if (opts.excludeUtxoRefs && opts.excludeUtxoRefs.length > 0) {
+    const excl = new Set(opts.excludeUtxoRefs.map(r => `${r.txHash}#${r.outputIndex}`));
+    const wallet = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
+    available = wallet.filter(u =>
+      !excl.has(`${EvoTransactionHash.toHex(u.transactionId)}#${Number(u.index)}`)
+    );
+  }
+
+  const built = await buildAndSerialize(tx, feePayerAddress, available, false, opts.evaluator);
+  return {
+    cbor: built.cbor,
+    txHash: built.txHash,
+    chainAvailable: built.chainAvailable,
+    _signBuilder: built._signBuilder,
+    metadata: { mintingLogicStakeScriptHash: mintingLogic.hash },
   };
 }

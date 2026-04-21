@@ -28,10 +28,10 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "tokenPolicyId", "assetNameHex",
     "blacklistNodePolicyId", "blacklistInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
 
   // Determine target address to freeze
-  const secondClient = createSecondClient();
+  const secondClient = await createSecondClient();
   const targetAddress = secondClient
     ? await getWalletAddress(secondClient)
     : state.adminAddress!;

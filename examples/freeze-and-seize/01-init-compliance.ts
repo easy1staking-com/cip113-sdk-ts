@@ -39,7 +39,7 @@ async function main() {
   const state = loadState();
   requireState(state, "adminAddress", "adminPkh");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = state.adminAddress!;
   const adminPkh = state.adminPkh!;
   const tokenName = getTokenName();

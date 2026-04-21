@@ -28,6 +28,11 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
       Effect.tryPromise({
         try: async () => {
           const cbor = Transaction.toCBORHex(tx);
+          if (process.env.DUMP_TX_CBOR) {
+            console.error(`\n=== OGMIOS EVAL CBOR (${cbor.length} chars) ===`);
+            console.error(cbor);
+            console.error(`=== END CBOR ===\n`);
+          }
 
           // Convert additional UTxOs to Ogmios format
           const ogmiosAdditionalUtxo = additionalUtxos

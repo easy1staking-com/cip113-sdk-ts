@@ -19,6 +19,7 @@ import {
   loadDeployment,
 } from "../shared/config.js";
 import { loadState, updateState, requireState } from "../shared/state.js";
+import { signSubmitAndWait } from "../shared/wait-tx.js";
 
 async function main() {
   console.log("=== CIP-113 BaFin: Add Power User ===\n");
@@ -27,7 +28,7 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "globalStateInitTxInput",
     "powerUsersInitTxInput", "usersInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = state.adminAddress!;
   const walletPkh = state.adminPkh!;
 
@@ -54,9 +55,14 @@ async function main() {
   });
 
   const resolved = bafin.getScripts();
-  const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
-  const evaluator = createOgmiosEvaluator(ogmiosUrl);
-  console.log(`Ogmios evaluator: ${ogmiosUrl}`);
+  let evaluator: ReturnType<typeof createOgmiosEvaluator> | undefined;
+  if (process.env.SKIP_OGMIOS) {
+    console.log("Ogmios evaluator: SKIPPED (SKIP_OGMIOS set) — using default (Blockfrost)");
+  } else {
+    const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
+    evaluator = createOgmiosEvaluator(ogmiosUrl);
+    console.log(`Ogmios evaluator: ${ogmiosUrl}`);
+  }
 
   // Build add power user tx
   console.log("\nBuilding add power user transaction...");
@@ -91,10 +97,9 @@ async function main() {
   console.log(`\nMetadata:`);
   console.log(JSON.stringify(result.metadata, null, 2));
 
-  // Uncomment to submit:
-  // const txHash = await signSubmitAndWait(result, client, "Add Power User");
-  // updateState({ addPowerUserTxHash: txHash });
-  // console.log("Submitted. Run: npx tsx examples/bafin/03-add-user.ts");
+  const txHash = await signSubmitAndWait(result, client, "Add Power User");
+  updateState({ addPowerUserTxHash: txHash });
+  console.log("Submitted. Run: npx tsx examples/bafin/03-add-user.ts");
 }
 
 main().catch((e) => {

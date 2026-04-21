@@ -18,7 +18,8 @@ import {
   loadBaFinBlueprint,
   loadDeployment,
 } from "../shared/config.js";
-import { loadState, requireState } from "../shared/state.js";
+import { loadState, updateState, requireState } from "../shared/state.js";
+import { signSubmitAndWait } from "../shared/wait-tx.js";
 
 async function main() {
   console.log("=== CIP-113 BaFin: Add User ===\n");
@@ -27,7 +28,7 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "globalStateInitTxInput",
     "powerUsersInitTxInput", "usersInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = state.adminAddress!;
   const walletPkh = state.adminPkh!;
 
@@ -83,10 +84,9 @@ async function main() {
   console.log(`\nMetadata:`);
   console.log(JSON.stringify(result.metadata, null, 2));
 
-  // Uncomment to submit:
-  // const txHash = await signSubmitAndWait(result, client, "Add User");
-  // updateState({ addUserTxHash: txHash });
-  // console.log("Submitted. Run: npx tsx examples/bafin/04-register.ts");
+  const txHash = await signSubmitAndWait(result, client, "Add User");
+  updateState({ addUserTxHash: txHash });
+  console.log("Submitted. Run: npx tsx examples/bafin/04-register.ts");
 }
 
 main().catch((e) => {

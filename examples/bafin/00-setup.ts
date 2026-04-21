@@ -33,7 +33,7 @@ async function main() {
   const network = getNetwork();
   console.log(`Network: ${network}`);
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = await getWalletAddress(client);
   const walletPkh = getAdminPkh(address);
 

@@ -28,7 +28,7 @@ async function main() {
   const state = loadState();
   requireState(state, "adminAddress", "tokenPolicyId", "assetNameHex");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
 
   const dummy = dummySubstandard({ blueprint: loadDummyBlueprint() });
   const protocol = CIP113.init({

@@ -29,11 +29,11 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "tokenPolicyId", "assetNameHex",
     "blacklistNodePolicyId", "blacklistInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const senderAddress = state.adminAddress!;
 
   // Determine recipient
-  const secondClient = createSecondClient();
+  const secondClient = await createSecondClient();
   const recipientAddress = secondClient
     ? await getWalletAddress(secondClient)
     : senderAddress; // transfer to self if no second wallet

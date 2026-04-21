@@ -34,7 +34,7 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "tokenPolicyId", "assetNameHex",
     "blacklistNodePolicyId", "blacklistInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
 
   const fes = freezeAndSeizeSubstandard({
     blueprint: loadFESBlueprint(),

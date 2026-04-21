@@ -29,13 +29,18 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "assetName", "assetNameHex",
     "globalStateInitTxInput", "powerUsersInitTxInput", "usersInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = state.adminAddress!;
   const walletPkh = state.adminPkh!;
 
-  const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
-  const evaluator = createOgmiosEvaluator(ogmiosUrl);
-  console.log(`Ogmios: ${ogmiosUrl}`);
+  let evaluator: ReturnType<typeof createOgmiosEvaluator> | undefined;
+  if (process.env.SKIP_OGMIOS) {
+    console.log("Ogmios: SKIPPED (SKIP_OGMIOS set) — using default (Blockfrost)");
+  } else {
+    const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
+    evaluator = createOgmiosEvaluator(ogmiosUrl);
+    console.log(`Ogmios: ${ogmiosUrl}`);
+  }
   console.log(`Wallet: ${address}\n`);
 
   // Create BaFin substandard
@@ -50,7 +55,7 @@ async function main() {
     },
   });
 
-  bafin.setEvaluator(evaluator);
+  if (evaluator) bafin.setEvaluator(evaluator);
 
   const protocol = CIP113.init({
     client,

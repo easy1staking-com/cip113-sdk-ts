@@ -30,7 +30,7 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "globalStateInitTxInput",
     "powerUsersInitTxInput", "usersInitTxInput");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = state.adminAddress!;
 
   console.log(`Wallet: ${address}`);
@@ -50,9 +50,13 @@ async function main() {
   });
 
   // Use Ogmios for tx evaluation (returns Aiken stack traces on failure)
-  const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
-  console.log(`Ogmios evaluator: ${ogmiosUrl}`);
-  bafin.setEvaluator(createOgmiosEvaluator(ogmiosUrl));
+  if (process.env.SKIP_OGMIOS) {
+    console.log("Ogmios evaluator: SKIPPED (SKIP_OGMIOS set) — using default (Blockfrost)");
+  } else {
+    const ogmiosUrl = process.env.OGMIOS_URL || "http://panic-station:31357";
+    console.log(`Ogmios evaluator: ${ogmiosUrl}`);
+    bafin.setEvaluator(createOgmiosEvaluator(ogmiosUrl));
+  }
 
   // Initialize protocol
   const protocol = CIP113.init({
@@ -78,10 +82,9 @@ async function main() {
   console.log(`\nMetadata:`);
   console.log(JSON.stringify(result.metadata, null, 2));
 
-  // Uncomment to submit:
-  // const txHash = await signSubmitAndWait(result, client, "Init Linked Lists");
-  // updateState({ initLinkedListsTxHash: txHash });
-  // console.log("Submitted. Run: npx tsx examples/bafin/02-add-power-user.ts");
+  const txHash = await signSubmitAndWait(result, client, "Init Linked Lists");
+  updateState({ initLinkedListsTxHash: txHash });
+  console.log("Submitted. Run: npx tsx examples/bafin/02-add-power-user.ts");
 }
 
 main().catch((e) => {

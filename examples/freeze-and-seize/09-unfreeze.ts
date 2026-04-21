@@ -26,7 +26,7 @@ async function main() {
   requireState(state, "adminAddress", "adminPkh", "tokenPolicyId", "assetNameHex",
     "blacklistNodePolicyId", "blacklistInitTxInput", "frozenAddress");
 
-  const client = createSigningClient();
+  const client = await createSigningClient();
 
   console.log(`Unfreezing address: ${state.frozenAddress}`);
 

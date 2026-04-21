@@ -24,7 +24,7 @@ async function main() {
   console.log(`Network: ${network}`);
 
   // Primary wallet
-  const client = createSigningClient();
+  const client = await createSigningClient();
   const address = await getWalletAddress(client);
   const adminPkh = getAdminPkh(address);
 
@@ -46,7 +46,7 @@ async function main() {
   }
 
   // Optional second wallet
-  const secondClient = createSecondClient();
+  const secondClient = await createSecondClient();
   if (secondClient) {
     const secondAddr = await getWalletAddress(secondClient);
     console.log(`\nSecond wallet: ${secondAddr}`);
