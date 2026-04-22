@@ -1,11 +1,22 @@
 /**
- * CIP-113 standard bootstrap for a fresh devnet (Yaci DevKit).
+ * CIP-113 standard bootstrap — network-aware.
+ *
+ * Deploys the CIP-113 standard scripts (protocol params, directory, issuance,
+ * PLB, PLG, registry, always-fail sinks) to the network selected by the
+ * NETWORK env var. Emits examples/shared/deployment-${NETWORK}.json.
+ *
+ *   NETWORK=yaci    → deployment-yaci.json    (auto-topup via Yaci admin API)
+ *   NETWORK=preview → deployment-preview.json (wallet must be pre-funded)
+ *   NETWORK=preprod → deployment-preprod.json (wallet must be pre-funded)
+ *   NETWORK=mainnet → refused; adjust if you really mean it
+ *
+ * Re-run whenever the standard blueprint (blueprints/standard/**) changes or
+ * after `yaci:reset`. The self-check at the end round-trips the generated
+ * deployment JSON through the SDK resolver to catch shape drift.
  *
  * TS port of cardano-foundation/cip113-programmable-tokens
  *   src/programmable-tokens-offchain-java/src/test/java/org/cardanofoundation/cip113/standard/
  *   PreviewProtocolDeploymentMintTest.java
- *
- * Emits examples/shared/deployment-yaci.json. Re-run after `yaci:reset`.
  */
 
 import { writeFileSync, existsSync, readFileSync } from "fs";
@@ -42,12 +53,19 @@ import {
   getWalletAddress,
   loadStandardBlueprint,
   isYaci,
+  getNetwork,
 } from "../shared/config.js";
 import { topupAddress } from "../shared/yaci.js";
 import { createOgmiosEvaluator } from "../shared/ogmios-evaluator.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEPLOYMENT_PATH = resolve(__dirname, "..", "shared", "deployment-yaci.json");
+const NETWORK = getNetwork();
+const DEPLOYMENT_PATH = resolve(
+  __dirname,
+  "..",
+  "shared",
+  `deployment-${NETWORK}.json`,
+);
 
 // Two fixed 32-byte nonces so the two always_fail instances have distinct hashes.
 // Any pair of distinct random hex strings works — these mirror the Java test.
@@ -79,12 +97,14 @@ function scriptBodyHex(compiledCode: string): string {
 }
 
 async function main() {
-  if (!isYaci()) {
-    console.error("This bootstrap is for NETWORK=yaci only. Refusing to run.");
+  if (NETWORK === "mainnet") {
+    console.error(
+      "Refusing to bootstrap on mainnet. If you truly intend to, edit this guard.",
+    );
     process.exit(1);
   }
 
-  console.log("=== CIP-113 standard bootstrap (Yaci DevKit) ===\n");
+  console.log(`=== CIP-113 standard bootstrap (NETWORK=${NETWORK}) ===\n`);
 
   const client = await createSigningClient();
   const address = await getWalletAddress(client);
@@ -99,13 +119,21 @@ async function main() {
   console.log(`Balance: ${Number(balance) / 1e6} ADA (${utxos.length} UTxOs)`);
 
   if (balance < MIN_WALLET_ADA) {
-    console.log(`Topping up ${Number(TOPUP_ADA) / 1e6} ADA via Yaci admin API...`);
-    await topupAddress(address, TOPUP_ADA);
-    // Topup is instant in Yaci but we wait one block for indexing.
-    await new Promise((r) => setTimeout(r, 3_000));
-    utxos = await client.getUtxos(evoAddr);
-    balance = utxos.reduce((s: bigint, u: EvoUTxO.UTxO) => s + EvoAssets.lovelaceOf(u.assets), 0n);
-    console.log(`Balance after topup: ${Number(balance) / 1e6} ADA (${utxos.length} UTxOs)`);
+    if (isYaci()) {
+      console.log(`Topping up ${Number(TOPUP_ADA) / 1e6} ADA via Yaci admin API...`);
+      await topupAddress(address, TOPUP_ADA);
+      // Topup is instant in Yaci but we wait one block for indexing.
+      await new Promise((r) => setTimeout(r, 3_000));
+      utxos = await client.getUtxos(evoAddr);
+      balance = utxos.reduce((s: bigint, u: EvoUTxO.UTxO) => s + EvoAssets.lovelaceOf(u.assets), 0n);
+      console.log(`Balance after topup: ${Number(balance) / 1e6} ADA (${utxos.length} UTxOs)`);
+    } else {
+      console.error(
+        `Insufficient balance: need ≥${Number(MIN_WALLET_ADA) / 1e6} ADA on ${NETWORK}. ` +
+        `Fund ${address} from the ${NETWORK} faucet and re-run.`,
+      );
+      process.exit(1);
+    }
   }
 
   // ---- Step 1: fragment into two small seed UTxOs -----------------------
@@ -283,7 +311,15 @@ async function main() {
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(plg.compiledCode) });
 
+  // Default Ogmios URL matches Yaci DevKit; for preview/preprod the user is
+  // expected to export OGMIOS_URL (e.g. SSH tunnel to panic-station:31357).
   const ogmiosUrl = process.env.OGMIOS_URL ?? "http://localhost:1337";
+  if (!process.env.OGMIOS_URL && !isYaci()) {
+    console.warn(
+      `Warning: OGMIOS_URL not set; falling back to ${ogmiosUrl}. ` +
+      `Export OGMIOS_URL for ${NETWORK} (e.g. http://127.0.0.1:31357 via tunnel).`,
+    );
+  }
   const built = await tx.build({
     changeAddress: evoAddr,
     evaluator: createOgmiosEvaluator(ogmiosUrl),
@@ -348,7 +384,7 @@ async function main() {
 
   writeFileSync(DEPLOYMENT_PATH, JSON.stringify(deployment, null, 2));
   console.log(`\nDeployment written: ${DEPLOYMENT_PATH}`);
-  console.log("\nNext: NETWORK=yaci npm run yaci:bafin");
+  console.log(`\nNext: NETWORK=${NETWORK} npx tsx bafin/run-all.ts`);
 
   // Prove it parses back from disk.
   const reread = JSON.parse(readFileSync(DEPLOYMENT_PATH, "utf-8"));

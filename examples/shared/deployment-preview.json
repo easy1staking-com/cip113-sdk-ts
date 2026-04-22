@@ -1,46 +1,46 @@
 {
-  "txHash": "1d4e7df747622969c1d0864b3a41c30e64a79ec5187cb3889efa59a79b10853f",
+  "txHash": "61b17b953c57a3599d06b325d4efd3f1cad45ae377424d03b98251872752f849",
   "protocolParams": {
     "txInput": {
-      "txHash": "db2010ea56b12223ff9a15fdb40b083edf661afaa59614b6ac0a21fa4d37bb35",
-      "outputIndex": 5
+      "txHash": "480be8741d07e342edf392df63f4f342b61ba62629502f2b4147a20574cfd547",
+      "outputIndex": 0
     },
-    "policyId": "42bce42438c3889104916daf6179be64d7009a9dfd192de88332e054",
+    "policyId": "c0b3cf1080f8eced8d66baad05dab80e9e526d81a45f8afe40b73593",
     "alwaysFailScriptHash": "7df9369eb2ded40f5eac15bcb1ee0562d3dc53def0dab4ad26bae4e9"
   },
   "programmableLogicGlobal": {
-    "policyId": "3978b3097c906fedf8cedfb886c28dab138fda1d3c5c96a1f467c416",
-    "scriptHash": "3978b3097c906fedf8cedfb886c28dab138fda1d3c5c96a1f467c416"
+    "policyId": "6c2f71c44e8e093a7d0fa09d00d5ae8b660c67b0ca097d2f6d6c790e",
+    "scriptHash": "6c2f71c44e8e093a7d0fa09d00d5ae8b660c67b0ca097d2f6d6c790e"
   },
   "programmableLogicBase": {
-    "scriptHash": "d0c5433c422b815883b22ec43d4c512e92579b5dd5846e6b3aeafd6f"
+    "scriptHash": "efb8b0dcf342f3da7ebfa12c0e0d741bfe82123de5acd28f4c82a910"
   },
   "issuance": {
     "txInput": {
-      "txHash": "db2010ea56b12223ff9a15fdb40b083edf661afaa59614b6ac0a21fa4d37bb35",
-      "outputIndex": 6
+      "txHash": "480be8741d07e342edf392df63f4f342b61ba62629502f2b4147a20574cfd547",
+      "outputIndex": 1
     },
-    "policyId": "36fcb8dda342acd4f1e428b3457995a932cf49afe9e614b9734469e9",
+    "policyId": "9e00b9c32464a0c362300c0a1f42491d3654939e86ced6dcf2fec1ca",
     "alwaysFailScriptHash": "5ff3439ab5b059889fbaf360195275d8471de9ad939e1bb6c3a7b74c"
   },
   "directoryMint": {
     "txInput": {
-      "txHash": "db2010ea56b12223ff9a15fdb40b083edf661afaa59614b6ac0a21fa4d37bb35",
-      "outputIndex": 5
+      "txHash": "480be8741d07e342edf392df63f4f342b61ba62629502f2b4147a20574cfd547",
+      "outputIndex": 0
     },
-    "issuanceScriptHash": "36fcb8dda342acd4f1e428b3457995a932cf49afe9e614b9734469e9",
-    "scriptHash": "2d355453913139903d650aa145a7885fec596eecb5f1d29d780d6680"
+    "issuanceScriptHash": "9e00b9c32464a0c362300c0a1f42491d3654939e86ced6dcf2fec1ca",
+    "scriptHash": "3b39527f38d335153b036077a0b6069d5927e6aa39727b2ea8d8f52e"
   },
   "directorySpend": {
-    "policyId": "42bce42438c3889104916daf6179be64d7009a9dfd192de88332e054",
-    "scriptHash": "9937c63638bc4c5b773d280957e25beb00347db24f208395499af143"
+    "policyId": "c0b3cf1080f8eced8d66baad05dab80e9e526d81a45f8afe40b73593",
+    "scriptHash": "705435c258e6880dc9b5d45e37fc5326c3585597c8081a8eb4c1f876"
   },
   "programmableBaseRefInput": {
-    "txHash": "1d4e7df747622969c1d0864b3a41c30e64a79ec5187cb3889efa59a79b10853f",
+    "txHash": "61b17b953c57a3599d06b325d4efd3f1cad45ae377424d03b98251872752f849",
     "outputIndex": 3
   },
   "programmableGlobalRefInput": {
-    "txHash": "1d4e7df747622969c1d0864b3a41c30e64a79ec5187cb3889efa59a79b10853f",
+    "txHash": "61b17b953c57a3599d06b325d4efd3f1cad45ae377424d03b98251872752f849",
     "outputIndex": 4
   }
 }

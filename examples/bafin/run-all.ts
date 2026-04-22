@@ -24,6 +24,7 @@ import {
 } from "@easy1staking/cip113-sdk-ts";
 import { bafinSubstandard, addPowerUser, addUser, registerMintingLogicStake } from "../../src/substandards/bafin/index.js";
 import { createOgmiosEvaluator } from "../shared/ogmios-evaluator.js";
+import { createBlockfrostEvaluator } from "../shared/blockfrost-evaluator.js";
 import {
   createSigningClient,
   getWalletAddress,
@@ -33,6 +34,7 @@ import {
   loadDeployment,
   getTokenName,
   checkStakeRegistration,
+  getNetwork,
 } from "../shared/config.js";
 import { updateState } from "../shared/state.js";
 
@@ -125,7 +127,14 @@ async function main() {
   });
 
   const ogmiosUrl = process.env.SKIP_OGMIOS ? undefined : process.env.OGMIOS_URL;
-  const evaluator = ogmiosUrl ? createOgmiosEvaluator(ogmiosUrl) : undefined;
+  let evaluator: ReturnType<typeof createOgmiosEvaluator> | undefined;
+  if (ogmiosUrl) {
+    evaluator = createOgmiosEvaluator(ogmiosUrl);
+  } else if (process.env.VERBOSE_BF_EVAL) {
+    const bfProject = process.env.BLOCKFROST_PROJECT_ID || "";
+    const bfBase = process.env.BLOCKFROST_URL || `https://cardano-${process.env.NETWORK || "preview"}.blockfrost.io/api/v0`;
+    evaluator = createBlockfrostEvaluator(bfBase, bfProject);
+  }
   if (evaluator) {
     bafin.setEvaluator(evaluator);
     console.log(`Ogmios evaluator: ${ogmiosUrl}`);
@@ -160,7 +169,8 @@ async function main() {
     console.log(`  waiting...`);
     await client.awaitTx(EvoTransactionHash.fromHex(hex), 3_000, 180_000);
     console.log(`  confirmed. Letting Blockfrost index...`);
-    await new Promise((r) => setTimeout(r, 8_000));
+    const indexLagMs = getNetwork() === "yaci" ? 1_000 : 30_000;
+    await new Promise((r) => setTimeout(r, indexLagMs));
     return hex;
   };
 
