@@ -122,7 +122,7 @@ export function loadDummyBlueprint(): PlutusBlueprint {
 }
 
 export function loadBaFinBlueprint(): PlutusBlueprint {
-  return loadJson("blueprints/substandards/bafin/v0.0.1/plutus.json");
+  return loadJson("blueprints/substandards/bafin/v0.2.0/plutus.json");
 }
 
 // ---------------------------------------------------------------------------

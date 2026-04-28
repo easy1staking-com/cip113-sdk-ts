@@ -1,19 +1,12 @@
 /**
- * BaFin securities script builders.
+ * BaFin securities script builders (Track 4 — hybrid TEL + denylist design).
  *
- * Parameterizes all BaFin validators from the blueprint:
- * - minting_logic_script.withdraw — controls mint/burn authorization
- * - transfer_logic_script.withdraw — controls transfers with KYC checks
- * - third_party_transfer_logic_script.withdraw — controls forced transfers
- * - global_state_spend_validator.spend — guards global state UTxO updates
- * - power_users.mint — linked list init/add/remove for power users
- * - power_users_validator.spend — spend guard for power user nodes
- * - users.mint — linked list init/add/remove for users
- * - users_validator.spend — spend guard for user nodes
+ * Parameterizes all BaFin validators from the blueprint. Signatures reflect
+ * the admin-in-datum refactor and the users-LL → denylist-LL rename.
  */
 
 import { Data } from "@evolution-sdk/evolution";
-import type { HexString, PlutusBlueprint, PlutusScript, ScriptHash, TxInput } from "../../types.js";
+import type { HexString, PlutusBlueprint, PlutusScript, TxInput } from "../../types.js";
 import { getValidatorCode } from "../../standard/blueprint.js";
 import { parameterizeScript, outputReference } from "../../core/evo-utils.js";
 
@@ -24,13 +17,14 @@ import { parameterizeScript, outputReference } from "../../core/evo-utils.js";
 export const BAFIN_VALIDATORS = {
   MINTING_LOGIC: "minting_logic_script.minting_logic_validator.withdraw",
   TRANSFER_LOGIC: "transfer_logic_script.transfer_logic_validator.withdraw",
-  THIRD_PARTY_TRANSFER_LOGIC: "third_party_transfer_logic_script.third_party_transfer_logic_validator.withdraw",
+  THIRD_PARTY_TRANSFER_LOGIC:
+    "third_party_transfer_logic_script.third_party_transfer_logic_validator.withdraw",
   GLOBAL_STATE_MINT: "global_state.global_state_mint_validator.mint",
   GLOBAL_STATE_SPEND: "global_state.global_state_spend_validator.spend",
   POWER_USERS_MINT: "power_users.mint.mint",
   POWER_USERS_SPEND: "power_users.power_users_validator.spend",
-  USERS_MINT: "users.mint.mint",
-  USERS_SPEND: "users.users_validator.spend",
+  DENYLIST_MINT: "denylist.mint.mint",
+  DENYLIST_SPEND: "denylist.denylist_validator.spend",
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -39,57 +33,84 @@ export const BAFIN_VALIDATORS = {
 
 export interface BaFinScripts {
   // CIP-113 logic scripts
+
   buildMintingLogic(
     securityAssetName: HexString,
     globalStatePolicyId: HexString,
     powerUsersLinkedListPolicyId: HexString,
   ): PlutusScript;
 
+  /**
+   * Transfer-logic no longer takes the users-LL policy id as a param — the
+   * denylist LL policy id now flows through GS datum at runtime, and KYC is
+   * a TEL proof (also in GS datum). Compile-time parameters are just the
+   * things that uniquely identify the deployment's token.
+   */
   buildTransferLogic(
     securityAssetName: HexString,
     globalStatePolicyId: HexString,
-    usersLinkedListPolicyId: HexString,
     issuancePolicyId: HexString,
   ): PlutusScript;
 
+  /**
+   * Third-party-transfer-logic: dropped users_linked_list_policy_id; added
+   * global_state_policy_id (for reading GS ref input).
+   */
   buildThirdPartyTransferLogic(
     securityAssetName: HexString,
     powerUsersLinkedListPolicyId: HexString,
-    usersLinkedListPolicyId: HexString,
+    globalStatePolicyId: HexString,
     issuancePolicyId: HexString,
   ): PlutusScript;
 
   // Global state
-  buildGlobalStateMint(
-    initInputOutRef: TxInput,
-  ): PlutusScript;
 
+  buildGlobalStateMint(initInputOutRef: TxInput): PlutusScript;
+
+  /**
+   * Global-state spend: owner_credential_hash parameter dropped (admin now
+   * lives in the datum).
+   */
   buildGlobalStateSpend(
-    ownerCredentialHash: HexString,
     securityAssetName: HexString,
     configPolicyId: HexString,
     globalStatePolicyId: HexString,
   ): PlutusScript;
 
-  // Linked lists
-  buildPowerUsersMint(
-    ownerCredentialHash: HexString,
-    initInputOutRef: TxInput,
-  ): PlutusScript;
+  // Linked lists (power_users + denylist)
 
+  /**
+   * PowerUsers spend: owner_credential_hash dropped; now reads admin via
+   * GS ref input using global_state_policy_id.
+   */
   buildPowerUsersSpend(
-    ownerCredentialHash: HexString,
+    globalStatePolicyId: HexString,
     powerUsersLinkedListPolicyId: HexString,
   ): PlutusScript;
 
-  buildUsersMint(
+  /**
+   * PowerUsers mint: owner_credential_hash dropped; now reads admin via
+   * GS ref input using global_state_policy_id (except in Init which is
+   * nonce-gated).
+   */
+  buildPowerUsersMint(
+    globalStatePolicyId: HexString,
     initInputOutRef: TxInput,
-    powerUsersLinkedListPolicyId: HexString,
   ): PlutusScript;
 
-  buildUsersSpend(
-    powerUsersLinkedListPolicyId: HexString,
-    usersLinkedListPolicyId: HexString,
+  /**
+   * Denylist spend: parameterised only by denylist LL policy id. Delegates
+   * to mint for state transitions.
+   */
+  buildDenylistSpend(denylistLinkedListPolicyId: HexString): PlutusScript;
+
+  /**
+   * Denylist mint: admin-gated via GS ref input for Add/Remove/Deinit;
+   * Init is nonce-gated.
+   */
+  buildDenylistMint(
+    globalStatePolicyId: HexString,
+    initInputOutRef: TxInput,
   ): PlutusScript;
 }
 
@@ -103,8 +124,6 @@ export function createBaFinScripts(blueprint: PlutusBlueprint): BaFinScripts {
   }
 
   return {
-    // -- CIP-113 logic scripts --
-
     buildMintingLogic(securityAssetName, globalStatePolicyId, powerUsersLinkedListPolicyId) {
       return parameterize(BAFIN_VALIDATORS.MINTING_LOGIC, [
         Data.bytearray(securityAssetName),
@@ -113,70 +132,67 @@ export function createBaFinScripts(blueprint: PlutusBlueprint): BaFinScripts {
       ]);
     },
 
-    buildTransferLogic(securityAssetName, globalStatePolicyId, usersLinkedListPolicyId, issuancePolicyId) {
+    buildTransferLogic(securityAssetName, globalStatePolicyId, issuancePolicyId) {
       return parameterize(BAFIN_VALIDATORS.TRANSFER_LOGIC, [
         Data.bytearray(securityAssetName),
         Data.bytearray(globalStatePolicyId),
-        Data.bytearray(usersLinkedListPolicyId),
         Data.bytearray(issuancePolicyId),
       ]);
     },
 
-    buildThirdPartyTransferLogic(securityAssetName, powerUsersLinkedListPolicyId, usersLinkedListPolicyId, issuancePolicyId) {
+    buildThirdPartyTransferLogic(
+      securityAssetName,
+      powerUsersLinkedListPolicyId,
+      globalStatePolicyId,
+      issuancePolicyId,
+    ) {
       return parameterize(BAFIN_VALIDATORS.THIRD_PARTY_TRANSFER_LOGIC, [
         Data.bytearray(securityAssetName),
         Data.bytearray(powerUsersLinkedListPolicyId),
-        Data.bytearray(usersLinkedListPolicyId),
+        Data.bytearray(globalStatePolicyId),
         Data.bytearray(issuancePolicyId),
       ]);
     },
 
-    // -- Global state --
-
     buildGlobalStateMint(initInputOutRef) {
-      // global_state_mint_validator(tx0: ByteArray, index0: Int)
       return parameterize(BAFIN_VALIDATORS.GLOBAL_STATE_MINT, [
         Data.bytearray(initInputOutRef.txHash),
         Data.int(BigInt(initInputOutRef.outputIndex)),
       ]);
     },
 
-    buildGlobalStateSpend(ownerCredentialHash, securityAssetName, configPolicyId, globalStatePolicyId) {
+    buildGlobalStateSpend(securityAssetName, configPolicyId, globalStatePolicyId) {
       return parameterize(BAFIN_VALIDATORS.GLOBAL_STATE_SPEND, [
-        Data.bytearray(ownerCredentialHash),
         Data.bytearray(securityAssetName),
         Data.bytearray(configPolicyId),
         Data.bytearray(globalStatePolicyId),
       ]);
     },
 
-    // -- Linked lists --
-
-    buildPowerUsersMint(ownerCredentialHash, initInputOutRef) {
-      return parameterize(BAFIN_VALIDATORS.POWER_USERS_MINT, [
-        Data.bytearray(ownerCredentialHash),
-        outputReference(initInputOutRef),
-      ]);
-    },
-
-    buildPowerUsersSpend(ownerCredentialHash, powerUsersLinkedListPolicyId) {
+    buildPowerUsersSpend(globalStatePolicyId, powerUsersLinkedListPolicyId) {
       return parameterize(BAFIN_VALIDATORS.POWER_USERS_SPEND, [
-        Data.bytearray(ownerCredentialHash),
+        Data.bytearray(globalStatePolicyId),
         Data.bytearray(powerUsersLinkedListPolicyId),
       ]);
     },
 
-    buildUsersMint(initInputOutRef, powerUsersLinkedListPolicyId) {
-      return parameterize(BAFIN_VALIDATORS.USERS_MINT, [
+    buildPowerUsersMint(globalStatePolicyId, initInputOutRef) {
+      return parameterize(BAFIN_VALIDATORS.POWER_USERS_MINT, [
+        Data.bytearray(globalStatePolicyId),
         outputReference(initInputOutRef),
-        Data.bytearray(powerUsersLinkedListPolicyId),
       ]);
     },
 
-    buildUsersSpend(powerUsersLinkedListPolicyId, usersLinkedListPolicyId) {
-      return parameterize(BAFIN_VALIDATORS.USERS_SPEND, [
-        Data.bytearray(powerUsersLinkedListPolicyId),
-        Data.bytearray(usersLinkedListPolicyId),
+    buildDenylistSpend(denylistLinkedListPolicyId) {
+      return parameterize(BAFIN_VALIDATORS.DENYLIST_SPEND, [
+        Data.bytearray(denylistLinkedListPolicyId),
+      ]);
+    },
+
+    buildDenylistMint(globalStatePolicyId, initInputOutRef) {
+      return parameterize(BAFIN_VALIDATORS.DENYLIST_MINT, [
+        Data.bytearray(globalStatePolicyId),
+        outputReference(initInputOutRef),
       ]);
     },
   };

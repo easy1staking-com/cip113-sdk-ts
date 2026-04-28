@@ -503,7 +503,7 @@ export function bafinSubstandard(config: {
       const powerUsersMint = bafin.buildPowerUsersMint(dep.ownerCredentialHash, dep.powerUsersInitTxInput);
       const powerUsersLinkedListPolicyId = powerUsersMint.hash;
 
-      const usersMint = bafin.buildUsersMint(dep.usersInitTxInput, powerUsersLinkedListPolicyId);
+      const usersMint = bafin.buildUsersMint(dep.ownerCredentialHash, dep.usersInitTxInput, powerUsersLinkedListPolicyId);
       const usersLinkedListPolicyId = usersMint.hash;
 
       // 3. Build linked list spend scripts
