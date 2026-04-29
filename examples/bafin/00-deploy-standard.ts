@@ -41,12 +41,20 @@ import {
   mintAssetsFromMap,
   stringToHex,
   scriptCredential,
+  outputReference,
   voidData,
 } from "../../src/core/evo-utils.js";
 import {
   createStandardScripts,
   buildDeploymentScripts,
 } from "../../src/standard/scripts.js";
+import { STANDARD_VALIDATORS, getValidatorHash } from "../../src/standard/blueprint.js";
+import {
+  CIP171_METADATA_LABEL,
+  CompilerType,
+  buildCip171Metadatum,
+  type Cip171ScriptEntry,
+} from "../../src/core/cip171.js";
 import type { DeploymentParams } from "@easy1staking/cip113-sdk-ts";
 import {
   createSigningClient,
@@ -66,6 +74,18 @@ const DEPLOYMENT_PATH = resolve(
   "shared",
   `deployment-${NETWORK}.json`,
 );
+
+// CIP-171 — sidecar describing the upstream commit that produced the local
+// plutus.json. Update both files together when bumping the blueprint.
+const STANDARD_BLUEPRINT_DIR = resolve(
+  __dirname,
+  "..",
+  "..",
+  "blueprints",
+  "standard",
+  "v0.3.0",
+);
+const UPSTREAM_PATH = resolve(STANDARD_BLUEPRINT_DIR, "UPSTREAM.json");
 
 // Two fixed 32-byte nonces so the two always_fail instances have distinct hashes.
 // Any pair of distinct random hex strings works — these mirror the Java test.
@@ -203,6 +223,71 @@ async function main() {
   console.log(`  always_fail A        : ${alwaysFailA.hash}`);
   console.log(`  always_fail B        : ${alwaysFailB.hash}`);
 
+  // ---- Step 2.5: build CIP-171 verification metadata --------------------
+  // One record covering every parameterised standard script we deploy. The
+  // map is keyed by the un-parameterised script hash from plutus.json; the
+  // value is the PlutusData params that — applied via applyParamsToScript —
+  // reproduce the deployed hash.
+  //
+  // always_fail is included only once: the current CIP-171 encoding can't
+  // describe two parameterisations of the same raw script (one map key,
+  // one params list). We record nonce A; the B instance is consciously left
+  // unverifiable until a future revision of CIP-171 widens the schema.
+  const upstream = JSON.parse(readFileSync(UPSTREAM_PATH, "utf-8")) as {
+    repo: string;
+    commit: string;
+  };
+  const compilerVersion = blueprint.preamble.compiler?.version;
+  if (!compilerVersion) {
+    throw new Error(
+      "Blueprint preamble.compiler.version missing — cannot build CIP-171 metadata. " +
+      "Re-fetch upstream plutus.json so the compiler stamp is preserved.",
+    );
+  }
+  const cip171Entries: Cip171ScriptEntry[] = [
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.ALWAYS_FAIL),
+      params: [Data.bytearray(ALWAYS_FAIL_NONCE_A)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.PROTOCOL_PARAMS_MINT),
+      params: [outputReference(utxo1Ref), Data.bytearray(alwaysFailA.hash)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.PROGRAMMABLE_LOGIC_GLOBAL),
+      params: [Data.bytearray(protocolParamsMint.hash)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.PROGRAMMABLE_LOGIC_BASE),
+      params: [scriptCredential(plg.hash)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.ISSUANCE_CBOR_HEX_MINT),
+      params: [outputReference(utxo2Ref), Data.bytearray(alwaysFailB.hash)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.REGISTRY_MINT),
+      params: [outputReference(utxo1Ref), Data.bytearray(issuanceCborHexMint.hash)],
+    },
+    {
+      rawScriptHash: getValidatorHash(blueprint, STANDARD_VALIDATORS.REGISTRY_SPEND),
+      params: [Data.bytearray(protocolParamsMint.hash)],
+    },
+  ];
+  const cip171Chunks = buildCip171Metadatum({
+    compilerType: CompilerType.AIKEN,
+    sourceUrl: upstream.repo,
+    commitHash: upstream.commit,
+    sourcePath: "",
+    compilerVersion,
+    scripts: cip171Entries,
+  });
+  console.log(
+    `  cip-171 metadata     : ${cip171Chunks.length} chunks, ` +
+    `${cip171Chunks.reduce((n, c) => n + c.length, 0)} bytes ` +
+    `(${cip171Entries.length} scripts, commit ${upstream.commit.slice(0, 7)})`,
+  );
+
   // ---- Step 3: addresses & datums ---------------------------------------
   const parametersAlwaysFailAddr = scriptAddress(networkId, alwaysFailA.hash);
   const issuanceAlwaysFailAddr = scriptAddress(networkId, alwaysFailB.hash);
@@ -310,6 +395,9 @@ async function main() {
   tx = tx.attachScript({ script: buildEvoScript(protocolParamsMint.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(plg.compiledCode) });
+
+  // CIP-171: attach the verification metadata as a list of byte chunks.
+  tx = tx.attachMetadata({ label: CIP171_METADATA_LABEL, metadata: cip171Chunks });
 
   // Default Ogmios URL matches Yaci DevKit; for preview/preprod the user is
   // expected to export OGMIOS_URL (e.g. SSH tunnel to panic-station:31357).

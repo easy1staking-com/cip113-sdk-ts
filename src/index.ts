@@ -320,6 +320,20 @@ export {
   buildCIP68FTDatum,
 } from "./core/evo-utils.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
+export {
+  CIP171_METADATA_LABEL,
+  CIP171_MAX_CHUNK_BYTES,
+  CompilerType,
+  buildCip171PlutusData,
+  buildCip171Metadatum,
+  chunkBytes,
+  decodeCip171Metadatum,
+  decodeCip171PlutusData,
+} from "./core/cip171.js";
+export type {
+  Cip171Record,
+  Cip171ScriptEntry,
+} from "./core/cip171.js";
 export { addressHexToBech32 } from "./provider/address-utils.js";
 export { assembleSignedTx } from "./provider/tx-utils.js";
 export type { FESDeploymentParams } from "./substandards/freeze-and-seize/types.js";

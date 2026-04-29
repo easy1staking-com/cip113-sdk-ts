@@ -1,0 +1,7 @@
+{
+  "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+  "commit": "81438534f83550789e13961db17b59d606cf8a8e",
+  "branch": "main",
+  "fetchedAt": "2026-04-28",
+  "note": "plutus.json copied verbatim from upstream HEAD. CIP-171 verifiers compile this commit with the compiler.version stamped in plutus.json preamble to reproduce raw script hashes. Bump both files together."
+}
