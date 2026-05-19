@@ -65,6 +65,7 @@ import {
 } from "../shared/config.js";
 import { topupAddress } from "../shared/yaci.js";
 import { createOgmiosEvaluator } from "../shared/ogmios-evaluator.js";
+import { createBlockfrostEvaluator } from "../shared/blockfrost-evaluator.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const NETWORK = getNetwork();
@@ -399,18 +400,21 @@ async function main() {
   // CIP-171: attach the verification metadata as a list of byte chunks.
   tx = tx.attachMetadata({ label: CIP171_METADATA_LABEL, metadata: cip171Chunks });
 
-  // Default Ogmios URL matches Yaci DevKit; for preview/preprod the user is
-  // expected to export OGMIOS_URL (e.g. SSH tunnel to panic-station:31357).
-  const ogmiosUrl = process.env.OGMIOS_URL ?? "http://localhost:1337";
-  if (!process.env.OGMIOS_URL && !isYaci()) {
-    console.warn(
-      `Warning: OGMIOS_URL not set; falling back to ${ogmiosUrl}. ` +
-      `Export OGMIOS_URL for ${NETWORK} (e.g. http://127.0.0.1:31357 via tunnel).`,
-    );
-  }
+  // Yaci ships its own Ogmios; for preview/preprod we evaluate via Blockfrost
+  // (already configured for queries) so no SSH tunnel is required. Override
+  // the Yaci default by setting OGMIOS_URL — useful when running against a
+  // remote node.
+  const evaluator = isYaci()
+    ? createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337")
+    : createBlockfrostEvaluator(
+        process.env.BLOCKFROST_URL ?? `https://cardano-${NETWORK}.blockfrost.io/api/v0`,
+        process.env.BLOCKFROST_PROJECT_ID ?? (() => {
+          throw new Error("BLOCKFROST_PROJECT_ID required for non-yaci bootstrap");
+        })(),
+      );
   const built = await tx.build({
     changeAddress: evoAddr,
-    evaluator: createOgmiosEvaluator(ogmiosUrl),
+    evaluator,
   });
   const submitHash = await built.signAndSubmit();
   const bootstrapTxHash =
