@@ -16,7 +16,7 @@
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
     "test": "npm run build && node --test test/*.test.mjs",
-    "test:devnet": "npm run build && node --test test/devnet/",
+    "test:devnet": "npm run build && node --import tsx --test test/devnet/*.test.mjs test/devnet/*.test.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run clean && npm run build"
   },

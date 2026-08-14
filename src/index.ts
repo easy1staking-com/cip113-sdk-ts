@@ -320,10 +320,13 @@ export {
   buildCIP68FTDatum,
 } from "./core/evo-utils.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
+export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
 export {
   assertDeploymentScripts,
   DeploymentMismatchError,
+  createStandardScripts,
   type ScriptHashCheck,
+  type StandardScripts,
 } from "./standard/scripts.js";
 export {
   CIP171_METADATA_LABEL,
