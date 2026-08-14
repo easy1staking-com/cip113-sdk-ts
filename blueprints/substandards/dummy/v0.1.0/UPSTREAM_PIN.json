@@ -1,0 +1,29 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "42d95e768b991c3dd9fa09e4fd320bb7650a1564d841502248d5623c88e53fa4",
+  "declares": {
+    "title": "wsc-poc/aiken-policy",
+    "description": "Aiken contracts for project 'wsc-poc/aiken-policy'",
+    "version": "0.0.0",
+    "compiler": "Aiken v1.1.19+e525483",
+    "validators": 4
+  },
+  "upstream": {
+    "repo": null,
+    "commit": null,
+    "note": "Source project not recorded anywhere in this repo. Unrelated to both the standard blueprint's project and the freeze-and-seize one."
+  },
+  "blueprint_reproduced": false,
+  "provenance": "UNKNOWN",
+  "verified": {
+    "date": "2026-08-14",
+    "findings": [
+      "The directory name v0.1.0 is an invented label: the artifact declares version 0.0.0.",
+      "Built with Aiken v1.1.19+e525483 - OLDER than every other blueprint in this repo. Three bundled blueprints, three source projects, two compiler versions."
+    ]
+  },
+  "reproduce": {
+    "requires": "Aiken v1.1.19+e525483",
+    "note": "Cannot be reproduced without locating the source project first."
+  }
+}

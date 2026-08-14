@@ -1,0 +1,30 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "b4f54412c84dc8d6c1e03892a9c45750d0e7da2669e0150d95e8f0fa38274284",
+  "declares": {
+    "title": "iohk/programmable-tokens",
+    "version": "0.3.0",
+    "compiler": "Aiken v1.1.21+42babe5",
+    "validators": 16
+  },
+  "upstream": {
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+    "note": "Same repository; it was named iohk/programmable-tokens until the 0.3.0 -> 0.4.0 bump (renamed between 2026-04-28 and 2026-06-24). Not a separate protocol lineage.",
+    "commit": null
+  },
+  "blueprint_reproduced": false,
+  "provenance": "UNVERIFIED",
+  "verified": {
+    "date": "2026-08-14",
+    "findings": [
+      "This file matches NO commit in upstream's plutus.json history, searched across every commit touching that path on all refs fetched locally (main, pull/99/head, pull/102/head). It is not any upstream release or intermediate commit.",
+      "Scope caveat: unfetched upstream PR branches were not searched. The defensible claim is unverifiable provenance, NOT that the file was fabricated.",
+      "It IS internally consistent with the deployment this repo ships: all 6 derivable script hashes reproduce examples/shared/deployment-preprod.ts exactly (see assertDeploymentScripts). The artifact is unattested, not wrong.",
+      "For contrast, the abandoned dev/bafin-substandard branch carried a different plutus.json under this same v0.3.0 directory name, byte-identical to upstream commit 81438534f83550789e13961db17b59d606cf8a8e. Four of eight validator hashes differ between the two."
+    ]
+  },
+  "reproduce": {
+    "requires": "Aiken v1.1.21+42babe5",
+    "note": "The installed toolchain is machine-global and currently v1.1.22 (needed for upstream 0.5.0-alpha.1). Reproducing this artifact requires a toolchain switch, which is arbitrated - do not run aikup unilaterally."
+  }
+}

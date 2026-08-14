@@ -320,6 +320,11 @@ export {
   buildCIP68FTDatum,
 } from "./core/evo-utils.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
+export {
+  assertDeploymentScripts,
+  DeploymentMismatchError,
+  type ScriptHashCheck,
+} from "./standard/scripts.js";
 export { addressHexToBech32 } from "./provider/address-utils.js";
 export { assembleSignedTx } from "./provider/tx-utils.js";
 export type { FESDeploymentParams } from "./substandards/freeze-and-seize/types.js";

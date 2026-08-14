@@ -15,6 +15,7 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "clean": "rm -rf dist",
+    "test": "npm run build && node --test test/",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run clean && npm run build"
   },

@@ -1,0 +1,29 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "9514852e32ad2181595b6c8e65349ce5636cb3a11d0acd2e47dec55ca9f21c8f",
+  "declares": {
+    "title": "cip113/freeze-unfreeze",
+    "description": "CIP113 Sub Standard for freeze/unfreeze capabilities",
+    "version": "0.0.0",
+    "compiler": "Aiken v1.1.21+42babe5",
+    "validators": 10
+  },
+  "upstream": {
+    "repo": null,
+    "commit": null,
+    "note": "Source project not recorded anywhere in this repo. Distinct from the standard blueprint's project."
+  },
+  "blueprint_reproduced": false,
+  "provenance": "UNKNOWN",
+  "verified": {
+    "date": "2026-08-14",
+    "findings": [
+      "The directory name v0.1.0 is an invented label: the artifact declares version 0.0.0.",
+      "Built with the same Aiken as the standard blueprint (v1.1.21+42babe5), but from an unrelated source project."
+    ]
+  },
+  "reproduce": {
+    "requires": "Aiken v1.1.21+42babe5",
+    "note": "Cannot be reproduced without locating the source project first."
+  }
+}

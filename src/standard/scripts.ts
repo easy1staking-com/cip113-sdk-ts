@@ -115,50 +115,154 @@ export function createStandardScripts(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Deployment verification
+// ---------------------------------------------------------------------------
+
+/** One derived-vs-deployed script hash comparison. */
+export interface ScriptHashCheck {
+  /** Validator name, as it appears in the parameterization chain */
+  name: string;
+  /** Hash derived from the blueprint + deployment parameters */
+  derived: ScriptHash;
+  /** Hash recorded in DeploymentParams */
+  deployed: ScriptHash;
+}
+
+/** Thrown when a blueprint does not reproduce its deployment's script hashes. */
+export class DeploymentMismatchError extends Error {
+  readonly mismatches: ScriptHashCheck[];
+
+  constructor(mismatches: ScriptHashCheck[], blueprintTitle: string) {
+    super(
+      `Blueprint "${blueprintTitle}" does not reproduce this deployment. ` +
+      `${mismatches.length} script hash(es) differ:\n` +
+      mismatches
+        .map((m) => `  ${m.name}: derived ${m.derived}, deployment says ${m.deployed}`)
+        .join("\n") +
+      `\nThe blueprint and the DeploymentParams describe different protocol instances. ` +
+      `Transactions built from this pairing would be rejected at submission.`
+    );
+    this.name = "DeploymentMismatchError";
+    this.mismatches = mismatches;
+  }
+}
+
+/**
+ * Derive every parameterizable standard script hash from the blueprint and
+ * check it against DeploymentParams. Throws DeploymentMismatchError on any
+ * difference; returns the full check list on success.
+ *
+ * Why this exists: parameterization changes are not always visible to the
+ * compiler. Upstream has changed a parameter's *meaning* while keeping its
+ * arity and type (protocol_params_mint's `always_fail_hash` became
+ * `coordination_addr_hash` in 0.5.0-alpha.1), so a wrong value typechecks,
+ * builds, and only fails when the ledger rejects the transaction. This is the
+ * check that catches it, and it is why buildDeploymentScripts no longer
+ * overwrites derived hashes with deployment values.
+ *
+ * Not covered: the two always_fail hashes (their nonces are not carried in
+ * DeploymentParams) and issuance_mint (parameterized per minting logic).
+ */
+export function assertDeploymentScripts(
+  blueprint: PlutusBlueprint,
+  deployment: DeploymentParams,
+): ScriptHashCheck[] {
+  const builders = createStandardScripts(blueprint);
+
+  const checks: ScriptHashCheck[] = [
+    {
+      name: "protocol_params_mint",
+      derived: builders.protocolParamsMint(
+        deployment.protocolParams.txInput,
+        deployment.protocolParams.alwaysFailScriptHash
+      ).hash,
+      deployed: deployment.protocolParams.policyId,
+    },
+    {
+      name: "programmable_logic_global",
+      derived: builders.programmableLogicGlobal(deployment.protocolParams.policyId).hash,
+      deployed: deployment.programmableLogicGlobal.scriptHash,
+    },
+    {
+      name: "programmable_logic_base",
+      derived: builders.programmableLogicBase(
+        deployment.programmableLogicGlobal.scriptHash
+      ).hash,
+      deployed: deployment.programmableLogicBase.scriptHash,
+    },
+    {
+      name: "issuance_cbor_hex_mint",
+      derived: builders.issuanceCborHexMint(
+        deployment.issuance.txInput,
+        deployment.issuance.alwaysFailScriptHash
+      ).hash,
+      deployed: deployment.issuance.policyId,
+    },
+    {
+      name: "registry_mint",
+      derived: builders.registryMint(
+        deployment.directoryMint.txInput,
+        deployment.issuance.policyId
+      ).hash,
+      deployed: deployment.directoryMint.scriptHash,
+    },
+    {
+      name: "registry_spend",
+      derived: builders.registrySpend(deployment.protocolParams.policyId).hash,
+      deployed: deployment.directorySpend.scriptHash,
+    },
+  ];
+
+  const mismatches = checks.filter((c) => c.derived !== c.deployed);
+  if (mismatches.length > 0) {
+    throw new DeploymentMismatchError(mismatches, blueprint.preamble.title);
+  }
+  return checks;
+}
+
 /**
  * Build resolved standard scripts from deployment params.
  *
- * IMPORTANT: Uses the known hashes from DeploymentParams (the source of truth)
- * rather than re-deriving them from the blueprint.
+ * Every derivable script hash is ASSERTED equal to its DeploymentParams value
+ * (see assertDeploymentScripts). Earlier versions silently overwrote the
+ * derived hash with the deployment's, which made a wrong parameterization
+ * undetectable until submission.
  */
 export function buildDeploymentScripts(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
 ): ResolvedStandardScripts {
+  assertDeploymentScripts(blueprint, deployment);
+
   const builders = createStandardScripts(blueprint);
 
   const protocolParamsMint = builders.protocolParamsMint(
     deployment.protocolParams.txInput,
     deployment.protocolParams.alwaysFailScriptHash
   );
-  protocolParamsMint.hash = deployment.protocolParams.policyId;
 
   const programmableLogicGlobal = builders.programmableLogicGlobal(
     deployment.protocolParams.policyId
   );
-  programmableLogicGlobal.hash = deployment.programmableLogicGlobal.scriptHash;
 
   const programmableLogicBase = builders.programmableLogicBase(
     deployment.programmableLogicGlobal.scriptHash
   );
-  programmableLogicBase.hash = deployment.programmableLogicBase.scriptHash;
 
   const issuanceCborHexMint = builders.issuanceCborHexMint(
     deployment.issuance.txInput,
     deployment.issuance.alwaysFailScriptHash
   );
-  issuanceCborHexMint.hash = deployment.issuance.policyId;
 
   const registryMint = builders.registryMint(
     deployment.directoryMint.txInput,
     deployment.issuance.policyId
   );
-  registryMint.hash = deployment.directoryMint.scriptHash;
 
   const registrySpend = builders.registrySpend(
     deployment.protocolParams.policyId
   );
-  registrySpend.hash = deployment.directorySpend.scriptHash;
 
   return {
     protocolParamsMint,

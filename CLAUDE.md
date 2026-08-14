@@ -30,8 +30,12 @@ transactions*; it does not run services, hold keys, index the chain, or provide 
   them. A `.ak` file appearing here is an escalation.
 - Backend services, indexers, schedulers, or anything with a database.
 - Frontend/dApp code, wallet connectors, React components.
-- Protocol *deployment/bootstrap* tooling. `DeploymentParams` is an input to this SDK; the
-  transaction that produces it is another system's job.
+- Protocol *deployment/bootstrap* tooling, **with one scoped exception** (approved 2026-08-14):
+  bootstrap code that exists solely to stand up a test fixture — deploying a protocol instance
+  into a local devnet so the harness has a `DeploymentParams` to operate against — is permitted,
+  provided it lives under the test/example tree, is excluded from the npm tarball, and is never
+  presented as a supported way to deploy a production protocol. Deploying a real protocol
+  instance remains another system's job: `DeploymentParams` is an input to this SDK.
 
 **Allowed technologies.** TypeScript (strict, ES2022, ESM-only, `moduleResolution: bundler`),
 compiled with `tsc` — no bundler, no transpiler, no build framework. Node 20+.
@@ -63,21 +67,27 @@ npm 10.8.2, from a clean `npm ci`:
 | `npm ci` | Lockfile installs cleanly | green — 43 packages, ~1s |
 | `npm run typecheck` | `tsc --noEmit` over `src/**` — whole public surface typechecks | green — exit 0 |
 | `npm run build` | `tsc` emits `dist/` (js + .d.ts + maps) — the published artifact compiles | green — exit 0 |
+| `npm test` | build + `node --test test/` — blueprint provenance guard and the deployment hash assertion | green — 7 pass, 0 fail, 0 skipped |
 
 Other scripts: `npm run dev` (`tsc --watch`), `npm run clean` (`rm -rf dist`),
 `npm run prepublishOnly` (clean + build).
 
-**There is NO test script, NO test framework, and NO test files in this repo. There is also NO
-linter and NO formatter.** This is not an oversight in this document — it is the actual state.
+**Test coverage is narrow and deliberately so — know what it does and does not prove.**
+`npm test` uses `node:test` (built into Node 20, zero dependencies) and covers exactly two
+things: that every bundled blueprint matches its `UPSTREAM_PIN.json`, and that
+`assertDeploymentScripts` reproduces the shipped deployment *and rejects a wrong value of the
+correct type*. Both guards are proof-of-harness verified — each was made to go red before being
+accepted as green.
+
+Still absent: **no linter, no formatter, and no test that builds or submits a transaction.**
 Consequences a ticket owner must plan around:
 
-- A slice contract's Verification section can only ever cite `npm run typecheck` and
-  `npm run build` until a harness exists. Neither executes a single line of SDK logic.
 - Anything behavioural — does a transaction actually validate on-chain? — is verified today
   **only** by running `examples/` by hand against preprod with a funded seed phrase and a
   Blockfrost key. That is manual, costs real testnet ADA, is slow, and is not reproducible in
   CI. Treat any claim of "verified" that rests on it with proportionate scepticism.
-- Establishing an automated harness is seated in PLAN.md's backlog for exactly this reason.
+- The devnet harness that closes this gap is PLAN.md workstream W-A.
+- CI runs `typecheck` + `build` only; it does **not** yet run `npm test`. Wire that in with W-A.
 
 CI (`.github/workflows/ci.yml`) runs `npm ci → typecheck → build` on Node 20 for pushes and PRs
 to `main` — i.e. CI proves exactly what the table above proves, and nothing more.
