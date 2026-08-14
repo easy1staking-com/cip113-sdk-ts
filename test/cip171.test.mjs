@@ -24,6 +24,7 @@ import {
   chunkBytes,
   decodeCip171Metadatum,
   decodeCip171PlutusData,
+  CIP171_CBOR_OPTIONS,
 } from "../dist/core/cip171.js";
 
 /** A record describing the upstream contracts this SDK is pinned against. */
@@ -62,10 +63,15 @@ test("round-trip preserves every field", () => {
   assert.equal(decoded.compilerVersion, record.compilerVersion);
   assert.equal(decoded.scripts.length, record.scripts.length);
 
-  for (const [i, s] of decoded.scripts.entries()) {
-    assert.equal(s.rawScriptHash, record.scripts[i].rawScriptHash, `script ${i} hash`);
-    assert.equal(s.params.length, record.scripts[i].params.length, `script ${i} param count`);
+  // Compared by lookup, not by index: the encoder canonicalises map key order,
+  // so decoded order is ascending by key and need not match input order.
+  for (const original of record.scripts) {
+    const found = decoded.scripts.find((s) => s.rawScriptHash === original.rawScriptHash);
+    assert.ok(found, `script ${original.rawScriptHash} missing after round-trip`);
+    assert.equal(found.params.length, original.params.length, "param count");
   }
+  const keys = decoded.scripts.map((s) => s.rawScriptHash);
+  assert.deepEqual([...keys].sort(), keys, "decoded keys must be in canonical ascending order");
 });
 
 test("no chunk exceeds the 64-byte ledger limit", () => {
@@ -80,7 +86,9 @@ test("no chunk exceeds the 64-byte ledger limit", () => {
 });
 
 test("chunks concatenate back to exactly the CBOR payload", () => {
-  const cbor = Data.toCBORBytes(buildCip171PlutusData(record));
+  // Must use the same codec options the metadatum builder uses, or the two
+  // encodings differ by the map header alone and the comparison is meaningless.
+  const cbor = Data.toCBORBytes(buildCip171PlutusData(record), CIP171_CBOR_OPTIONS);
   const chunks = buildCip171Metadatum(record);
   const total = chunks.reduce((n, c) => n + c.length, 0);
 

@@ -9,15 +9,29 @@
  *
  *   { 1984: [ <chunk1>, <chunk2>, ..., <chunkN> ] }   ; each chunk ≤ 64 bytes
  *
- * Concatenated chunks decode to a single CBOR PlutusData:
+ * Concatenated chunks decode to a single CBOR PlutusData, in the **six-field**
+ * layout — NOT the five-field one in the currently published CIP text:
  *
  *   Constr <compilerId>
- *     [ sourceUrl       : ByteArray (UTF-8)
- *     , commitHash      : ByteArray (20 or 32 raw bytes)
- *     , sourcePath      : ByteArray (UTF-8, "" for repo root)
- *     , compilerVersion : ByteArray (UTF-8)
- *     , parameters      : Map<ScriptHash(28b), List<PlutusData>>
+ *     [ 0: sourceUrl       : ByteArray (UTF-8)
+ *     , 1: commitHash      : ByteArray (20 or 32 RAW bytes, not UTF-8)
+ *     , 2: sourcePath      : ByteArray (UTF-8, "" for repo root)
+ *     , 3: compilerVersion : ByteArray (UTF-8)
+ *     , 4: env             : ByteArray (UTF-8, "" = built without --env)
+ *     , 5: parameters      : Map<ScriptHash(28b), List<PlutusData>>
  *     ]
+ *
+ * The six-field layout redefines constructor 0 IN PLACE. This matters more than
+ * a version bump would: the reference registry (uplc-link) parses strictly on
+ * `fields.size() == 6` and **drops anything else, log-only, by design**. A
+ * five-field record is therefore not rejected loudly — it is silently ignored.
+ * Encoder and decoder here are both strict on 6 for that reason.
+ *
+ * Byte-level compatibility is asserted against uplc-link's own cross-language
+ * fixture (their FE `metadata-encoding.test.ts` / BE `SerdeTest`), which anchors
+ * the TypeScript and Java implementations to the same bytes. See
+ * CIP171_CBOR_OPTIONS: the encoding is indefinite-length arrays with a
+ * DEFINITE-length, key-sorted map, which is not Evolution's default.
  *
  * The `parameters` map keys are the **un-parameterised** (raw) script hashes —
  * i.e. Aiken's `validators[].hash` straight out of plutus.json. The `params`
@@ -78,6 +92,14 @@ export interface Cip171Record {
   sourcePath?: string;
   /** Exact compiler version string (e.g. "v1.1.21+42babe5"). */
   compilerVersion: string;
+  /**
+   * Build environment — the value passed to the compiler's `--env` flag.
+   * Empty string (the default) means the script was built without `--env`;
+   * PlutusData has no null, so absence is encoded as empty bytes.
+   *
+   * Field index 4 of the six-field layout. See the note on the layout below.
+   */
+  env?: string;
   /** Map keyed by raw script hash. */
   scripts: Cip171ScriptEntry[];
 }
@@ -156,14 +178,42 @@ export function buildCip171PlutusData(record: Cip171Record): PlutusData {
     entries.push([Data.bytearray(e.rawScriptHash), Data.list(e.params)]);
   }
 
+  // Canonical map ordering: ascending by key bytes. The reference registry's
+  // fixtures are byte-sorted, and Evolution's `sortMapKeys` codec option does
+  // not reach Data maps, so the sort is done here rather than delegated.
+  entries.sort((a, b) => {
+    const ka = (a[0] as Uint8Array), kb = (b[0] as Uint8Array);
+    const n = Math.min(ka.length, kb.length);
+    for (let i = 0; i < n; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i];
+    return ka.length - kb.length;
+  });
+
   return Data.constr(BigInt(record.compilerType), [
     Data.bytearray(utf8ToHex(record.sourceUrl)),
     Data.bytearray(record.commitHash),
     Data.bytearray(utf8ToHex(record.sourcePath ?? "")),
     Data.bytearray(utf8ToHex(record.compilerVersion)),
+    Data.bytearray(utf8ToHex(record.env ?? "")),
     Data.map(entries),
   ]);
 }
+
+/**
+ * CBOR options reproducing the reference registry's bytes exactly:
+ * indefinite-length arrays/lists (`9f…ff`) with a DEFINITE-length map (`a2`).
+ *
+ * Evolution's default (`CML_DATA_DEFAULT_OPTIONS`) uses indefinite maps (`bf`),
+ * which does not match. Verified byte-identical against uplc-link's
+ * cross-language fixture — see test/cip171.test.mjs.
+ */
+export const CIP171_CBOR_OPTIONS = {
+  mode: "custom",
+  useIndefiniteArrays: true,
+  useIndefiniteMaps: false,
+  useDefiniteForEmpty: true,
+  sortMapKeys: true,
+  useMinimalEncoding: true,
+} as const;
 
 /**
  * Encode a CIP-171 record to the chunked metadatum value (a list of byte
@@ -177,7 +227,7 @@ export function buildCip171Metadatum(
   if (chunkSize < 1 || chunkSize > CIP171_MAX_CHUNK_BYTES) {
     throw new Error(`CIP-171: chunk size must be in [1, ${CIP171_MAX_CHUNK_BYTES}]`);
   }
-  const cbor = Data.toCBORBytes(buildCip171PlutusData(record));
+  const cbor = Data.toCBORBytes(buildCip171PlutusData(record), CIP171_CBOR_OPTIONS);
   return chunkBytes(cbor, chunkSize);
 }
 
@@ -214,14 +264,22 @@ export function decodeCip171PlutusData(data: PlutusData): Cip171Record {
   }
   const compilerType = Number(data.index) as CompilerType;
   const fields = data.fields;
-  if (fields.length < 5) {
-    throw new Error(`CIP-171: expected ≥5 fields, got ${fields.length}`);
+  // STRICT six fields. The reference registry drops anything else (log-only,
+  // by design), so a five-field record is unparseable there rather than
+  // partially understood. Failing loudly here beats emitting one.
+  if (fields.length !== 6) {
+    throw new Error(
+      `CIP-171: expected exactly 6 fields, got ${fields.length}. ` +
+      `The five-field layout was redefined in place; records in the old shape are ` +
+      `silently dropped by the registry.`
+    );
   }
   const sourceUrl = bytesToUtf8(asBytes(fields[0]));
   const commitHash = Bytes.toHex(asBytes(fields[1]));
   const sourcePath = bytesToUtf8(asBytes(fields[2]));
   const compilerVersion = bytesToUtf8(asBytes(fields[3]));
-  const paramsField = fields[4];
+  const env = bytesToUtf8(asBytes(fields[4]));
+  const paramsField = fields[5];
   if (!(paramsField instanceof globalThis.Map)) {
     throw new Error("CIP-171: expected Map for parameters field");
   }
@@ -233,7 +291,7 @@ export function decodeCip171PlutusData(data: PlutusData): Cip171Record {
     }
     scripts.push({ rawScriptHash, params: [...v] });
   }
-  return { compilerType, sourceUrl, commitHash, sourcePath, compilerVersion, scripts };
+  return { compilerType, sourceUrl, commitHash, sourcePath, compilerVersion, env, scripts };
 }
 
 // ---------------------------------------------------------------------------
