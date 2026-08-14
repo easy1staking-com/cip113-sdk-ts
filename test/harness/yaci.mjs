@@ -1,0 +1,175 @@
+/**
+ * Yaci DevKit harness — devnet lifecycle and client wiring.
+ *
+ * Salvaged and reworked from the abandoned bafin branch (examples/shared/yaci.ts).
+ *
+ * DESIGN NOTE — why devnet tests live in test/devnet/ and are NOT part of `npm test`:
+ * the previous holder of this machine's devnet had a 5-test suite that silently
+ * SKIPPED for weeks because the store hung, and a skipped suite reads like a
+ * passing one at a glance. So there is no skip path here. `npm test` runs
+ * offline unit tests only; `npm run test:devnet` requires a devnet and fails
+ * loudly when there isn't one. A run either happened or it errored — never
+ * "quietly did nothing".
+ *
+ * Ports are DevKit defaults and are not configurable (cluster-info.json is
+ * regenerated on every `up`): 10000 admin, 8080 store, 3001 node, 1337 ogmios,
+ * 8090 submit. Note this is the inverse of some documentation, which has admin
+ * and store swapped — verified on this machine: yaci-cli serves admin on 10000.
+ */
+
+import { Client } from "@evolution-sdk/evolution";
+
+export const ADMIN_URL = process.env.YACI_ADMIN_URL ?? "http://localhost:10000";
+export const STORE_URL = process.env.YACI_STORE_URL ?? "http://localhost:8080/api/v1";
+export const OGMIOS_URL = process.env.OGMIOS_URL ?? "http://localhost:1337";
+export const KUPO_URL = process.env.KUPO_URL ?? "http://localhost:1442";
+
+const ADMIN = `${ADMIN_URL}/local-cluster/api`;
+
+/**
+ * A fixed BIP39 test phrase. Valid, canonical, and worthless — the all-"abandon"
+ * vector every wallet library ships in its own tests. Devnet only; never reuse.
+ */
+export const TEST_MNEMONIC =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+async function fetchJson(url, init, timeoutMs = 15_000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...init, signal: ctl.signal });
+    if (!resp.ok) {
+      throw new Error(`${init?.method ?? "GET"} ${url} -> ${resp.status} ${resp.statusText}`);
+    }
+    const text = await resp.text();
+    return text ? JSON.parse(text) : null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Assert a usable devnet is present. Checks BOTH the admin API and the store,
+ * because they fail independently: this machine's inherited cluster answered
+ * admin normally on :10000 while the store on :8080 hung indefinitely. A green
+ * admin API is proof of nothing on its own.
+ */
+export async function requireDevnet() {
+  const problems = [];
+
+  try {
+    await fetchJson(`${ADMIN}/admin/devnet/genesis/shelley`, undefined, 8_000);
+  } catch (e) {
+    problems.push(`admin API (${ADMIN_URL}): ${e.message}`);
+  }
+
+  try {
+    await fetchJson(`${STORE_URL}/blocks/latest`, undefined, 8_000);
+  } catch (e) {
+    problems.push(`store (${STORE_URL}): ${e.message}`);
+  }
+
+  // Kupo and Ogmios are what the SDK client actually talks to, so a devnet
+  // without them is unusable here even when admin and store look fine.
+  try {
+    // /health serves Prometheus metrics, not JSON — status is the signal.
+    const resp = await fetch(`${KUPO_URL}/health`, { signal: AbortSignal.timeout(8_000) });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+  } catch (e) {
+    problems.push(`kupo (${KUPO_URL}): ${e.message} — start it with local-clusters/default/kupo.sh`);
+  }
+
+  try {
+    const resp = await fetch(OGMIOS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "queryNetwork/tip", id: null }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
+  } catch (e) {
+    problems.push(`ogmios (${OGMIOS_URL}): ${e.message}`);
+  }
+
+  if (problems.length > 0) {
+    throw new Error(
+      `No usable Yaci devnet.\n  ${problems.join("\n  ")}\n\n` +
+      `Start one with:  npx --yes @bloxbean/yaci-devkit up --enable-yaci-store\n` +
+      `If it is running but the store hangs, reset the cluster — that is a known\n` +
+      `failure mode and a reset fixes it:\n` +
+      `  curl -X POST ${ADMIN}/admin/devnet/reset`
+    );
+  }
+}
+
+/** Build an Evolution SDK Chain from the devnet's own Shelley genesis. */
+export async function getYaciChain() {
+  const g = await fetchJson(`${ADMIN}/admin/devnet/genesis/shelley`);
+  return {
+    id: g.networkId === "Mainnet" ? 1 : 0,
+    name: "Yaci DevKit",
+    networkMagic: g.networkMagic,
+    epochLength: g.epochLength,
+    slotConfig: {
+      zeroTime: BigInt(Date.parse(g.systemStart)),
+      zeroSlot: 0n,
+      slotLength: Math.round(g.slotLength * 1000),
+    },
+  };
+}
+
+/** Fund an address. Amount in ADA, not lovelace — the admin API takes ADA. */
+export async function topupAddress(address, ada) {
+  await fetchJson(`${ADMIN}/addresses/topup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ address, adaAmount: Number(ada) }),
+  });
+}
+
+/** Wipe the cluster back to genesis. Destructive; the machine has exactly one. */
+export async function resetDevnet() {
+  await fetchJson(`${ADMIN}/admin/devnet/reset`, { method: "POST" }, 90_000);
+}
+
+/** Latest block as the store sees it. */
+export async function latestBlock() {
+  return fetchJson(`${STORE_URL}/blocks/latest`);
+}
+
+/**
+ * A signing client pointed at the devnet, via Kupmios (Kupo + Ogmios).
+ *
+ * NOT Blockfrost, despite Yaci Store exposing a Blockfrost-compatible REST API
+ * on :8080. That path does not work with this SDK: Evolution's BlockfrostUTxO
+ * schema requires `tx_index` and `block`, and Yaci Store returns neither (it
+ * sends `epoch`/`block_number`/`block_time` instead), so every getUtxos fails
+ * schema validation and surfaces only as "Blockfrost getUtxos failed".
+ * Evolution exposes no custom-provider hook — Blockfrost, Koios, Kupmios and
+ * Maestro are the whole set — so Kupmios is the only workable devnet wiring.
+ *
+ * Kupo is NOT started by `--enable-kupomios`; see docs/devnet.md.
+ */
+export async function makeClient(mnemonic = TEST_MNEMONIC) {
+  const chain = await getYaciChain();
+  return Client.make(chain)
+    .withKupmios({ kupoUrl: KUPO_URL, ogmiosUrl: OGMIOS_URL })
+    .withSeed({ mnemonic });
+}
+
+/** Poll until `fn()` returns truthy, or throw. For waiting on chain state. */
+export async function waitFor(fn, { timeoutMs = 60_000, intervalMs = 1_000, what = "condition" } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  while (Date.now() < deadline) {
+    try {
+      const v = await fn();
+      if (v) return v;
+      last = v;
+    } catch (e) {
+      last = e.message;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}. Last: ${JSON.stringify(last)}`);
+}

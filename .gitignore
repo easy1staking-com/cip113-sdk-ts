@@ -5,3 +5,7 @@ dist/
 .env
 .env.*
 .DS_Store
+
+# Yaci DevKit droppings (created when running yaci-devkit from the repo root)
+logs/
+yaci-cli.history
