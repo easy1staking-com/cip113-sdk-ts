@@ -25,6 +25,7 @@ import {
   decodeCip171Metadatum,
   decodeCip171PlutusData,
   CIP171_CBOR_OPTIONS,
+  cip171Param,
 } from "../dist/core/cip171.js";
 
 /** A record describing the upstream contracts this SDK is pinned against. */
@@ -37,13 +38,15 @@ const record = {
   scripts: [
     {
       rawScriptHash: "e9d8d9c7fc531f0b179d502c86bffee829613c537794dab053ae28fe",
-      params: [Data.bytearray("daa1e3ec7f567c31a48598407ba1503810bd824a4a01a83e7cef7015bced1339")],
+      params: ["daa1e3ec7f567c31a48598407ba1503810bd824a4a01a83e7cef7015bced1339"],
     },
     {
       rawScriptHash: "29c78c576f9a399449b3b8d0339616f5fbe8f7334bcc7cd2c087d538",
+      // cip171Param() serializes PlutusData to the opaque bytes the wire format
+      // requires. Passing the PlutusData directly is now a type error.
       params: [
-        Data.constr(0n, [Data.bytearray("aa".repeat(32)), Data.int(0n)]),
-        Data.bytearray("e9d8d9c7fc531f0b179d502c86bffee829613c537794dab053ae28fe"),
+        cip171Param(Data.constr(0n, [Data.bytearray("aa".repeat(32)), Data.int(0n)])),
+        "e9d8d9c7fc531f0b179d502c86bffee829613c537794dab053ae28fe",
       ],
     },
   ],
@@ -153,7 +156,7 @@ test("rejects a raw script hash that is not 28 bytes", () => {
   assert.throws(
     () => buildCip171PlutusData({
       ...record,
-      scripts: [{ rawScriptHash: "ab".repeat(32), params: [] }],
+      scripts: [{ rawScriptHash: "ab".repeat(32), params: ["ab"] }],
     }),
     /rawScriptHash must be a 28-byte hex string/
   );

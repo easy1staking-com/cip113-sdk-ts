@@ -18,7 +18,7 @@
  *     , 2: sourcePath      : ByteArray (UTF-8, "" for repo root)
  *     , 3: compilerVersion : ByteArray (UTF-8)
  *     , 4: env             : ByteArray (UTF-8, "" = built without --env)
- *     , 5: parameters      : Map<ScriptHash(28b), List<PlutusData>>
+ *     , 5: parameters      : Map<ScriptHash(28b), List<ByteString>>
  *     ]
  *
  * The six-field layout redefines constructor 0 IN PLACE. This matters more than
@@ -34,9 +34,17 @@
  * DEFINITE-length, key-sorted map, which is not Evolution's default.
  *
  * The `parameters` map keys are the **un-parameterised** (raw) script hashes —
- * i.e. Aiken's `validators[].hash` straight out of plutus.json. The `params`
- * list contains the PlutusData that, when applied to the raw script via
- * `applyParamsToScript`, reproduces the deployed hash.
+ * i.e. Aiken's `validators[].hash` straight out of plutus.json. Each value is a
+ * list of **byte strings**, each wrapping the CBOR encoding of one parameter,
+ * which applied to the raw script via `applyParamsToScript` reproduce the
+ * deployed hash.
+ *
+ * The published CDDL says `parameter_list = [ * plutus_data ]` — inline. That is
+ * wrong against the reference, and wrong in the worst way: an inline record
+ * still parses and still shows six fields, but the registry reads `.bytes` on
+ * each element, gets empty strings, and stores a record with its parameters
+ * silently gone. Hence `Cip171ScriptEntry.params` is typed `HexString[]`, so the
+ * mistake is unrepresentable rather than merely documented.
  *
  * Limitation: each raw script can appear at most once in `parameters`. Deploying
  * the same raw script twice with different params (e.g. two `always_fail`
@@ -78,8 +86,21 @@ export type CompilerType = (typeof CompilerType)[keyof typeof CompilerType];
 export interface Cip171ScriptEntry {
   /** 28-byte hex Blake2b-224 hash of the **un-parameterised** compiled script. */
   rawScriptHash: ScriptHash;
-  /** PlutusData arguments applied to that raw script to produce the deployed hash. */
-  params: PlutusData[];
+  /**
+   * Arguments applied to that raw script to produce the deployed hash, each as
+   * an **opaque byte string in hex** — NOT inline PlutusData.
+   *
+   * The published CDDL says `parameter_list = [ * plutus_data ]`, and it is
+   * wrong. The reference wire shape is `[ * bytes ]`: every element is a
+   * bytestring whose content is the parameter's CBOR encoding. Emitting inline
+   * PlutusData is not rejected by the registry — its parser reads `.bytes` on
+   * each element, gets an empty string, and stores a record whose parameters
+   * have silently vanished while the record itself still parses.
+   *
+   * The type is `string[]` rather than `PlutusData[]` precisely so that mistake
+   * cannot be made: use {@link cip171Param} to serialize PlutusData.
+   */
+  params: HexString[];
 }
 
 export interface Cip171Record {
@@ -152,6 +173,15 @@ function validateCip171Record(record: Cip171Record): void {
     throw new Error("CIP-171: a record with no scripts claims nothing; refusing to encode it");
   }
   for (const e of record.scripts) {
+    for (const p of e.params) {
+      if (typeof p !== "string" || !/^([0-9a-fA-F]{2})*$/.test(p) || p.length === 0) {
+        throw new Error(
+          `CIP-171: parameters must be non-empty hex byte strings, got ${JSON.stringify(p)} ` +
+          `for ${e.rawScriptHash}. Serialize PlutusData with cip171Param() — inline PlutusData ` +
+          `is silently dropped by the reference registry.`
+        );
+      }
+    }
     if (!isHexOfBytes(e.rawScriptHash, 28)) {
       throw new Error(
         `CIP-171: rawScriptHash must be a 28-byte hex string (56 hex chars), got ` +
@@ -175,7 +205,12 @@ export function buildCip171PlutusData(record: Cip171Record): PlutusData {
       );
     }
     seen.add(k);
-    entries.push([Data.bytearray(e.rawScriptHash), Data.list(e.params)]);
+    entries.push([
+      Data.bytearray(e.rawScriptHash),
+      // Each param wrapped as a BYTESTRING. Inline PlutusData here is the
+      // published-CDDL reading and it corrupts silently — see Cip171ScriptEntry.
+      Data.list(e.params.map((p) => Data.bytearray(p))),
+    ]);
   }
 
   // Canonical map ordering: ascending by key bytes. The reference registry's
@@ -289,7 +324,9 @@ export function decodeCip171PlutusData(data: PlutusData): Cip171Record {
     if (!Array.isArray(v)) {
       throw new Error(`CIP-171: expected List for params of ${rawScriptHash}`);
     }
-    scripts.push({ rawScriptHash, params: [...v] });
+    // Elements are bytestrings on the wire; surface them as hex, matching the
+    // encoder's input shape so a decode/encode round-trip is lossless.
+    scripts.push({ rawScriptHash, params: v.map((p) => Bytes.toHex(asBytes(p))) });
   }
   return { compilerType, sourceUrl, commitHash, sourcePath, compilerVersion, env, scripts };
 }
@@ -314,4 +351,16 @@ function utf8ToHex(s: string): HexString {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
+}
+
+/**
+ * Serialize a PlutusData parameter to the hex byte string a CIP-171 record
+ * expects, using the encoding the reference registry reproduces.
+ *
+ * A verifier applies these to the un-parameterised script via
+ * `applyParamsToScript` and compares the resulting hash, so the bytes must be
+ * exactly what the original build applied.
+ */
+export function cip171Param(data: PlutusData): HexString {
+  return Data.toCBORHex(data, CIP171_CBOR_OPTIONS);
 }
