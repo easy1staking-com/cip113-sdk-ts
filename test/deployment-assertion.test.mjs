@@ -22,6 +22,7 @@ import {
   assertDeploymentScripts,
   DeploymentMismatchError,
 } from "../dist/standard/scripts.js";
+import * as scriptsModule from "../dist/standard/scripts.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const blueprint = JSON.parse(
@@ -97,4 +98,73 @@ test("NEGATIVE: a mismatched blueprint is rejected wholesale", () => {
     readFileSync(resolve(ROOT, "blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json"), "utf-8")
   );
   assert.throws(() => assertDeploymentScripts(wrongBlueprint, PREPROD));
+});
+
+// ---------------------------------------------------------------------------
+// Where the assertion has value, and where it does not
+// ---------------------------------------------------------------------------
+
+test("VACUOUS at bootstrap: a fully self-derived deployment always passes", () => {
+  // Not a feature — the LIMIT of the check, locked in so nobody mistakes a
+  // green bootstrap self-check for verification.
+  //
+  // A bootstrap derives every hash, populates DeploymentParams from those same
+  // values, then asserts. Both sides of every comparison share one origin, so
+  // the assertion passes no matter how wrong the parameterization is. Below is
+  // exactly that shape, with deliberately arbitrary inputs.
+  const b = scriptsModule.createStandardScripts(blueprint);
+
+  const ppTx = { txHash: "aa".repeat(32), outputIndex: 0 };
+  const issTx = { txHash: "cc".repeat(32), outputIndex: 1 };
+  const afA = "bb".repeat(28);
+  const afB = "dd".repeat(28);
+
+  const ppMint = b.protocolParamsMint(ppTx, afA).hash;
+  const plg = b.programmableLogicGlobal(ppMint).hash;
+  const plb = b.programmableLogicBase(plg).hash;
+  const issCbor = b.issuanceCborHexMint(issTx, afB).hash;
+  const regMint = b.registryMint(ppTx, issCbor).hash;
+  const regSpend = b.registrySpend(ppMint).hash;
+
+  const selfDerived = {
+    txHash: "ee".repeat(32),
+    protocolParams: { txInput: ppTx, policyId: ppMint, alwaysFailScriptHash: afA },
+    programmableLogicGlobal: { policyId: plg, scriptHash: plg },
+    programmableLogicBase: { scriptHash: plb },
+    issuance: { txInput: issTx, policyId: issCbor, alwaysFailScriptHash: afB },
+    directoryMint: { txInput: ppTx, issuanceScriptHash: issCbor, scriptHash: regMint },
+    directorySpend: { policyId: ppMint, scriptHash: regSpend },
+    programmableBaseRefInput: { txHash: "ee".repeat(32), outputIndex: 3 },
+    programmableGlobalRefInput: { txHash: "ee".repeat(32), outputIndex: 4 },
+  };
+
+  const checks = assertDeploymentScripts(blueprint, selfDerived);
+  assert.equal(checks.length, 6);
+  for (const c of checks) assert.equal(c.derived, c.deployed);
+  // Passing here proves only self-consistency — never that the deployment is
+  // correct against the protocol actually on chain.
+});
+
+test("VALUABLE on load: a stale deployment against a changed blueprint is caught", () => {
+  // The real defect this exists for: a blueprint replaced in place while the
+  // deployment stays put. This repo shipped exactly that — same v0.3.0
+  // directory name, 4 of 8 validator hashes moved.
+  const changed = structuredClone(blueprint);
+  const v = changed.validators.find((x) => x.title === "registry_spend.registry_spend.spend");
+  assert.ok(v, "fixture must contain registry_spend");
+  // Perturb the compiled code the way a genuine upstream rebuild would.
+  v.compiledCode = v.compiledCode.slice(0, -2) + (v.compiledCode.endsWith("00") ? "01" : "00");
+
+  assert.throws(
+    () => assertDeploymentScripts(changed, PREPROD),
+    (err) => {
+      assert.ok(err instanceof DeploymentMismatchError);
+      assert.ok(
+        err.mismatches.some((m) => m.name === "registry_spend"),
+        `expected registry_spend to mismatch, got: ${err.mismatches.map((m) => m.name).join(", ")}`
+      );
+      return true;
+    },
+    "a deployment paired with a different blueprint MUST be rejected"
+  );
 });

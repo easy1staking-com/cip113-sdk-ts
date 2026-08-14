@@ -163,6 +163,20 @@ export class DeploymentMismatchError extends Error {
  *
  * Not covered: the two always_fail hashes (their nonces are not carried in
  * DeploymentParams) and issuance_mint (parameterized per minting logic).
+ *
+ * WHERE THIS CHECK HAS VALUE — and where it has none.
+ *
+ * It is only meaningful when the blueprint and the deployment come from
+ * INDEPENDENT sources, so that they can actually disagree: a deployment loaded
+ * from disk, a database, or the chain, checked against the blueprint currently
+ * bundled. That is the case it catches, and the failure it catches is real —
+ * this repo shipped a blueprint swapped in place under an unchanged directory
+ * name, with 4 of 8 validator hashes moved.
+ *
+ * It proves NOTHING at bootstrap time. A deployment script derives the hashes,
+ * populates DeploymentParams from those same values, and then asserts against
+ * them — a tautology that cannot fail. Do not read a passing assertion inside a
+ * bootstrap as evidence that the deployment is correct; assert on LOAD instead.
  */
 export function assertDeploymentScripts(
   blueprint: PlutusBlueprint,
