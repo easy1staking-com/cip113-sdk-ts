@@ -90,7 +90,59 @@ export interface Cip171Record {
  * Build the CIP-171 PlutusData record (the structure stored under metadata 1984
  * once chunks are reassembled and decoded).
  */
+/** Hex string of exactly `bytes` bytes, case-insensitive. */
+function isHexOfBytes(s: unknown, ...bytes: number[]): boolean {
+  return typeof s === "string" && bytes.some((b) => new RegExp(`^[0-9a-fA-F]{${b * 2}}$`).test(s));
+}
+
+/**
+ * Validate a record before it is encoded.
+ *
+ * A CIP-171 record is a PERMANENT, PUBLIC claim that a set of deployed scripts
+ * was produced from a named repository at a named commit. It goes on chain in
+ * transaction metadata and cannot be retracted. A malformed or placeholder
+ * commit hash therefore does not fail loudly at some later point — it becomes
+ * an immutable false provenance record that verifiers will try, and fail, to
+ * reproduce.
+ *
+ * This cannot detect a well-formed but WRONG commit. It does stop the realistic
+ * accidents: a null, empty, truncated or placeholder value reaching the chain
+ * because the blueprint's provenance was never actually established.
+ */
+function validateCip171Record(record: Cip171Record): void {
+  if (!isHexOfBytes(record.commitHash, 20, 32)) {
+    throw new Error(
+      `CIP-171: commitHash must be a 20- or 32-byte hex string (40 or 64 hex chars), got ` +
+      `${record.commitHash === undefined ? "undefined" : JSON.stringify(record.commitHash)}. ` +
+      `This record is a permanent on-chain claim about where the deployed scripts came from — ` +
+      `do not emit one until the blueprint's provenance is actually known.`
+    );
+  }
+  if (typeof record.sourceUrl !== "string" || record.sourceUrl.trim() === "") {
+    throw new Error("CIP-171: sourceUrl must be a non-empty repository URL");
+  }
+  if (typeof record.compilerVersion !== "string" || record.compilerVersion.trim() === "") {
+    throw new Error(
+      "CIP-171: compilerVersion must be non-empty — verifiers reproduce hashes with this exact compiler"
+    );
+  }
+  if (record.scripts.length === 0) {
+    throw new Error("CIP-171: a record with no scripts claims nothing; refusing to encode it");
+  }
+  for (const e of record.scripts) {
+    if (!isHexOfBytes(e.rawScriptHash, 28)) {
+      throw new Error(
+        `CIP-171: rawScriptHash must be a 28-byte hex string (56 hex chars), got ` +
+        `${JSON.stringify(e.rawScriptHash)}. These are the UN-parameterised hashes from ` +
+        `plutus.json, not the deployed ones.`
+      );
+    }
+  }
+}
+
 export function buildCip171PlutusData(record: Cip171Record): PlutusData {
+  validateCip171Record(record);
+
   const seen = new Set<string>();
   const entries: Array<[PlutusData, PlutusData]> = [];
   for (const e of record.scripts) {

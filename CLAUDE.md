@@ -47,9 +47,11 @@ consumer owns the version:
   Cardano library (no lucid, no MeshJS, no cardano-serialization-lib) — that is an escalation.
 - `effect` ^3 — transitively required by Evolution SDK.
 
-Dev-only: `typescript`, `@types/node`. The `examples/` package additionally uses `tsx` and
-`dotenv`, and talks to Blockfrost. Adding any *non-peer* runtime dependency to the published
-package is an escalation to Giovanni, not a judgment call.
+Dev-only: `typescript`, `@types/node`, and `tsx` (added 2026-08-14 so the devnet harness can be
+written in TypeScript; never published — `files` is an allowlist of `dist` and `blueprints`).
+The `examples/` package additionally uses `tsx` and `dotenv`, and talks to Blockfrost. Adding any
+*non-peer* runtime dependency to the published package is an escalation to Giovanni, not a
+judgment call — and adding even a dev dependency means updating this list in the same commit.
 
 **Open question (deliberately undecided, 2026-08-14):** whether `examples/` should become its
 own package or repo. It is already a separate npm package (`examples/package.json`, its own

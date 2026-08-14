@@ -104,3 +104,55 @@ test("chunkBytes splits at the boundary, never over it", () => {
   assert.equal(over[0].length, 64);
   assert.equal(over[1].length, 1);
 });
+
+// ---------------------------------------------------------------------------
+// Refusing to write false provenance on chain
+// ---------------------------------------------------------------------------
+//
+// A CIP-171 record is permanent and public. The realistic accident is not a
+// malicious wrong commit — it is a placeholder reaching the chain because the
+// blueprint's provenance was never established. This repo has exactly that
+// situation today: blueprints/standard/v0.3.0 is pinned UNVERIFIED with
+// upstream.commit === null, so a bootstrap that read the pin and emitted a
+// record would encode `null` as a provenance claim that can never be retracted.
+
+test("rejects a null commit hash — the unverified-provenance case", () => {
+  assert.throws(
+    () => buildCip171PlutusData({ ...record, commitHash: null }),
+    /commitHash must be a 20- or 32-byte hex string/,
+    "a pin with commit: null must not become an on-chain claim"
+  );
+});
+
+test("rejects placeholder and truncated commit hashes", () => {
+  for (const bad of ["", "unknown", "TBD", "8143853", "deadbeef", "z".repeat(40)]) {
+    assert.throws(
+      () => buildCip171PlutusData({ ...record, commitHash: bad }),
+      /commitHash must be/,
+      `"${bad}" must be rejected`
+    );
+  }
+});
+
+test("accepts both 20-byte and 32-byte commit hashes", () => {
+  assert.ok(buildCip171PlutusData({ ...record, commitHash: "ab".repeat(20) }));
+  assert.ok(buildCip171PlutusData({ ...record, commitHash: "ab".repeat(32) }));
+});
+
+test("rejects a raw script hash that is not 28 bytes", () => {
+  // The commonest confusion: passing a DEPLOYED (parameterised) hash, or a
+  // transaction id, where the un-parameterised plutus.json hash belongs.
+  assert.throws(
+    () => buildCip171PlutusData({
+      ...record,
+      scripts: [{ rawScriptHash: "ab".repeat(32), params: [] }],
+    }),
+    /rawScriptHash must be a 28-byte hex string/
+  );
+});
+
+test("rejects an empty record — it would claim nothing", () => {
+  assert.throws(() => buildCip171PlutusData({ ...record, scripts: [] }), /claims nothing/);
+  assert.throws(() => buildCip171PlutusData({ ...record, sourceUrl: "  " }), /sourceUrl/);
+  assert.throws(() => buildCip171PlutusData({ ...record, compilerVersion: "" }), /compilerVersion/);
+});
