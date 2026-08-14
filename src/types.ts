@@ -83,6 +83,14 @@ export interface PlutusBlueprint {
   preamble: {
     title: string;
     version: string;
+    description?: string;
+    plutusVersion?: string;
+    /** Compiler that produced this blueprint — CIP-171 verifiers reproduce hashes with it */
+    compiler?: {
+      name: string;
+      version: string;
+    };
+    license?: string;
   };
   validators: BlueprintValidator[];
   definitions?: Record<string, unknown>;

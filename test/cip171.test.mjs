@@ -1,0 +1,106 @@
+/**
+ * CIP-171 encode/decode round-trip and wire-format invariants.
+ *
+ * Salvaged from the abandoned bafin branch (commit c944966), where it existed
+ * as a console.log script that printed "ROUNDTRIP OK" and exited. Converted to
+ * assertions so a regression fails a run instead of printing a different word
+ * into a log nobody reads.
+ *
+ * The chunk-size invariant is the load-bearing one: Cardano rejects any single
+ * metadata bytestring over 64 bytes, so a record that encodes fine but chunks
+ * wrong produces a transaction the ledger refuses.
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { Data } from "@evolution-sdk/evolution";
+import {
+  CIP171_METADATA_LABEL,
+  CIP171_MAX_CHUNK_BYTES,
+  CompilerType,
+  buildCip171Metadatum,
+  buildCip171PlutusData,
+  chunkBytes,
+  decodeCip171Metadatum,
+  decodeCip171PlutusData,
+} from "../dist/core/cip171.js";
+
+/** A record describing the upstream contracts this SDK is pinned against. */
+const record = {
+  compilerType: CompilerType.AIKEN,
+  sourceUrl: "https://github.com/cardano-foundation/cip113-programmable-tokens",
+  commitHash: "81438534f83550789e13961db17b59d606cf8a8e",
+  sourcePath: "",
+  compilerVersion: "v1.1.21+42babe5",
+  scripts: [
+    {
+      rawScriptHash: "e9d8d9c7fc531f0b179d502c86bffee829613c537794dab053ae28fe",
+      params: [Data.bytearray("daa1e3ec7f567c31a48598407ba1503810bd824a4a01a83e7cef7015bced1339")],
+    },
+    {
+      rawScriptHash: "29c78c576f9a399449b3b8d0339616f5fbe8f7334bcc7cd2c087d538",
+      params: [
+        Data.constr(0n, [Data.bytearray("aa".repeat(32)), Data.int(0n)]),
+        Data.bytearray("e9d8d9c7fc531f0b179d502c86bffee829613c537794dab053ae28fe"),
+      ],
+    },
+  ],
+};
+
+test("metadata label is the CIP-10 registered value", () => {
+  assert.equal(CIP171_METADATA_LABEL, 1984n);
+});
+
+test("round-trip preserves every field", () => {
+  const decoded = decodeCip171Metadatum(buildCip171Metadatum(record));
+
+  assert.equal(decoded.compilerType, record.compilerType);
+  assert.equal(decoded.sourceUrl, record.sourceUrl);
+  assert.equal(decoded.commitHash, record.commitHash);
+  assert.equal(decoded.sourcePath, record.sourcePath, "empty sourcePath must survive");
+  assert.equal(decoded.compilerVersion, record.compilerVersion);
+  assert.equal(decoded.scripts.length, record.scripts.length);
+
+  for (const [i, s] of decoded.scripts.entries()) {
+    assert.equal(s.rawScriptHash, record.scripts[i].rawScriptHash, `script ${i} hash`);
+    assert.equal(s.params.length, record.scripts[i].params.length, `script ${i} param count`);
+  }
+});
+
+test("no chunk exceeds the 64-byte ledger limit", () => {
+  const chunks = buildCip171Metadatum(record);
+  assert.ok(chunks.length > 0, "expected at least one chunk");
+  for (const [i, c] of chunks.entries()) {
+    assert.ok(
+      c.length <= CIP171_MAX_CHUNK_BYTES,
+      `chunk ${i} is ${c.length} bytes — the ledger rejects anything over ${CIP171_MAX_CHUNK_BYTES}`
+    );
+  }
+});
+
+test("chunks concatenate back to exactly the CBOR payload", () => {
+  const cbor = Data.toCBORBytes(buildCip171PlutusData(record));
+  const chunks = buildCip171Metadatum(record);
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+
+  assert.equal(total, cbor.length, "chunking must not add or drop bytes");
+  assert.deepEqual(Buffer.concat(chunks.map(Buffer.from)), Buffer.from(cbor));
+});
+
+test("PlutusData round-trips independently of chunking", () => {
+  const decoded = decodeCip171PlutusData(buildCip171PlutusData(record));
+  assert.equal(decoded.sourceUrl, record.sourceUrl);
+  assert.equal(decoded.commitHash, record.commitHash);
+  assert.equal(decoded.scripts.length, record.scripts.length);
+});
+
+test("chunkBytes splits at the boundary, never over it", () => {
+  // Exactly at the limit: one chunk, untouched.
+  assert.equal(chunkBytes(new Uint8Array(64), 64).length, 1);
+  // One byte over: two chunks, and the split is 64 + 1.
+  const over = chunkBytes(new Uint8Array(65), 64);
+  assert.equal(over.length, 2);
+  assert.equal(over[0].length, 64);
+  assert.equal(over[1].length, 1);
+});

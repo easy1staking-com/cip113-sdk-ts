@@ -36,6 +36,18 @@ export function getValidatorCode(
 }
 
 /**
+ * Get a validator's un-parameterised script hash from a blueprint by title.
+ * This is the hash Aiken stamps in plutus.json — what CIP-171 verifiers
+ * reproduce by compiling the source repo at the named commit.
+ */
+export function getValidatorHash(
+  blueprint: PlutusBlueprint,
+  title: string
+): HexString {
+  return getValidator(blueprint, title).hash;
+}
+
+/**
  * Get a validator entry from a blueprint by title.
  */
 export function getValidator(
