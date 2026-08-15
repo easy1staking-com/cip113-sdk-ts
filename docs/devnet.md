@@ -83,9 +83,23 @@ await client.getUtxos(addressObj);
 await client.getUtxos(EvoAddress.toBech32(addressObj));   // WRONG — fails opaquely
 ```
 
-## Exclusive resource
+## Shared chain, exclusive lifecycle
 
-The machine has exactly one devnet. Everything lives under a single `~/.yaci-cli` with one
-`local-clusters/default` and one node socket, so remapping ports would **not** isolate two
-users — the contention is the cluster directory, not the ports. It is arbitrated on the machine
-board; request and release it there rather than discovering the collision.
+**Use it freely. You do not need to claim it.** It is a testnet: multiple projects can put
+transactions on the same ledger simultaneously, each deploying its own scripts and funding as
+many of its own wallets as it likes. That is what a shared devnet is for.
+
+**Coordinate before anything destructive** — `up`, `down`, reset, or `--help` (which kills it,
+see above). Those are the operations that are genuinely exclusive, because the machine has
+exactly one cluster: a single `~/.yaci-cli` with one `local-clusters/default` and one node
+socket, so remapping ports would not isolate two lifecycles. Restarts should be rare; ordinary
+use needs no coordination at all.
+
+Two reasons a restart is expensive beyond the coordination:
+
+- **Kupo does not come back.** It is started manually (see above) and nothing restarts it.
+- **A reset wipes everyone's state**, including any suite mid-run.
+
+The distinction matters and is easy to get backwards: a single-instance *lifecycle* constraint
+is not single-tenancy of the *chain*. Treating it as the latter serialises work that never
+needed serialising.
