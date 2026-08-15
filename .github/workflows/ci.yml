@@ -18,3 +18,53 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+
+      # Offline unit tests. `npm test` never touches the network — the devnet
+      # suite is a separate command (`npm run test:devnet`) and is NOT run here,
+      # because CI has no Yaci devnet. That separation is deliberate: it means a
+      # green CI makes no claim about on-chain behaviour, rather than making one
+      # it cannot support.
+      - run: npm test
+
+      # A test runner reporting "0 failed" is not evidence that anything ran.
+      # This repo has already been bitten twice: a `.ts` test file the runner
+      # never matched (reported 0 skipped, because a file it does not match is
+      # invisible rather than skipped), and a suite in a neighbouring project
+      # that skipped silently for weeks. So assert the count and that nothing
+      # was skipped, rather than trusting the exit code.
+      - name: Assert tests actually ran
+        run: |
+          set -euo pipefail
+          npm test 2>&1 | tee /tmp/test.log
+          pass=$(grep -E '^# pass ' /tmp/test.log | awk '{print $3}')
+          fail=$(grep -E '^# fail ' /tmp/test.log | awk '{print $3}')
+          skip=$(grep -E '^# skipped ' /tmp/test.log | awk '{print $3}')
+          echo "pass=$pass fail=$fail skipped=$skip"
+          test -n "$pass" || { echo "::error::could not parse a test count — did the suite run at all?"; exit 1; }
+          test "$fail" = "0" || { echo "::error::$fail test(s) failed"; exit 1; }
+          test "$skip" = "0" || { echo "::error::$skip test(s) skipped — this repo does not skip; a skip is a silent gap"; exit 1; }
+          test "$pass" -ge 25 || { echo "::error::only $pass tests ran, expected >=25 — test files are being missed"; exit 1; }
+
+      # The published tarball is an allowlist (`files: [dist, blueprints]`).
+      # Verify what would actually ship rather than what we intend to ship:
+      # factory state, tests, harness and devkit droppings must all be absent.
+      - name: Assert the published tarball contains only what it should
+        run: |
+          set -euo pipefail
+          npm pack --dry-run --json > /tmp/pack.json
+          node -e '
+            const files = require("/tmp/pack.json")[0].files.map(f => f.path);
+            const forbidden = files.filter(f =>
+              /^(test\/|PLAN\.md|WORKLOG\.md|\.fabbrica\/|logs\/|yaci-cli\.history|src\/)/.test(f));
+            if (forbidden.length) {
+              console.error("::error::these must not be published:\n" + forbidden.join("\n"));
+              process.exit(1);
+            }
+            const hasDist = files.some(f => f.startsWith("dist/"));
+            const hasBlueprints = files.some(f => f.startsWith("blueprints/"));
+            if (!hasDist || !hasBlueprints) {
+              console.error("::error::tarball is missing dist/ or blueprints/");
+              process.exit(1);
+            }
+            console.log(`tarball OK: ${files.length} files`);
+          '

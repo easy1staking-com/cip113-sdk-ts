@@ -61,25 +61,31 @@ ruling from Giovanni.
 
 ## Commands
 
-Verification here is **typecheck + build only**. Proven on 2026-08-14, Node v20.20.2 /
-npm 10.8.2, from a clean `npm ci`:
+Proven on 2026-08-14/15, Node v20.20.2 / npm 10.8.2, from a clean `npm ci`:
 
 | Command | Proves | Observed |
 |---|---|---|
-| `npm ci` | Lockfile installs cleanly | green — 43 packages, ~1s |
+| `npm ci` | Lockfile installs cleanly | green |
 | `npm run typecheck` | `tsc --noEmit` over `src/**` — whole public surface typechecks | green — exit 0 |
 | `npm run build` | `tsc` emits `dist/` (js + .d.ts + maps) — the published artifact compiles | green — exit 0 |
-| `npm test` | build + `node --test test/` — blueprint provenance guard and the deployment hash assertion | green — 7 pass, 0 fail, 0 skipped |
+| `npm test` | build + offline unit tests. **Never touches the network.** | green — 31 pass, 0 fail, 0 skipped |
+| `npm run test:devnet` | build + devnet tests against a live Yaci chain | green — 4 pass, 0 fail, 0 skipped (requires a devnet) |
 
 Other scripts: `npm run dev` (`tsc --watch`), `npm run clean` (`rm -rf dist`),
 `npm run prepublishOnly` (clean + build).
 
-**Test coverage is narrow and deliberately so — know what it does and does not prove.**
-`npm test` uses `node:test` (built into Node 20, zero dependencies) and covers exactly two
-things: that every bundled blueprint matches its `UPSTREAM_PIN.json`, and that
-`assertDeploymentScripts` reproduces the shipped deployment *and rejects a wrong value of the
-correct type*. Both guards are proof-of-harness verified — each was made to go red before being
-accepted as green.
+**Know what the tests do and do not prove.** `npm test` uses `node:test` (built into Node 20)
+and covers: blueprint provenance pins, the deployment hash assertion (including its negative
+case and its *vacuous* case), and CIP-171 encoding — the last asserted **byte-identical against
+uplc-link's own cross-language fixture**, since that registry silently drops records it cannot
+parse. Guards here are proof-of-harness verified: each was made to go red by mutation before
+being accepted as green.
+
+`npm run test:devnet` is a **separate command that requires a live devnet and fails loudly
+without one** — there is deliberately no skip path. See `docs/devnet.md`, and note the two ways
+this repo has already been bitten: a neighbouring project's suite skipped silently for weeks, and
+a `.ts` test file here was never matched by the runner while the suite reported "0 skipped"
+(a file the runner does not match is invisible, not skipped).
 
 Still absent: **no linter, no formatter, and no test that builds or submits a transaction.**
 Consequences a ticket owner must plan around:
@@ -89,10 +95,19 @@ Consequences a ticket owner must plan around:
   Blockfrost key. That is manual, costs real testnet ADA, is slow, and is not reproducible in
   CI. Treat any claim of "verified" that rests on it with proportionate scepticism.
 - The devnet harness that closes this gap is PLAN.md workstream W-A.
-- CI runs `typecheck` + `build` only; it does **not** yet run `npm test`. Wire that in with W-A.
+- CI runs `typecheck`, `build` and `npm test`, and additionally asserts that the tests **actually
+  ran** (parses the count, requires 0 failed, 0 skipped, and a minimum pass count) and that the
+  published tarball contains no `test/`, `src/` or factory files. Both guards are mutation-tested.
+  CI deliberately does **not** run `npm run test:devnet` — there is no devnet there, so a green CI
+  makes no claim about on-chain behaviour rather than one it cannot support.
 
-CI (`.github/workflows/ci.yml`) runs `npm ci → typecheck → build` on Node 20 for pushes and PRs
-to `main` — i.e. CI proves exactly what the table above proves, and nothing more.
+CI (`.github/workflows/ci.yml`) runs `npm ci → typecheck → build → npm test` on Node 20 for
+pushes and PRs to `main`, then two guards against the failure modes this repo has actually hit:
+it asserts the tests **ran** (parses the count; requires 0 failed, 0 skipped, and a minimum pass
+count, because an exit code cannot distinguish "all passed" from "nothing ran"), and it inspects
+the **published tarball** via `npm pack --dry-run` to prove no `test/`, `src/` or factory file
+would ship. Both guards are mutation-tested.
+
 `.github/workflows/publish.yml` publishes to npm on GitHub release, via npm 11 with OIDC
 provenance (`id-token: write`).
 
