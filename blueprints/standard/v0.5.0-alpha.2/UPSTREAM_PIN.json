@@ -1,0 +1,33 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "bd297f36e9e955d814fb3a67fbc7e51c2344b54d952d38b03ef9f32c1d43b9ad",
+  "declares": {
+    "title": "cardano-foundation/cip113-programmable-tokens",
+    "version": "0.5.0-alpha.2",
+    "compiler": "Aiken v1.1.23+8949565",
+    "validators": 27
+  },
+  "upstream": {
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+    "commit": "9db7e0629a1509cc9d41d069f0ef0ed251601173",
+    "ref": "main",
+    "note": "PINNED TO THE COMMIT, NOT THE VERSION STRING. Upstream publishes NO git tags at all (`git ls-remote --tags` returns nothing); \"0.5.0-alpha.2\" is a `version` field inside plutus.json on a MOVING branch, so it will eventually name two different programs. The commit is the identity; the version string is a label. See PLAN.md D-11."
+  },
+  "blueprint_reproduced": true,
+  "provenance": "VERIFIED",
+  "reproduce": {
+    "requires": "Aiken v1.1.23+8949565",
+    "command": "git clone https://github.com/cardano-foundation/cip113-programmable-tokens && git checkout 9db7e0629a1509cc9d41d069f0ef0ed251601173 && aikup install v1.1.23 && aiken build",
+    "note": "`aikup install v1.1.23` with the version explicit, never bare `aikup install`, which follows latest and will stop reproducing this artifact the moment v1.1.24 ships."
+  },
+  "verified": {
+    "date": "2026-08-24",
+    "method": "REPRODUCED FROM SOURCE",
+    "findings": [
+      "OBSERVED: `aiken build` at upstream commit 9db7e06, with Aiken v1.1.23+8949565, produced a plutus.json BYTE-IDENTICAL to the one upstream commits at that same commit. Both sha256 bd297f36e9e955d814fb3a67fbc7e51c2344b54d952d38b03ef9f32c1d43b9ad, both 114406 bytes, `cmp` clean. The build ran in an isolated extraction (`git archive`), not in a working tree that already contained the artifact; upstream's committed copy was moved aside before the build so it could not be mistaken for output.",
+      "This is the first blueprint this repository ships whose provenance is OBSERVED rather than asserted. Contrast blueprints/standard/v0.3.0, pinned UNVERIFIED with commit null: it matches NO commit in upstream's plutus.json history.",
+      "OBSERVED: the toolchain requirement is exact, not a floor. The machine-global Aiken was v1.1.22+39d6b04 and was moved to v1.1.23+8949565 to perform this build (reversible: `aikup install v1.1.22`). The artifact's own preamble declares v1.1.23+8949565.",
+      "DERIVED: because the pin is keyed to a commit on a moving branch, re-running `aiken build` against `main` at a LATER date will legitimately produce a different artifact. That is not drift in this pin — it is a new pin. Do not update this file's sha256 to make a newer build pass; add a new directory."
+    ]
+  }
+}

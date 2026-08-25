@@ -22,6 +22,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const PINNED = [
   "blueprints/standard/v0.3.0",
+  "blueprints/standard/v0.5.0-alpha.2",
   "blueprints/substandards/freeze-and-seize/v0.1.0",
   "blueprints/substandards/dummy/v0.1.0",
 ];
