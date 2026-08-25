@@ -1,27 +1,43 @@
 /**
- * Standard script parameterization.
+ * Standard script parameterization — CIP-113 0.5.0-alpha.2 (upstream 9db7e06).
  *
- * Replicates the parameterization chain from ProtocolScriptBuilderService.java.
  * Uses Evolution SDK directly for UPLC.applyParamsToScript and ScriptHash.
  *
- * Dependency graph:
+ * Dependency graph. Note it is NO LONGER a single chain: upstream #110 removed
+ * programmable_logic_global, and PLB is now parameterised by the params-NFT
+ * policy rather than by PLG's credential, so everything downstream hangs off
+ * `params_policy` in parallel instead of in series.
  *
- *   always_fail(nonce) → hash
- *   protocol_params_mint(utxo_ref, always_fail_hash) → hash
- *   programmable_logic_global(protocol_params_hash) → hash
- *   programmable_logic_base(Script(plg_hash)) → hash
- *   issuance_cbor_hex_mint(utxo_ref, always_fail_hash) → hash
- *   registry_mint(utxo_ref, issuance_cbor_hex_hash) → hash
- *   registry_spend(protocol_params_hash) → hash
- *   issuance_mint(Script(plb_hash), registry_mint_hash, Script(minting_logic_hash)) → hash
+ *   always_fail(nonce)                          -> hash   (issuance side only now)
+ *   coordination_spend(nonce)                   -> hash   NEW: the lock target
+ *   protocol_params_mint(utxo_ref, coord_hash)  -> policy  == params_policy
+ *     |
+ *     +-- programmable_logic_base(params_policy) -> hash
+ *     +-- transfer(params_policy)                -> hash   (PLG's transfer arm, renamed)
+ *     +-- third_party(params_policy)             -> hash   NEW: seize / clawback
+ *     +-- unfracking(params_policy)              -> hash
+ *     +-- registry_spend(params_policy)          -> hash
+ *
+ *   issuance_cbor_hex_mint(utxo_ref, always_fail_hash)              -> policy
+ *   registry_mint(utxo_ref, issuance_cbor_hex_cs, registry_spend_cred) -> policy
+ *   issuance_mint(PLB_cred, registry_node_cs, minting_logic_cred, params_policy)
+ *   upgrade_multisig(signers, threshold)        -> hash   (independent)
+ *
+ * ⚠ PARAMETER TYPES ARE NOT INTERCHANGEABLE and TypeScript cannot tell them
+ * apart — every one of these is a hex string at the call site. `params_policy`
+ * is a PolicyId (a bare ByteArray); `minting_logic_cred` and friends are
+ * Credentials (a constructor-wrapped Script/VerificationKey). Passing a policy
+ * where a credential belongs produces a valid script with the wrong hash. The
+ * types below come from the blueprint's own parameter schemas, not from
+ * upstream's prose docs — see the hazard note in blueprint.ts.
  */
-
 import { Data } from "@evolution-sdk/evolution";
 import type {
   DeploymentParams,
   HexString,
   PlutusBlueprint,
   PlutusScript,
+  PolicyId,
   ScriptHash,
   TxInput,
 } from "../types.js";
@@ -38,13 +54,33 @@ import {
 
 export interface StandardScripts {
   alwaysFail(nonce: HexString): PlutusScript;
-  protocolParamsMint(utxoRef: TxInput, alwaysFailHash: ScriptHash): PlutusScript;
-  programmableLogicGlobal(protocolParamsHash: ScriptHash): PlutusScript;
-  programmableLogicBase(plgHash: ScriptHash): PlutusScript;
+  /** NEW in 0.5.x — the coordination UTxO's spender; nonce is arbitrary, per deployment. */
+  coordinationSpend(nonce: HexString): PlutusScript;
+  /** 2nd param is coordination_spend's hash in 0.5.x, always_fail's in 0.3.x. */
+  protocolParamsMint(utxoRef: TxInput, coordinationHash: ScriptHash): PlutusScript;
+  /** Takes the params-NFT POLICY now, not PLG's credential. */
+  programmableLogicBase(paramsPolicy: PolicyId): PlutusScript;
+  /** PLG's transfer arm, renamed by #110. */
+  transfer(paramsPolicy: PolicyId): PlutusScript;
+  /** Seize / clawback, split out of PLG by #110. */
+  thirdParty(paramsPolicy: PolicyId): PlutusScript;
+  unfracking(paramsPolicy: PolicyId): PlutusScript;
+  upgradeMultisig(signers: HexString[], threshold: number | bigint): PlutusScript;
   issuanceCborHexMint(utxoRef: TxInput, alwaysFailHash: ScriptHash): PlutusScript;
-  registryMint(utxoRef: TxInput, issuanceCborHexHash: ScriptHash): PlutusScript;
-  registrySpend(protocolParamsHash: ScriptHash): PlutusScript;
-  issuanceMint(plbHash: ScriptHash, registryMintHash: ScriptHash, mintingLogicHash: ScriptHash): PlutusScript;
+  /** Arity 2 -> 3: gained registry_spend's credential. */
+  registryMint(
+    utxoRef: TxInput,
+    issuanceCborHexPolicy: PolicyId,
+    registrySpendHash: ScriptHash,
+  ): PlutusScript;
+  registrySpend(paramsPolicy: PolicyId): PlutusScript;
+  /** Arity 3 -> 4: gained params_policy. */
+  issuanceMint(
+    plbHash: ScriptHash,
+    registryNodePolicy: PolicyId,
+    mintingLogicHash: ScriptHash,
+    paramsPolicy: PolicyId,
+  ): PlutusScript;
 }
 
 /**
@@ -61,27 +97,43 @@ export function createStandardScripts(
 
   return {
     alwaysFail(nonce) {
-      return parameterize(STANDARD_VALIDATORS.ALWAYS_FAIL, [
-        Data.bytearray(nonce),
-      ]);
+      return parameterize(STANDARD_VALIDATORS.ALWAYS_FAIL, [Data.bytearray(nonce)]);
     },
 
-    protocolParamsMint(utxoRef, alwaysFailHash) {
+    coordinationSpend(nonce) {
+      return parameterize(STANDARD_VALIDATORS.COORDINATION_SPEND, [Data.bytearray(nonce)]);
+    },
+
+    protocolParamsMint(utxoRef, coordinationHash) {
       return parameterize(STANDARD_VALIDATORS.PROTOCOL_PARAMS_MINT, [
         outputReference(utxoRef),
-        Data.bytearray(alwaysFailHash),
+        Data.bytearray(coordinationHash),
       ]);
     },
 
-    programmableLogicGlobal(protocolParamsHash) {
-      return parameterize(STANDARD_VALIDATORS.PROGRAMMABLE_LOGIC_GLOBAL, [
-        Data.bytearray(protocolParamsHash),
-      ]);
-    },
-
-    programmableLogicBase(plgHash) {
+    programmableLogicBase(paramsPolicy) {
+      // PolicyId — a bare ByteArray. It was scriptCredential(plgHash) before #110.
       return parameterize(STANDARD_VALIDATORS.PROGRAMMABLE_LOGIC_BASE, [
-        scriptCredential(plgHash),
+        Data.bytearray(paramsPolicy),
+      ]);
+    },
+
+    transfer(paramsPolicy) {
+      return parameterize(STANDARD_VALIDATORS.TRANSFER, [Data.bytearray(paramsPolicy)]);
+    },
+
+    thirdParty(paramsPolicy) {
+      return parameterize(STANDARD_VALIDATORS.THIRD_PARTY, [Data.bytearray(paramsPolicy)]);
+    },
+
+    unfracking(paramsPolicy) {
+      return parameterize(STANDARD_VALIDATORS.UNFRACKING, [Data.bytearray(paramsPolicy)]);
+    },
+
+    upgradeMultisig(signers, threshold) {
+      return parameterize(STANDARD_VALIDATORS.UPGRADE_MULTISIG, [
+        Data.list(signers.map((s) => Data.bytearray(s))),
+        Data.int(BigInt(threshold)),
       ]);
     },
 
@@ -92,24 +144,26 @@ export function createStandardScripts(
       ]);
     },
 
-    registryMint(utxoRef, issuanceCborHexHash) {
+    registryMint(utxoRef, issuanceCborHexPolicy, registrySpendHash) {
       return parameterize(STANDARD_VALIDATORS.REGISTRY_MINT, [
         outputReference(utxoRef),
-        Data.bytearray(issuanceCborHexHash),
+        Data.bytearray(issuanceCborHexPolicy),
+        scriptCredential(registrySpendHash),
       ]);
     },
 
-    registrySpend(protocolParamsHash) {
+    registrySpend(paramsPolicy) {
       return parameterize(STANDARD_VALIDATORS.REGISTRY_SPEND, [
-        Data.bytearray(protocolParamsHash),
+        Data.bytearray(paramsPolicy),
       ]);
     },
 
-    issuanceMint(plbHash, registryMintHash, mintingLogicHash) {
+    issuanceMint(plbHash, registryNodePolicy, mintingLogicHash, paramsPolicy) {
       return parameterize(STANDARD_VALIDATORS.ISSUANCE_MINT, [
         scriptCredential(plbHash),
-        Data.bytearray(registryMintHash),
+        Data.bytearray(registryNodePolicy),
         scriptCredential(mintingLogicHash),
+        Data.bytearray(paramsPolicy),
       ]);
     },
   };
@@ -161,8 +215,11 @@ export class DeploymentMismatchError extends Error {
  * check that catches it, and it is why buildDeploymentScripts no longer
  * overwrites derived hashes with deployment values.
  *
- * Not covered: the two always_fail hashes (their nonces are not carried in
- * DeploymentParams) and issuance_mint (parameterized per minting logic).
+ * Not covered: always_fail (its nonce is not carried in DeploymentParams),
+ * issuance_mint (parameterized per minting logic), and upgrade_multisig (its
+ * signers/threshold are an authority choice, not a derived protocol value).
+ * coordination_spend IS covered — DeploymentParams carries its nonce precisely
+ * so the lock target can be re-derived rather than trusted.
  *
  * WHERE THIS CHECK HAS VALUE — and where it has none.
  *
@@ -186,24 +243,37 @@ export function assertDeploymentScripts(
 
   const checks: ScriptHashCheck[] = [
     {
+      name: "coordination_spend",
+      derived: builders.coordinationSpend(deployment.coordinationNonce).hash,
+      deployed: deployment.coordination.scriptHash,
+    },
+    {
       name: "protocol_params_mint",
       derived: builders.protocolParamsMint(
         deployment.protocolParams.txInput,
-        deployment.protocolParams.alwaysFailScriptHash
+        deployment.protocolParams.coordinationScriptHash
       ).hash,
       deployed: deployment.protocolParams.policyId,
     },
     {
-      name: "programmable_logic_global",
-      derived: builders.programmableLogicGlobal(deployment.protocolParams.policyId).hash,
-      deployed: deployment.programmableLogicGlobal.scriptHash,
+      name: "programmable_logic_base",
+      derived: builders.programmableLogicBase(deployment.protocolParams.policyId).hash,
+      deployed: deployment.programmableLogicBase.scriptHash,
     },
     {
-      name: "programmable_logic_base",
-      derived: builders.programmableLogicBase(
-        deployment.programmableLogicGlobal.scriptHash
-      ).hash,
-      deployed: deployment.programmableLogicBase.scriptHash,
+      name: "transfer",
+      derived: builders.transfer(deployment.protocolParams.policyId).hash,
+      deployed: deployment.transfer.scriptHash,
+    },
+    {
+      name: "third_party",
+      derived: builders.thirdParty(deployment.protocolParams.policyId).hash,
+      deployed: deployment.thirdParty.scriptHash,
+    },
+    {
+      name: "unfracking",
+      derived: builders.unfracking(deployment.protocolParams.policyId).hash,
+      deployed: deployment.unfracking.scriptHash,
     },
     {
       name: "issuance_cbor_hex_mint",
@@ -214,17 +284,18 @@ export function assertDeploymentScripts(
       deployed: deployment.issuance.policyId,
     },
     {
-      name: "registry_mint",
-      derived: builders.registryMint(
-        deployment.directoryMint.txInput,
-        deployment.issuance.policyId
-      ).hash,
-      deployed: deployment.directoryMint.scriptHash,
-    },
-    {
       name: "registry_spend",
       derived: builders.registrySpend(deployment.protocolParams.policyId).hash,
       deployed: deployment.directorySpend.scriptHash,
+    },
+    {
+      name: "registry_mint",
+      derived: builders.registryMint(
+        deployment.directoryMint.txInput,
+        deployment.issuance.policyId,
+        deployment.directorySpend.scriptHash
+      ).hash,
+      deployed: deployment.directoryMint.scriptHash,
     },
   ];
 
@@ -250,55 +321,48 @@ export function buildDeploymentScripts(
   assertDeploymentScripts(blueprint, deployment);
 
   const builders = createStandardScripts(blueprint);
-
-  const protocolParamsMint = builders.protocolParamsMint(
-    deployment.protocolParams.txInput,
-    deployment.protocolParams.alwaysFailScriptHash
-  );
-
-  const programmableLogicGlobal = builders.programmableLogicGlobal(
-    deployment.protocolParams.policyId
-  );
-
-  const programmableLogicBase = builders.programmableLogicBase(
-    deployment.programmableLogicGlobal.scriptHash
-  );
-
-  const issuanceCborHexMint = builders.issuanceCborHexMint(
-    deployment.issuance.txInput,
-    deployment.issuance.alwaysFailScriptHash
-  );
-
-  const registryMint = builders.registryMint(
-    deployment.directoryMint.txInput,
-    deployment.issuance.policyId
-  );
-
-  const registrySpend = builders.registrySpend(
-    deployment.protocolParams.policyId
-  );
+  const paramsPolicy = deployment.protocolParams.policyId;
 
   return {
-    protocolParamsMint,
-    programmableLogicGlobal,
-    programmableLogicBase,
-    issuanceCborHexMint,
-    registryMint,
-    registrySpend,
+    coordinationSpend: builders.coordinationSpend(deployment.coordinationNonce),
+    protocolParamsMint: builders.protocolParamsMint(
+      deployment.protocolParams.txInput,
+      deployment.protocolParams.coordinationScriptHash
+    ),
+    programmableLogicBase: builders.programmableLogicBase(paramsPolicy),
+    transfer: builders.transfer(paramsPolicy),
+    thirdParty: builders.thirdParty(paramsPolicy),
+    unfracking: builders.unfracking(paramsPolicy),
+    issuanceCborHexMint: builders.issuanceCborHexMint(
+      deployment.issuance.txInput,
+      deployment.issuance.alwaysFailScriptHash
+    ),
+    registryMint: builders.registryMint(
+      deployment.directoryMint.txInput,
+      deployment.issuance.policyId,
+      deployment.directorySpend.scriptHash
+    ),
+    registrySpend: builders.registrySpend(paramsPolicy),
     buildIssuanceMint(mintingLogicHash: ScriptHash) {
       return builders.issuanceMint(
         deployment.programmableLogicBase.scriptHash,
         deployment.directoryMint.scriptHash,
-        mintingLogicHash
+        mintingLogicHash,
+        paramsPolicy
       );
     },
   };
 }
 
 export interface ResolvedStandardScripts {
+  coordinationSpend: PlutusScript;
   protocolParamsMint: PlutusScript;
-  programmableLogicGlobal: PlutusScript;
   programmableLogicBase: PlutusScript;
+  /** PLG's transfer arm, renamed by #110. */
+  transfer: PlutusScript;
+  /** Seize / clawback. */
+  thirdParty: PlutusScript;
+  unfracking: PlutusScript;
   issuanceCborHexMint: PlutusScript;
   registryMint: PlutusScript;
   registrySpend: PlutusScript;

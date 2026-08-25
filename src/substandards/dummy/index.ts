@@ -95,6 +95,39 @@ export function dummySubstandard(config: {
     },
 
     async transfer(params: TransferParams): Promise<UnsignedTx> {
+      // ⚠ BLOCKED ON T-D04 — do not "fix" by deleting this throw.
+      //
+      // Upstream #110/#109 replaced the redeemers this line builds:
+      //   * programmable_logic_base.spend: untyped -> BaseSpendRedeemer,
+      //     i.e. SpendViaTransfer { params_idx, wdrl_idx } for this path;
+      //   * ProgrammableLogicGlobalRedeemer.TransferAct -> the `transfer`
+      //     validator's TransferRedeemer { params_idx, proofs }.
+      //
+      // `params_idx` and `wdrl_idx` are POSITIONS the builder must compute
+      // after coin selection (ledger-sorted reference inputs; ledger-ordered
+      // withdrawal map, script credentials before key credentials, bytewise
+      // within each). Neither is expressible without T-D04.
+      //
+      // The old encoder still exists and still typechecks. Left reachable it
+      // would build a transaction the chain rejects with no local signal —
+      // precisely the failure mode this milestone exists to eliminate. So it
+      // refuses instead, and names its successor.
+      // NOTE the `: boolean` annotation. Without it TypeScript infers the
+      // literal type `false`, folds the branch, and marks the whole body
+      // below unreachable — at which point it stops narrowing and the
+      // pre-existing UTxO guards start reporting `UTxO | undefined`. The
+      // annotation keeps the body type-checked and reviewable so the T-D04
+      // migration is a readable diff rather than a rewrite from memory.
+      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
+      if (!MIGRATED_TO_0_5_ALPHA_2)
+        throw new Error(
+        "dummy.transfer is not yet migrated to CIP-113 0.5.0-alpha.2. " +
+        "programmable_logic_global was dissolved (upstream #110): this path now needs a " +
+        "BaseSpendRedeemer(SpendViaTransfer { params_idx, wdrl_idx }) on every " +
+        "programmable_logic_base input, plus a TransferRedeemer { params_idx, proofs } " +
+        "withdrawal against the `transfer` validator. Blocked on ticket T-D04 " +
+        "(params_idx / wdrl_idx derivation). See PLAN.md, workstream W-D."
+        );
       const { senderAddress, recipientAddress, tokenPolicyId, assetName, quantity } = params;
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
@@ -128,7 +161,11 @@ export function dummySubstandard(config: {
       // 5. Get protocol params UTxO
       const ppUnit = ctx.deployment.protocolParams.policyId + stringToHex("ProtocolParams");
       const ppAddr = EvoAddress.fromBech32(
-        scriptAddress(networkId, ctx.deployment.protocolParams.alwaysFailScriptHash)
+        // 0.5.x: the params NFT is locked at coordination_spend, NOT always_fail.
+        // The parameter that names this target kept its arity AND type across
+        // that change, so nothing but this line's correctness stands between a
+        // deployment and a UTxO lookup that silently finds nothing.
+        scriptAddress(networkId, ctx.deployment.coordination.scriptHash)
       );
       const ppUtxos = await client.getUtxosWithUnit(ppAddr, ppUnit);
       if (ppUtxos.length === 0) throw new Error(`Protocol params UTxO not found (unit: ${ppUnit})`);
@@ -164,7 +201,7 @@ export function dummySubstandard(config: {
       });
 
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -184,7 +221,7 @@ export function dummySubstandard(config: {
       });
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(transferScript.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
 

@@ -169,7 +169,8 @@ async function findProtocolParamsUtxo(
 ): Promise<EvoUTxO.UTxO> {
   const ppUnit = deployment.protocolParams.policyId + stringToHex("ProtocolParams");
   const addr = EvoAddress.fromBech32(
-    scriptAddress(networkId, deployment.protocolParams.alwaysFailScriptHash)
+    // 0.5.x: params NFT lives at coordination_spend, not always_fail.
+    scriptAddress(networkId, deployment.coordination.scriptHash)
   );
   const utxos = await client.getUtxosWithUnit(addr, ppUnit);
   if (utxos.length > 0) return utxos[0];
@@ -545,7 +546,7 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: voidData(),
       });
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -557,7 +558,7 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.mintAssets({ assets: burnAssets, redeemer: issuanceRedeemer });
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
@@ -653,7 +654,7 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.collectFrom({ inputs: selected, redeemer: spendRdmr });
 
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -680,7 +681,7 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.readFrom({ referenceInputs: [...proofUtxos, protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.transfer.compiledCode) });
 
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(senderStakingHash) });
@@ -982,7 +983,7 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: voidData(),
       });
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -1003,7 +1004,7 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
