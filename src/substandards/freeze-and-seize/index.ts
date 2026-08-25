@@ -55,7 +55,6 @@ import {
   mintingProofOutputIndex,
   mintingProofRefInput,
   registryInsertRedeemer,
-  transferActRedeemer,
   thirdPartyActRedeemer,
   blacklistInitRedeemer,
   blacklistAddRedeemer,
@@ -77,6 +76,12 @@ import {
   hasCIP67Label,
   buildCIP68FTDatum,
 } from "../../core/evo-utils.js";
+import {
+  baseSpendRedeemer,
+  transferRedeemer,
+  withdrawalIndexOf,
+  type WithdrawalKey,
+} from "../../core/ledger-order.js";
 import { createFESScripts } from "./scripts.js";
 import type { FESDeploymentParams } from "./types.js";
 
@@ -239,45 +244,23 @@ export function freezeAndSeizeSubstandard(config: {
 
     init(context) {
       // ---------------------------------------------------------------------
-      // T-D09 QUARANTINE — freeze-and-seize is NOT migrated to 0.5.0-alpha.2.
+      // MIGRATION STATE (W-E). Read this before assuming an operation works.
       // ---------------------------------------------------------------------
       //
-      // This plugin refuses to initialise rather than compiling cleanly and
-      // building transactions the chain rejects. Three independent reasons, any
-      // one of which is sufficient:
+      // The blanket refusal that D-14 installed is GONE: `register`, `mint`,
+      // `transfer`, `initCompliance`, `freeze` and `unfreeze` are migrated to
+      // CIP-113 0.5.0-alpha.2 and this plugin initialises.
       //
-      //  1. `ThirdPartyAct` NO LONGER EXISTS. Upstream #110 dissolved
-      //     programmable_logic_global; seize/clawback is now the standalone
-      //     `third_party` validator, invoked via its own withdraw-0 carrying a
-      //     ThirdPartyRedeemer, with SpendViaThirdParty on every PLB input.
-      //     Every seize path here is written against the removed redeemer.
+      // ⚠ `seize` and `burn` are NOT. Both take the THIRD-PARTY route, and
+      // upstream #110 deleted the `ThirdPartyAct` redeemer they are written
+      // against: they now need the standalone `third_party` validator's
+      // withdraw-0 carrying a ThirdPartyRedeemer, plus
+      // BaseSpendRedeemer(SpendViaThirdParty) on every programmable input.
+      // They refuse individually rather than blocking the whole substandard —
+      // an operation that cannot work should fail, but it should not take five
+      // that do work with it.
       //
-      //  2. Its RegistryNode field reads are POSITIONAL AND NOW OFF BY TWO.
-      //     This code reads transfer at index 2, third-party at 3 and
-      //     globalStateCs at 4 — the pre-#52 five-field layout. In the current
-      //     seven-field layout those live at 3, 4 and 6. The reads still
-      //     typecheck and still return a value; it is simply the wrong field.
-      //
-      //  3. Seize builders must additionally be re-validated against #79's
-      //     UTxO-contamination rules and #80's issuance-delegation scope, and
-      //     against #115, which now bans datum hashes and reference scripts on
-      //     programmable outputs.
-      //
-      // Scope: PLAN.md D-14 puts freeze-and-seize outside this epic ("just
-      // core") with its own epic to follow. Deliberately NOT half-migrated —
-      // a partly-updated compliance substandard is worse than an absent one,
-      // because it looks available.
-      throw new Error(
-        "freeze-and-seize is not migrated to CIP-113 0.5.0-alpha.2 and refuses to initialise. " +
-          "Upstream #110 dissolved programmable_logic_global: seize/clawback now requires the " +
-          "`third_party` validator's withdraw-0 with a ThirdPartyRedeemer plus " +
-          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input, and " +
-          "this plugin's RegistryNode field reads are positional against the retired 5-field " +
-          "layout (transfer/third-party/globalStateCs moved from 2/3/4 to 3/4/6). " +
-          "Use the `dummy` substandard, or pin an SDK release targeting the 0.3.x contracts. " +
-          "Tracked as the freeze-and-seize epic; see PLAN.md D-14."
-      );
-
+      // Tracked as W-E S-5.
       ctx = context;
       networkId = ctx.client.chain.id;
       const { adminPkh, assetName, blacklistNodePolicyId, blacklistInitTxInput } = config.deployment;
@@ -540,6 +523,24 @@ export function freezeAndSeizeSubstandard(config: {
     // BURN
     // ====================================================================
     async burn(params: BurnParams): Promise<UnsignedTx> {
+      // ⚠ NOT MIGRATED — see the migration note in init(). This path is written
+      // against `ThirdPartyAct`, which upstream #110 DELETED.
+      //
+      // The `: boolean` annotation is load-bearing: without it TypeScript infers
+      // the literal `false`, folds the branch, marks the body below unreachable
+      // and stops narrowing — at which point the pre-existing UTxO guards start
+      // reporting `UTxO | undefined`. Keeping the body type-checked keeps S-5 a
+      // readable diff instead of a rewrite from memory.
+      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
+      if (!MIGRATED_TO_0_5_ALPHA_2)
+        throw new Error(
+        "freeze-and-seize.burn is not yet migrated to CIP-113 0.5.0-alpha.2. It takes the " +
+          "third-party route, and #110 replaced that redeemer: it now requires the `third_party` " +
+          "validator's withdraw-0 with a ThirdPartyRedeemer plus " +
+          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input. " +
+          "Tracked as PLAN.md W-E S-5. register/mint/transfer/freeze/unfreeze DO work."
+      );
+
       const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx } = params;
       const holder = params.holderAddress || feePayerAddress;
       const unit = tokenPolicyId + assetName;
@@ -694,16 +695,36 @@ export function freezeAndSeizeSubstandard(config: {
       );
 
       const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
+      const paramsIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(protocolParamsUtxo));
 
       // 8. Get sender's wallet UTxOs
       const senderWalletUtxos = await client.getUtxos(EvoAddress.fromBech32(senderAddress));
 
-      // 9. Build redeemers
+      // 9. Build redeemers — 0.5.x shapes.
+      //
+      // The withdrawal set must be COMPLETE and in LEDGER order: script
+      // credentials before key credentials, bytewise within each. This
+      // transaction carries two, both scripts — the framework's `transfer`
+      // delegate and this substandard's own transfer logic.
+      const coreTransferKey: WithdrawalKey = {
+        hash: ctx.standardScripts.transfer.hash,
+        isScript: true,
+      };
+      const fesLogicKey: WithdrawalKey = { hash: scripts.transfer.hash, isScript: true };
+      const transferWdrlIdx = withdrawalIndexOf([coreTransferKey, fesLogicKey], coreTransferKey);
+
       const fesTransferRedeemer = Data.list(
         proofIndices.map((idx) => Data.constr(0n, [Data.int(BigInt(idx))]))
       );
-      const plgRedeemer = transferActRedeemer([{ type: "exists", nodeIdx: registryIdx }]);
-      const spendRdmr = voidData();
+      // TransferRedeemer { params_idx, proofs } — params_idx was PREPENDED by
+      // #109; an old TransferAct encoder's bytes are not compatible.
+      const plgRedeemer = transferRedeemer(paramsIdx, [
+        { type: "exists", nodeIdx: registryIdx },
+      ]);
+      // programmable_logic_base no longer takes an untyped redeemer: it
+      // dispatches on the constructor and witnesses where its delegate's
+      // withdrawal sits.
+      const spendRdmr = baseSpendRedeemer("TRANSFER", paramsIdx, transferWdrlIdx);
       const tokenDatum = voidData();
 
       // 10. Build transaction
@@ -962,6 +983,24 @@ export function freezeAndSeizeSubstandard(config: {
     // SEIZE
     // ====================================================================
     async seize(params: SeizeParams): Promise<UnsignedTx> {
+      // ⚠ NOT MIGRATED — see the migration note in init(). This path is written
+      // against `ThirdPartyAct`, which upstream #110 DELETED.
+      //
+      // The `: boolean` annotation is load-bearing: without it TypeScript infers
+      // the literal `false`, folds the branch, marks the body below unreachable
+      // and stops narrowing — at which point the pre-existing UTxO guards start
+      // reporting `UTxO | undefined`. Keeping the body type-checked keeps S-5 a
+      // readable diff instead of a rewrite from memory.
+      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
+      if (!MIGRATED_TO_0_5_ALPHA_2)
+        throw new Error(
+        "freeze-and-seize.seize is not yet migrated to CIP-113 0.5.0-alpha.2. It takes the " +
+          "third-party route, and #110 replaced that redeemer: it now requires the `third_party` " +
+          "validator's withdraw-0 with a ThirdPartyRedeemer plus " +
+          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input. " +
+          "Tracked as PLAN.md W-E S-5. register/mint/transfer/freeze/unfreeze DO work."
+      );
+
       const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress } = params;
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
