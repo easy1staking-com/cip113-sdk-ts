@@ -1,0 +1,36 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "c75e41f6ff3f71c278ac4765741ea6cf1e222fa24d5601d85e5e3a25bb15ed0f",
+  "declares": {
+    "title": "wsc-poc/aiken-policy",
+    "description": "Aiken contracts for project 'wsc-poc/aiken-policy'",
+    "version": "0.0.0",
+    "compiler": "Aiken v1.1.21+42babe5",
+    "validators": 6
+  },
+  "upstream": {
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+    "path": "src/substandards/dummy",
+    "commit": "013c11544839754d462e0603de59f4bbf1769479",
+    "note": "SOURCE LOCATED. The v0.1.0 pin recorded repo: null / provenance: UNKNOWN because nobody had recorded where this came from. It is the `dummy` substandard in cardano-foundation/cip113-programmable-tokens-platform. The blueprint's own preamble still says 'wsc-poc/aiken-policy' — that is the aiken.toml project name inside that directory, not a separate repository, which is precisely why it looked orphaned."
+  },
+  "blueprint_reproduced": true,
+  "provenance": "UNVERIFIED",
+  "reproduce": {
+    "requires": "Aiken v1.1.21+42babe5",
+    "command": "cd src/substandards/dummy && aiken build",
+    "note": "aiken.toml pins v1.1.21. ⚠ aiken BUILDS ANYWAY on a mismatched compiler, emitting only a warning — a blueprint built on the wrong toolchain is indistinguishable from a correct one by inspection. Check the preamble's compiler field, do not trust the environment."
+  },
+  "verified": {
+    "date": "2026-08-25",
+    "method": "BUILT FROM LOCATED SOURCE",
+    "findings": [
+      "OBSERVED: adds `transfer.issue.publish` and `transfer.transfer.publish`, which v0.1.0 lacked entirely. Without them the stake credentials of these two withdraw-0 validators CANNOT BE REGISTERED (a Conway RegCert runs the script under the PUBLISH purpose and falls through to `else`), so the substandard could not register, mint or transfer at all under CIP-113 0.5.x.",
+      "OBSERVED: byte-identical across two clean rebuilds with the pinned compiler.",
+      "⚠ PROVENANCE IS UNVERIFIED, NOT VERIFIED, AND THE DISTINCTION IS THE POINT. The named commit 013c115 exists ONLY IN A LOCAL CLONE on this workstation. It has not been pushed, reviewed or merged, so no third party can reproduce this artifact from the recorded commit. It becomes VERIFIED when that commit is pushed and the hash re-confirmed against the public repo — not before.",
+      "The publish handlers permit REGISTRATION ONLY (RegisterCredential -> True, everything else -> False). Deregistration is refused deliberately: an unregistered credential cannot be withdrawn against, so a permissive publish handler would let any third party disable every token governed by this substandard. Same shape as upstream's core validators.",
+      "v0.1.0 is retained alongside, unchanged. It is the artifact this SDK shipped and its provenance record is part of the history; it is also now known non-functional against 0.5.x.",
+      "For the record, v0.1.0 did NOT match this source project's own committed blueprint either: v0.1.0 is sha256 42d95e76… built with Aiken v1.1.19, while the platform repo's committed copy at 61374e3 is sha256 6574d840… built with v1.1.21. The SDK was shipping an artifact older than the source project's own."
+    ]
+  }
+}

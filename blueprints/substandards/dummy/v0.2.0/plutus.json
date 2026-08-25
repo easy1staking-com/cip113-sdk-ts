@@ -1,0 +1,84 @@
+{
+  "preamble": {
+    "title": "wsc-poc/aiken-policy",
+    "description": "Aiken contracts for project 'wsc-poc/aiken-policy'",
+    "version": "0.0.0",
+    "plutusVersion": "v3",
+    "compiler": {
+      "name": "Aiken",
+      "version": "v1.1.21+42babe5"
+    },
+    "license": "Apache-2.0"
+  },
+  "validators": [
+    {
+      "title": "transfer.issue.withdraw",
+      "redeemer": {
+        "title": "redeemer",
+        "schema": {
+          "$ref": "#/definitions/Int"
+        }
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a0054832004c024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "4be2c6d3f5c5e66f45d20801c0d55341f0ae3b939187c9591ec29028"
+    },
+    {
+      "title": "transfer.issue.publish",
+      "redeemer": {
+        "title": "_r",
+        "schema": {
+          "$ref": "#/definitions/Data"
+        }
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a0054832004c024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "4be2c6d3f5c5e66f45d20801c0d55341f0ae3b939187c9591ec29028"
+    },
+    {
+      "title": "transfer.issue.else",
+      "redeemer": {
+        "schema": {}
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a0054832004c024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "4be2c6d3f5c5e66f45d20801c0d55341f0ae3b939187c9591ec29028"
+    },
+    {
+      "title": "transfer.transfer.withdraw",
+      "redeemer": {
+        "title": "redeemer",
+        "schema": {
+          "$ref": "#/definitions/Int"
+        }
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a005482400cc024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "6ae51f97696717eb0de100c151a30965a3c4ff97c167124b2b206ba9"
+    },
+    {
+      "title": "transfer.transfer.publish",
+      "redeemer": {
+        "title": "_r",
+        "schema": {
+          "$ref": "#/definitions/Data"
+        }
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a005482400cc024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "6ae51f97696717eb0de100c151a30965a3c4ff97c167124b2b206ba9"
+    },
+    {
+      "title": "transfer.transfer.else",
+      "redeemer": {
+        "schema": {}
+      },
+      "compiledCode": "588901010029800aba2aba1aab9eaab9dab9a488889660026464646644b30013370e900200144c8cdc39bad300a005482400cc024c020dd5001c56600266e1d2006002899192cc004cdc3a400060126ea8c02cc03000a294629410081bad300a0013008375400714a0803100618029baa00130070033006300700130060013003375400d149a26cac80081",
+      "hash": "6ae51f97696717eb0de100c151a30965a3c4ff97c167124b2b206ba9"
+    }
+  ],
+  "definitions": {
+    "Data": {
+      "title": "Data",
+      "description": "Any Plutus data."
+    },
+    "Int": {
+      "dataType": "integer"
+    }
+  }
+}

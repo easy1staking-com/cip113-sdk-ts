@@ -25,6 +25,7 @@ const PINNED = [
   "blueprints/standard/v0.5.0-alpha.2",
   "blueprints/substandards/freeze-and-seize/v0.1.0",
   "blueprints/substandards/dummy/v0.1.0",
+  "blueprints/substandards/dummy/v0.2.0",
 ];
 
 for (const dir of PINNED) {

@@ -36,60 +36,15 @@ import { readFileSync } from "node:fs";
 import { requireDevnet, makeClient, waitFor } from "../harness/yaci.mjs";
 import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
 import { recipientAddress } from "../harness/recipient.js";
+import { registerSubstandardCredentials } from "../harness/substandard-setup.js";
+import { computeScriptHash } from "../../dist/index.js";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 
 before(async () => {
   await requireDevnet();
 });
 
-test("BLOCKED: the bundled dummy blueprint cannot register its withdraw-0 credentials", async () => {
-  // ⛔ Asserts the BLOCKER, so this file fails the moment it is lifted — the same
-  // discipline the standard-side bootstrap used, and for the same reason: a
-  // skipped test is invisible and a permanently red one trains people to ignore
-  // failures.
-  //
-  // WHEN THIS FAILS, the fix is to delete this test and restore the lifecycle
-  // assertions preserved in `dummyLifecycleAssertions()` below.
-  //
-  // ⚠ And note what the standard side taught us: a blocker can vanish because it
-  // was FIXED or because it was RESTRUCTURED AWAY. PLG's blocker disappeared
-  // because PLG ceased to exist. Do not assume a publish-capable dummy blueprint
-  // means someone added a handler — check what actually changed.
-  const dummyBp = JSON.parse(readFileSync(dummyBlueprintPath(), "utf-8"));
-  const titles = dummyBp.validators.map((v: { title: string }) => v.title);
-
-  assert.ok(
-    !titles.includes("transfer.issue.publish") && !titles.includes("transfer.transfer.publish"),
-    "The dummy blueprint now HAS publish handlers — the blocker is lifted. Delete this test " +
-      "and wire up dummyLifecycleAssertions()."
-  );
-
-  const deployment = await bootstrapProtocol();
-  const client: any = await makeClient();
-
-  assert.throws(
-    () =>
-      CIP113.init({
-        client,
-        standard: { blueprint: loadStandardBlueprint(), deployment },
-        substandards: [dummySubstandard({ blueprint: dummyBp })],
-      }),
-    /cannot operate on CIP-113 0\.5\.x.*publish handler/s,
-    "dummy must refuse UP FRONT, naming the missing handlers — not fail three transactions " +
-      "later at submission with an unexplained reward-account error"
-  );
-});
-
-/**
- * The real lifecycle acceptance, kept ready for a publish-capable dummy blueprint.
- *
- * Deliberately not wired to a `test()`: it cannot pass, and a test that cannot
- * pass is either a skip (invisible) or a red (ignored). Everything it needs is
- * implemented — register, mint and transfer are all written and the register
- * transaction has been OBSERVED passing script evaluation on a devnet. Only the
- * withdraw-0 registration is blocked.
- */
-export async function dummyLifecycleAssertions() {
+test("register, mint and transfer a dummy token end to end", async () => {
   const deployment = await bootstrapProtocol();
   const client: any = await makeClient();
   const networkId = client.chain.id;
@@ -103,6 +58,17 @@ export async function dummyLifecycleAssertions() {
     ],
     evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
   });
+
+  // Deploy the substandard: its two withdraw-0 credentials must exist on chain
+  // before any of its operations can be built. This is the step the protocol
+  // bootstrap does NOT do — it registers the framework's delegates, not a
+  // substandard's.
+  const dummyBp = JSON.parse(readFileSync(dummyBlueprintPath(), "utf-8"));
+  const dummyScripts = ["transfer.issue.withdraw", "transfer.transfer.withdraw"].map((title) => {
+    const code = dummyBp.validators.find((v: { title: string }) => v.title === title)!.compiledCode;
+    return { type: "PlutusV3" as const, compiledCode: code, hash: computeScriptHash(code) };
+  });
+  await registerSubstandardCredentials(dummyScripts);
 
   const assetName = stringToHex("DUMMY");
   const plb = deployment.programmableLogicBase.scriptHash;
@@ -166,7 +132,7 @@ export async function dummyLifecycleAssertions() {
     timeoutMs: 120_000,
   });
   assert.equal(await heldAt(senderPlb, unit), before - 400n, "sender must fall by exactly 400");
-}
+});
 
 // ---------------------------------------------------------------------------
 // The T-D04 fixture constraint, made explicit and non-vacuous
