@@ -39,7 +39,21 @@ async function fetchJson(url, init, timeoutMs = 15_000) {
   try {
     const resp = await fetch(url, { ...init, signal: ctl.signal });
     if (!resp.ok) {
-      throw new Error(`${init?.method ?? "GET"} ${url} -> ${resp.status} ${resp.statusText}`);
+      // Include the BODY. Yaci's admin API returns a 500 with an empty
+      // statusText and puts the only useful information — e.g. {"status":false,
+      // "message":"Topup failed"} — in the body. Without this the error reads
+      // as "the API is broken" when it actually means "your request was
+      // rejected", and the two lead to completely different investigations.
+      let body = "";
+      try {
+        body = (await resp.text()).slice(0, 500);
+      } catch {
+        body = "(body unreadable)";
+      }
+      throw new Error(
+        `${init?.method ?? "GET"} ${url} -> ${resp.status} ${resp.statusText}` +
+          (body ? `\n  body: ${body}` : "")
+      );
     }
     const text = await resp.text();
     return text ? JSON.parse(text) : null;

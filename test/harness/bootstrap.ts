@@ -12,23 +12,26 @@
  * as a supported way to deploy a production protocol. It is not. Do not point
  * this at preprod or mainnet.
  *
- * Ported from the abandoned bafin branch (examples/bafin/00-deploy-standard.ts)
- * with two deliberate differences:
+ * TARGETS CIP-113 0.5.0-alpha.2 (upstream 9db7e06).
  *
- *  1. NO CIP-171 METADATA. The original emitted a label-1984 record reading its
- *     commit from UPSTREAM.json. That record is a permanent, public on-chain
- *     claim, and this repo's bundled blueprint is pinned UNVERIFIED with
- *     commit: null — there is no truthful record to emit. Under route (b) we
- *     deploy without one until a provenance-pinned blueprint exists (W-D).
- *     When it is added back, parameters MUST go through cip171Param(): passing
- *     `outputReference(...)` straight in emits inline PlutusData, which the
- *     reference registry reads as empty and silently drops.
+ * This is a REWRITE, not a port. programmable_logic_global is dissolved
+ * (upstream #110), so the topology changed rather than the parameters:
  *
- *  2. The self-check via buildDeploymentScripts is gone. It compared values
- *     derived from the blueprint against a DeploymentParams populated from
- *     those same values — a tautology that cannot fail. The meaningful check is
- *     assertDeploymentScripts on LOAD, which the test does after a round-trip
- *     through JSON.
+ *  * PLG's single withdraw-0 became THREE — `transfer`, `third_party` and
+ *    `unfracking` — and a bootstrap must register ALL THREE stake credentials.
+ *    Each carries its own `publish` handler, which is why the blocker that
+ *    stopped the previous version of this file is gone.
+ *  * The protocol-params NFT is locked at `coordination_spend`, NOT at
+ *    always_fail. `protocol_params_mint`'s 2nd parameter kept its arity and its
+ *    type across that change, so nothing but correctness stands here.
+ *  * The params datum is 7 fields and carries the live delegate credentials;
+ *    an upgrade rewrites them in place rather than redeploying PLB.
+ *
+ * The self-check via buildDeploymentScripts is deliberately absent: it compared
+ * values derived from the blueprint against a DeploymentParams populated from
+ * those same values — a tautology that cannot fail. The meaningful check is
+ * assertDeploymentScripts on LOAD, which the test does after a round-trip
+ * through JSON.
  */
 
 import { readFileSync } from "node:fs";
@@ -49,6 +52,9 @@ import {
 
 import {
   createStandardScripts,
+  protocolParamsDatum as buildProtocolParamsDatum,
+  registryNodeDatum,
+  paymentCredentialHash,
   buildEvoScript,
   scriptAddress,
   rewardAddress,
@@ -68,19 +74,42 @@ import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 /**
- * Fixed nonces so a rebuild of the same devnet yields the same always_fail
- * hashes. Two distinct instances are needed — one guarding protocol params,
- * one guarding the issuance CBOR NFT.
+ * Fixed nonces so a rebuild against the same devnet yields the same hashes.
+ *
+ * always_fail now guards ONLY the issuance CBOR NFT — the protocol-params NFT
+ * moved to coordination_spend, which takes its own nonce. That nonce is
+ * arbitrary and per-deployment BY DESIGN: coordination_spend cannot be
+ * parameterised by the params policy, because protocol_params_mint is itself
+ * parameterised by coordination_spend's address, and the dependency would be
+ * circular. The coordination UTxO is identified structurally instead.
  */
-const ALWAYS_FAIL_NONCE_A = "daa1e3ec7f567c31a48598407ba1503810bd824a4a01a83e7cef7015bced1339";
 const ALWAYS_FAIL_NONCE_B = "fa5b084bbdc0336c1e3c086617d99cf6ecff1a190116784a0dd54aeca948e8fe";
+const COORDINATION_NONCE = "5c1d0f3ab7e64c2189af03d6e5b7c4128d9e6a0f3b2c5d8e1f4a7b0c3d6e9f21";
+
+/**
+ * The #106-vector-3 inline-datum bound written into params datum field 6.
+ *
+ * DEVNET FIXTURE VALUE ONLY (PLAN.md D-17). It is a security parameter with no
+ * upstream guidance; 1024 is what upstream's own test fixtures use and is NOT a
+ * recommendation. The production value is deferred to the freeze-and-seize epic.
+ */
+const MAX_INLINE_DATUM_BYTES = 1024n;
 
 /** Placeholder minting-logic hash, split out of the issuance_mint CBOR body. */
 const DUMMY_POLICY_ID = "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeef";
 
 const SEED_ADA = 5_000_000n;
 const MIN_WALLET_ADA = 200_000_000n;
-const TOPUP_ADA = 500_000n; // ADA, not lovelace — the admin API takes ADA
+/**
+ * ADA, not lovelace — the admin API takes ADA.
+ *
+ * MEASURED: the devnet faucet rejects large requests with an opaque HTTP 500
+ * and {"status":false,"message":"Topup failed"} — it does NOT clamp to what it
+ * can afford. Each genesis account holds 10,000 ADA, and 500,000 (what this
+ * previously requested) fails outright. The bootstrap needs ~200 ADA of
+ * outputs plus fees, so 10,000 is ample with a wide margin.
+ */
+const TOPUP_ADA = 10_000n;
 
 /** Extract the PlutusV3 script body hex (inner UPLC, no outer CBOR wrap). */
 function scriptBodyHex(compiledCode: string): string {
@@ -95,39 +124,40 @@ function scriptBodyHex(compiledCode: string): string {
 
 export function loadStandardBlueprint(): PlutusBlueprint {
   return JSON.parse(
-    readFileSync(resolve(ROOT, "blueprints/standard/v0.3.0/plutus.json"), "utf-8")
+    readFileSync(resolve(ROOT, "blueprints/standard/v0.5.0-alpha.2/plutus.json"), "utf-8")
   );
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const PLG_PUBLISH = "programmable_logic_global.programmable_logic_global.publish";
-
 /**
- * A protocol bootstrap must register programmable_logic_global's stake
- * credential — PLG is a withdraw-0 validator and the protocol cannot operate
- * until its credential exists on chain. Evolution's `registerStake` emits a
- * Conway RegCert, which executes the script under the **publish** purpose.
+ * The three withdraw-0 delegates whose stake credentials a bootstrap must
+ * register. Registering emits a Conway RegCert, which runs the script under the
+ * PUBLISH purpose — so each needs a publish handler or the transaction dies at
+ * evaluation with a bare "machine terminated" and an empty trace list.
  *
- * A blueprint without a publish handler therefore falls through to `else` and
- * the transaction dies at evaluation with a bare "script terminated with
- * error" and an empty trace list — no indication of which handler is missing.
- * This check turns that into something actionable.
- *
- * The blueprint currently bundled at blueprints/standard/v0.3.0 has NO publish
- * handler. Upstream commit 8143853 and 0.5.0-alpha.1 both do.
+ * This precondition previously named programmable_logic_global and was the
+ * BLOCKER that stopped the earlier version of this fixture: the 0.3.0 blueprint
+ * had no publish handler at all. That blocker is gone, but not because it was
+ * fixed — PLG was dissolved, and its three successors each carry one. The check
+ * is kept because the failure it diagnoses is undiagnosable without it.
  */
-function requirePublishHandler(blueprint: PlutusBlueprint): void {
+const REQUIRED_PUBLISH_HANDLERS = [
+  "transfer.transfer.publish",
+  "third_party.third_party.publish",
+  "unfracking.unfracking.publish",
+] as const;
+
+function requirePublishHandlers(blueprint: PlutusBlueprint): void {
   const titles = blueprint.validators.map((v) => v.title);
-  if (!titles.includes(PLG_PUBLISH)) {
+  const missing = REQUIRED_PUBLISH_HANDLERS.filter((t) => !titles.includes(t));
+  if (missing.length > 0) {
     throw new Error(
-      `This blueprint cannot bootstrap a protocol: it has no "${PLG_PUBLISH}" handler, ` +
-      `so registering programmable_logic_global's stake credential fails at script ` +
-      `evaluation (purpose "publish") with no diagnostic.\n` +
-      `Present handlers: ${titles.filter((t) => t.startsWith("programmable_logic_global")).join(", ")}\n` +
-      `Blueprint: "${blueprint.preamble.title}" v${blueprint.preamble.version}.\n` +
-      `A blueprint carrying the publish handler is required — upstream 8143853 and ` +
-      `0.5.0-alpha.1 both have one. See PLAN.md (W-A3 / W-D).`
+      `This blueprint cannot bootstrap a protocol: it lacks publish handler(s) ` +
+        `${missing.join(", ")}, so registering the corresponding stake credential fails at ` +
+        `script evaluation (purpose "publish") with no diagnostic.\n` +
+        `Blueprint: "${blueprint.preamble.title}" v${blueprint.preamble.version}.\n` +
+        `Present handlers: ${titles.filter((t) => t.endsWith(".publish")).join(", ") || "(none)"}`
     );
   }
 }
@@ -199,23 +229,40 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
 
   // ---- Step 2: parameterise the standard scripts -------------------------
   const blueprint = loadStandardBlueprint();
-  requirePublishHandler(blueprint);
+  requirePublishHandlers(blueprint);
   const builders = createStandardScripts(blueprint);
 
-  const alwaysFailA = builders.alwaysFail(ALWAYS_FAIL_NONCE_A);
   const alwaysFailB = builders.alwaysFail(ALWAYS_FAIL_NONCE_B);
-  const protocolParamsMint = builders.protocolParamsMint(utxo1Ref, alwaysFailA.hash);
-  const plg = builders.programmableLogicGlobal(protocolParamsMint.hash);
-  const plb = builders.programmableLogicBase(plg.hash);
+
+  // coordination_spend is the lock target for the params NFT. It must be built
+  // BEFORE protocol_params_mint, which takes its hash.
+  const coordination = builders.coordinationSpend(COORDINATION_NONCE);
+  const protocolParamsMint = builders.protocolParamsMint(utxo1Ref, coordination.hash);
+
+  // Everything below hangs off the params-NFT POLICY, in parallel. This is no
+  // longer a chain: PLB used to be parameterised by PLG's credential, so the
+  // order was forced; it now takes params_policy like the delegates do.
+  const paramsPolicy = protocolParamsMint.hash;
+  const plb = builders.programmableLogicBase(paramsPolicy);
+  const transfer = builders.transfer(paramsPolicy);
+  const thirdParty = builders.thirdParty(paramsPolicy);
+  const unfracking = builders.unfracking(paramsPolicy);
+  const registrySpend = builders.registrySpend(paramsPolicy);
+
   const issuanceCborHexMint = builders.issuanceCborHexMint(utxo2Ref, alwaysFailB.hash);
-  const registryMint = builders.registryMint(utxo1Ref, issuanceCborHexMint.hash);
-  const registrySpend = builders.registrySpend(protocolParamsMint.hash);
+  const registryMint = builders.registryMint(utxo1Ref, issuanceCborHexMint.hash, registrySpend.hash);
+
+  // The upgrade authority. 1-of-1 on the bootstrapping wallet's own key, per
+  // PLAN.md D-15: "a single key update is fine" relaxes WHO may authorise, not
+  // the mechanism — the coordination UTxO and its datum are fully wired.
+  const adminPkh = paymentCredentialHash(address);
+  const upgradeMultisig = builders.upgradeMultisig([adminPkh], 1);
 
   // issuance_mint is parameterised per minting logic, which is not known until
   // a token is registered. Build it once against a placeholder and store the
   // CBOR either side of that placeholder, so registration can splice in the
   // real hash without re-deriving the whole script.
-  const issuanceDummy = builders.issuanceMint(plb.hash, registryMint.hash, DUMMY_POLICY_ID);
+  const issuanceDummy = builders.issuanceMint(plb.hash, registryMint.hash, DUMMY_POLICY_ID, paramsPolicy);
   const dummyBody = scriptBodyHex(issuanceDummy.compiledCode);
   const splitParts = dummyBody.split(DUMMY_POLICY_ID);
   if (splitParts.length !== 2) {
@@ -226,23 +273,36 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   const [cborPre, cborPost] = splitParts;
 
   // ---- Step 3: addresses & datums ----------------------------------------
-  const parametersAlwaysFailAddr = scriptAddress(networkId, alwaysFailA.hash);
+  // The params NFT lives at coordination_spend now — always_fail no longer
+  // guards it. This single line is the whole of the lock-target change, and
+  // nothing in the type system can tell it from the old one.
+  const coordinationAddr = scriptAddress(networkId, coordination.hash);
   const issuanceAlwaysFailAddr = scriptAddress(networkId, alwaysFailB.hash);
   const registrySpendAddr = scriptAddress(networkId, registrySpend.hash);
 
-  const protocolParamsDatum = Data.constr(0n, [
-    Data.bytearray(registryMint.hash),
-    scriptCredential(plb.hash),
-  ]);
+  const paramsDatum = buildProtocolParamsDatum({
+    registryNodeCs: registryMint.hash,
+    progLogicCred: { type: "script", hash: plb.hash },
+    transferCred: { type: "script", hash: transfer.hash },
+    thirdPartyCred: { type: "script", hash: thirdParty.hash },
+    unfrackingCred: { type: "script", hash: unfracking.hash },
+    upgradeCred: { type: "script", hash: upgradeMultisig.hash },
+    maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
+  });
 
-  // Sentinel head of the registry linked list: key "", next 0xff*30.
-  const directoryDatum = Data.constr(0n, [
-    Data.bytearray(""),
-    Data.bytearray("ff".repeat(30)),
-    Data.constr(0n, [Data.bytearray("")]),
-    Data.constr(0n, [Data.bytearray("")]),
-    Data.bytearray(""),
-  ]);
+  // Sentinel head of the registry linked list: key "", next 0xff*30, and every
+  // delegate slot empty. SEVEN fields now — minting_logic_script was inserted
+  // at index 2 (#52) and unfracking_logic_script at index 5 (unfracking v2).
+  const EMPTY_CRED = { type: "key" as const, hash: "" };
+  const directoryDatum = registryNodeDatum({
+    key: "",
+    next: "ff".repeat(30),
+    mintingLogicScript: EMPTY_CRED,
+    transferLogicScript: EMPTY_CRED,
+    thirdPartyTransferLogicScript: EMPTY_CRED,
+    unfrackingLogicScript: EMPTY_CRED,
+    globalStateCs: "",
+  });
 
   const issuanceDatum = Data.constr(0n, [Data.bytearray(cborPre), Data.bytearray(cborPost)]);
 
@@ -252,6 +312,33 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   const issuanceNftUnit = issuanceCborHexMint.hash + stringToHex("IssuanceCborHex");
 
   // ---- Step 5: assemble and submit ---------------------------------------
+  //
+  // THREE transactions, not one. This is a consequence of #110 that is invisible
+  // in a parameter diff: dissolving programmable_logic_global turned one
+  // withdraw-0 validator into three, and a bootstrap must publish and register
+  // all of them. MEASURED: the single transaction the 0.3.x fixture used comes
+  // to 21816 bytes against a 16384-byte protocol maximum.
+  //
+  // The split is chosen so each transaction has one job and nothing crosses a
+  // boundary that cannot:
+  //   1. MINTS  — consumes the one-shot seed UTxOs, mints the three NFTs and
+  //      writes the three datum outputs. Must be first: the policies are
+  //      parameterised by these exact outrefs.
+  //   2. PUBLISH — writes the four reference scripts (PLB + the three
+  //      delegates). Cannot be folded into (1); a transaction cannot reference
+  //      a script it is itself creating.
+  //   3. REGISTER — the three Conway RegCerts. Kept separate because each
+  //      executes its script under the PUBLISH purpose, and carrying all three
+  //      script bodies alongside the mint witnesses is what breaks the size cap.
+  const submitAndWait = async (built: { signAndSubmit: () => Promise<unknown> }) => {
+    const res = await built.signAndSubmit();
+    const hash = typeof res === "string" ? res : EvoTransactionHash.toHex(res as never);
+    await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
+    return hash;
+  };
+  const evaluator = createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337");
+
+  // ---- Tx 1: mints + protocol state --------------------------------------
   let tx = client.newTx();
   tx = tx.collectFrom({ inputs: [utxo1, utxo2] });
 
@@ -269,9 +356,9 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   });
 
   tx = tx.payToAddress({
-    address: EvoAddress.fromBech32(parametersAlwaysFailAddr),
+    address: EvoAddress.fromBech32(coordinationAddr),
     assets: outputAssets(2_000_000n, new Map([[protocolParamNftUnit, 1n]])),
-    datum: new InlineDatum.InlineDatum({ data: protocolParamsDatum }),
+    datum: new InlineDatum.InlineDatum({ data: paramsDatum }),
   });
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(registrySpendAddr),
@@ -286,56 +373,72 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     datum: new InlineDatum.InlineDatum({ data: issuanceDatum }),
   });
 
-  // Reference scripts, so later transactions need not carry them inline.
-  tx = tx.payToAddress({
-    address: addressObj,
-    assets: outputAssets(20_000_000n),
-    script: buildEvoScript(plb.compiledCode),
-  });
-  tx = tx.payToAddress({
-    address: addressObj,
-    assets: outputAssets(20_000_000n),
-    script: buildEvoScript(plg.compiledCode),
-  });
-  tx = tx.payToAddress({ address: addressObj, assets: outputAssets(50_000_000n) });
-  tx = tx.payToAddress({ address: addressObj, assets: outputAssets(50_000_000n) });
-
-  // Conway RegCert executes the script under the Publish purpose.
-  tx = tx.registerStake({
-    stakeCredential: Credential.makeScriptHash(Bytes.fromHex(plg.hash)),
-    redeemer: voidData(),
-  });
-
   tx = tx.attachScript({ script: buildEvoScript(registryMint.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(protocolParamsMint.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
-  tx = tx.attachScript({ script: buildEvoScript(plg.compiledCode) });
 
-  // NOTE: no attachMetadata for CIP-171 — see the header. Deliberate omission,
-  // not an oversight.
+  const bootstrapTxHash = await submitAndWait(
+    await tx.build({ changeAddress: addressObj, evaluator })
+  );
 
-  const built = await tx.build({
-    changeAddress: addressObj,
-    evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
-  });
-  const submitHash = await built.signAndSubmit();
-  const bootstrapTxHash =
-    typeof submitHash === "string" ? submitHash : EvoTransactionHash.toHex(submitHash);
-  await client.awaitTx(EvoTransactionHash.fromHex(bootstrapTxHash), 2_000, 180_000);
+  // ---- Tx 2: publish reference scripts ------------------------------------
+  let refTx = client.newTx();
+  for (const script of [plb, transfer, thirdParty, unfracking]) {
+    refTx = refTx.payToAddress({
+      address: addressObj,
+      assets: outputAssets(20_000_000n),
+      script: buildEvoScript(script.compiledCode),
+    });
+  }
+  const refTxHash = await submitAndWait(
+    await refTx.build({ changeAddress: addressObj, evaluator })
+  );
+
+  // ---- Tx 3: register the three delegate stake credentials -----------------
+  //
+  // Each RegCert executes its script under the PUBLISH purpose. programmable_
+  // logic_base dispatches to these by credential and a credential that is not
+  // registered cannot be withdrawn against, so the protocol is inoperable until
+  // all three exist — this is not optional setup.
+  let regTx = client.newTx();
+  for (const delegate of [transfer, thirdParty, unfracking]) {
+    regTx = regTx.registerStake({
+      stakeCredential: Credential.makeScriptHash(Bytes.fromHex(delegate.hash)),
+      redeemer: voidData(),
+    });
+    regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
+  }
+  await submitAndWait(await regTx.build({ changeAddress: addressObj, evaluator }));
 
   // ---- Step 6: assemble DeploymentParams ---------------------------------
-  const OUTPUT_PLB_REF = 3;
-  const OUTPUT_PLG_REF = 4;
+  //
+  // Output indices must match the payToAddress order above exactly. They are
+  // positional and nothing checks them but the devnet test that follows.
+  // Tx 1 outputs: 0 coordination (params NFT), 1 registry origin, 2 issuance CBOR NFT.
+  // Tx 2 outputs: 0 PLB, 1 transfer, 2 third_party, 3 unfracking (publish order above).
+  const OUT_COORDINATION = 0;
+  const REF_PLB = 0;
+  const REF_TRANSFER = 1;
+  const REF_THIRD_PARTY = 2;
+  const REF_UNFRACKING = 3;
 
   return {
     txHash: bootstrapTxHash,
+    coordinationNonce: COORDINATION_NONCE,
+    coordination: {
+      scriptHash: coordination.hash,
+      utxo: { txHash: bootstrapTxHash, outputIndex: OUT_COORDINATION },
+    },
     protocolParams: {
       txInput: utxo1Ref,
       policyId: protocolParamsMint.hash,
-      alwaysFailScriptHash: alwaysFailA.hash,
+      coordinationScriptHash: coordination.hash,
     },
-    programmableLogicGlobal: { policyId: plg.hash, scriptHash: plg.hash },
     programmableLogicBase: { scriptHash: plb.hash },
+    transfer: { scriptHash: transfer.hash },
+    thirdParty: { scriptHash: thirdParty.hash },
+    unfracking: { scriptHash: unfracking.hash },
+    upgradeMultisig: { scriptHash: upgradeMultisig.hash },
     issuance: {
       txInput: utxo2Ref,
       policyId: issuanceCborHexMint.hash,
@@ -347,7 +450,9 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
       scriptHash: registryMint.hash,
     },
     directorySpend: { policyId: protocolParamsMint.hash, scriptHash: registrySpend.hash },
-    programmableBaseRefInput: { txHash: bootstrapTxHash, outputIndex: OUTPUT_PLB_REF },
-    programmableGlobalRefInput: { txHash: bootstrapTxHash, outputIndex: OUTPUT_PLG_REF },
+    programmableBaseRefInput: { txHash: refTxHash, outputIndex: REF_PLB },
+    transferRefInput: { txHash: refTxHash, outputIndex: REF_TRANSFER },
+    thirdPartyRefInput: { txHash: refTxHash, outputIndex: REF_THIRD_PARTY },
+    unfrackingRefInput: { txHash: refTxHash, outputIndex: REF_UNFRACKING },
   };
 }

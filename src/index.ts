@@ -308,6 +308,7 @@ export {
   baseAddress,
   stakingCredentialHash,
   paymentCredentialHash,
+  getInlineDatum,
   stringToHex,
   MAX_NEXT,
   voidData,
@@ -321,6 +322,17 @@ export {
 } from "./core/evo-utils.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
 export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
+export {
+  registryNodeDatum,
+  decodeRegistryNode,
+  protocolParamsDatum,
+  decodeProtocolParams,
+} from "./core/evo-utils.js";
+export type {
+  RegistryNodeData,
+  ProtocolParamsData,
+  Cip113Credential,
+} from "./core/evo-utils.js";
 export {
   assertDeploymentScripts,
   DeploymentMismatchError,
