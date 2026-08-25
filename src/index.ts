@@ -58,6 +58,15 @@ export interface CIP113Config {
 
   /** Check if a stake address is registered on-chain. Used by compliance init to avoid re-registering. */
   checkStakeRegistration?: (stakeAddress: string) => Promise<boolean>;
+
+  /**
+   * Optional transaction evaluator, passed through to substandards.
+   *
+   * Without one the client's default provider evaluates, and Kupmios reports a
+   * bare "evaluateTx failed" naming neither the script nor the reason. An Ogmios
+   * evaluator returns the validator's trace list instead.
+   */
+  evaluator?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +154,7 @@ export const CIP113 = {
       client: config.client,
       standardScripts: scripts,
       deployment: config.standard.deployment,
+      evaluator: config.evaluator,
       network: config.client.chain.id === 1 ? "mainnet" : "preprod",
       checkStakeRegistration: config.checkStakeRegistration,
     };
@@ -325,6 +335,10 @@ export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
 export {
   registryNodeDatum,
   decodeRegistryNode,
+  registryInitRedeemer,
+  registryInsertRedeemer,
+  mintingProofRefInput,
+  mintingProofOutputIndex,
   protocolParamsDatum,
   decodeProtocolParams,
 } from "./core/evo-utils.js";

@@ -415,29 +415,25 @@ export function blacklistNodeDatum(key: HexString, next: HexString): Data.Data {
 // ---------------------------------------------------------------------------
 
 /**
- * SmartTokenMintingAction redeemer for first mint (OutputIndex).
+ * `issuance_mint`'s redeemer — a BARE `MintingRegistryProof`.
+ *
+ * Upstream #68 REMOVED the `SmartTokenMintingAction { minting_logic_cred,
+ * minting_registry_proof }` wrapper these builders used to emit. The redeemer is
+ * now the proof itself, and the minting-logic credential is no longer carried in
+ * it at all — it comes from the registry node.
+ *
+ *   ctor 0  RefInput    { index }  — the registry node is a REFERENCE input
+ *   ctor 1  OutputIndex { index }  — the registry node is an OUTPUT of this tx
+ *                                    (registration and first mint in one)
+ *
+ * Verified against the blueprint's own redeemer schema, not upstream's prose.
  */
-export function issuanceRedeemerFirstMint(
-  mintingLogicHash: ScriptHash,
-  registryOutputIndex: number
-): Data.Data {
-  return Data.constr(0n, [
-    scriptCredential(mintingLogicHash),
-    Data.constr(1n, [Data.int(BigInt(registryOutputIndex))]),
-  ]);
+export function mintingProofRefInput(registryRefInputIndex: number): Data.Data {
+  return Data.constr(0n, [Data.int(BigInt(registryRefInputIndex))]);
 }
 
-/**
- * SmartTokenMintingAction redeemer for subsequent mint/burn (RefInput).
- */
-export function issuanceRedeemerRefInput(
-  mintingLogicHash: ScriptHash,
-  registryRefInputIndex: number
-): Data.Data {
-  return Data.constr(0n, [
-    scriptCredential(mintingLogicHash),
-    Data.constr(0n, [Data.int(BigInt(registryRefInputIndex))]),
-  ]);
+export function mintingProofOutputIndex(registryOutputIndex: number): Data.Data {
+  return Data.constr(1n, [Data.int(BigInt(registryOutputIndex))]);
 }
 
 export interface RegistryProof {
@@ -469,9 +465,27 @@ export function thirdPartyActRedeemer(
   ]);
 }
 
-/** RegistryInsert redeemer */
-export function registryInsertRedeemer(key: HexString, hashedParam: HexString): Data.Data {
-  return Data.constr(1n, [Data.bytearray(key), Data.bytearray(hashedParam)]);
+/**
+ * `registry_mint`'s redeemer.
+ *
+ *   ctor 0  RegistryInit   {}                              — the origin node
+ *   ctor 1  RegistryInsert { key, minting_logic_script }
+ *
+ * ⚠ The second field is a CREDENTIAL, not a bare hash. #52 replaced
+ * `hashed_param: ByteArray` with `minting_logic_script: Credential`, and #52's
+ * `mode: RegistrationMode` was removed again by re-audit R-06 — so a builder
+ * written against either intermediate shape is wrong in a different way. Both
+ * encode without complaint.
+ */
+export function registryInitRedeemer(): Data.Data {
+  return Data.constr(0n, []);
+}
+
+export function registryInsertRedeemer(
+  key: HexString,
+  mintingLogicScript: Cip113Credential
+): Data.Data {
+  return Data.constr(1n, [Data.bytearray(key), credToData(mintingLogicScript)]);
 }
 
 /** Blacklist init (constructor 0) */

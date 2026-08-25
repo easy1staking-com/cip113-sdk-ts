@@ -85,6 +85,17 @@ export interface SubstandardPlugin {
 // ---------------------------------------------------------------------------
 
 export interface SubstandardContext {
+  /**
+   * Optional transaction evaluator.
+   *
+   * Without one, the client's default provider evaluates — and on Kupmios that
+   * reports a bare "evaluateTx failed" with no indication of WHICH script died
+   * or why. An Ogmios evaluator returns the validator's own trace list, which is
+   * the difference between a diagnosis and a guess. Consumers running against a
+   * local devnet should supply one.
+   */
+  evaluator?: unknown;
+
   /** Evolution SDK client (ReadOnlyClient or SigningClient) */
   client: EvoClient;
   standardScripts: ResolvedStandardScripts;

@@ -11,6 +11,7 @@
 
 import {
   Address as EvoAddress,
+  Bytes,
   Data,
   Transaction,
 } from "@evolution-sdk/evolution";
@@ -33,8 +34,16 @@ import {
   sortTxInputs,
   findRefInputIndex,
   findRegistryNode,
+  findCoveringNode,
   utxoToTxInput,
 } from "../../core/registry.js";
+import {
+  baseSpendRedeemer,
+  transferRedeemer,
+  referenceInputIndexOf,
+  withdrawalIndexOf,
+  type WithdrawalKey,
+} from "../../core/ledger-order.js";
 import {
   buildEvoScript,
   computeScriptHash,
@@ -43,7 +52,13 @@ import {
   stakingCredentialHash,
   stringToHex,
   voidData,
-  transferActRedeemer,
+  registryNodeDatum,
+  decodeRegistryNode,
+  registryInsertRedeemer,
+  mintingProofOutputIndex,
+  mintingProofRefInput,
+  mintAssetsFromMap,
+  getInlineDatum,
   utxoUnitQty,
   outputAssets,
   Credential,
@@ -70,6 +85,127 @@ export function dummySubstandard(config: {
     return { type: "PlutusV3", compiledCode: code, hash };
   }
 
+  const hexToBytes = (hex: string) => Bytes.fromHex(hex);
+
+  /**
+   * ⛔ Both of dummy's validators are withdraw-0, and a withdraw-0 needs its
+   * stake credential REGISTERED on chain before it can appear in a transaction.
+   * Registering emits a Conway RegCert, which runs the script under the PUBLISH
+   * purpose — so a validator with no `publish` handler falls through to `else`
+   * and the registration fails at evaluation with an empty trace list.
+   *
+   * The bundled dummy blueprint (v0.1.0, Aiken v1.1.19) has ONLY `withdraw` and
+   * `else`. MEASURED on a devnet, with two different redeemers:
+   *
+   *     validator { index: 0, purpose: "publish" }
+   *     "The machine terminated because of an error", traces: []
+   *
+   * and consequently a register/mint/transfer fails later and more obscurely,
+   * at submission, with code 3141 naming a reward account nobody recognises.
+   *
+   * This is the SAME blocker that stopped the standard bootstrap under the
+   * 0.3.0 blueprint, recurring one layer down — and the standard side was only
+   * ever unblocked because upstream dissolved PLG into validators that DO carry
+   * publish handlers. Nothing has done that for the substandards.
+   *
+   * Refused here, up front, rather than allowed to surface as an opaque
+   * submission error three transactions later. Fixing it needs a dummy blueprint
+   * compiled with publish handlers, which is upstream's business: this repo
+   * consumes blueprints and does not build them (see the constitution — an
+   * `.ak` file here is an escalation).
+   */
+  function requirePublishHandlers(): void {
+    const titles = config.blueprint.validators.map((v) => v.title);
+    const missing = [
+      DUMMY_VALIDATORS.ISSUE.replace(".withdraw", ".publish"),
+      DUMMY_VALIDATORS.TRANSFER.replace(".withdraw", ".publish"),
+    ].filter((t) => !titles.includes(t));
+    if (missing.length === 0) return;
+    throw new Error(
+      `The dummy blueprint cannot operate on CIP-113 0.5.x: it lacks publish handler(s) ` +
+        `${missing.join(", ")}.\n` +
+        `Both dummy validators are withdraw-0, so their stake credentials must be registered ` +
+        `before any register/mint/transfer can validate. Registration runs the script under ` +
+        `the PUBLISH purpose and a blueprint without that handler fails at evaluation with an ` +
+        `empty trace list (MEASURED on devnet).\n` +
+        `Present handlers: ${titles.join(", ")}\n` +
+        `Blueprint: "${config.blueprint.preamble.title}" v${config.blueprint.preamble.version} ` +
+        `(${config.blueprint.preamble.compiler?.name} ${config.blueprint.preamble.compiler?.version}).\n` +
+        `A publish-capable dummy blueprint is required. This repository consumes blueprints ` +
+        `and does not build them. See PLAN.md, workstream W-D / T-D08.`
+    );
+  }
+
+  /**
+   * The coordination UTxO — every programmable_logic_base spend and every
+   * delegate reads it, so every operation here needs it as a reference input.
+   *
+   * ⚠ It lives at coordination_spend in 0.5.x, NOT at always_fail. The
+   * parameter naming that lock target kept its arity and its type across the
+   * change, so a lookup at the old address finds nothing and reports only that
+   * the UTxO is missing.
+   */
+  async function findParamsUtxo(): Promise<EvoUTxO.UTxO> {
+    const unit = ctx.deployment.protocolParams.policyId + stringToHex("ProtocolParams");
+    const addr = EvoAddress.fromBech32(
+      scriptAddress(networkId, ctx.deployment.coordination.scriptHash)
+    );
+    const utxos = await ctx.client.getUtxosWithUnit(addr, unit);
+    if (utxos.length === 0) {
+      throw new Error(
+        `Protocol params UTxO not found (unit ${unit}) at the coordination address. ` +
+          `The params NFT is one-shot: zero results means it is locked elsewhere, not that ` +
+          `the protocol is un-deployed.`
+      );
+    }
+    return utxos[0]!;
+  }
+
+  /**
+   * The IssuanceCborHex UTxO.
+   *
+   * `registry_mint`'s RegistryInsert requires this as a REFERENCE INPUT: it
+   * reads the issuance template from the datum and re-derives the token policy
+   * from it, so the key being registered is cryptographically bound to the
+   * minting logic rather than merely asserted. Omitting it fails with
+   * "Expected a non-empty list but got an empty one" — an `expect_find` over
+   * reference_inputs — which names neither the input nor the reason.
+   */
+  async function findIssuanceCborUtxo(): Promise<EvoUTxO.UTxO> {
+    const unit = ctx.deployment.issuance.policyId + stringToHex("IssuanceCborHex");
+    const addr = EvoAddress.fromBech32(
+      scriptAddress(networkId, ctx.deployment.issuance.alwaysFailScriptHash)
+    );
+    const utxos = await ctx.client.getUtxosWithUnit(addr, unit);
+    if (utxos.length === 0) {
+      throw new Error(`IssuanceCborHex UTxO not found (unit ${unit})`);
+    }
+    return utxos[0]!;
+  }
+
+  /** Build the transaction and shape it into an UnsignedTx. */
+  async function finish(
+    tx: unknown,
+    changeAddress: string,
+    extra: { tokenPolicyId?: string; unit?: string; outputIndices?: Record<string, number> } = {}
+  ): Promise<UnsignedTx> {
+    const result = await (tx as any).build({
+      changeAddress: EvoAddress.fromBech32(changeAddress),
+      ...(ctx.evaluator ? { evaluator: ctx.evaluator } : {}),
+    });
+    const txObj = await result.toTransaction();
+    const cbor = Transaction.toCBORHex(txObj);
+    const txHash =
+      typeof result.chainResult === "function" ? result.chainResult().txHash : "";
+    return {
+      cbor,
+      txHash,
+      tokenPolicyId: extra.tokenPolicyId,
+      metadata: { unit: extra.unit, outputIndices: extra.outputIndices },
+      _signBuilder: result,
+    } as UnsignedTx;
+  }
+
   return {
     id: "dummy",
     version: "0.1.0",
@@ -80,54 +216,195 @@ export function dummySubstandard(config: {
       networkId = ctx.client.chain.id;
       issueScript = buildScript(DUMMY_VALIDATORS.ISSUE);
       transferScript = buildScript(DUMMY_VALIDATORS.TRANSFER);
+      requirePublishHandlers();
     },
 
-    async register(_params: RegisterParams): Promise<UnsignedTx> {
-      throw new Error("dummy.register: not yet implemented");
+    /**
+     * Register a dummy token in the protocol registry, and mint its first
+     * supply in the same transaction.
+     *
+     * Registration is a linked-list insertion. The registry is an ordered chain
+     * of nodes keyed by token policy id; inserting means finding the COVERING
+     * node (the one whose key < ours and whose next > ours), spending it to
+     * repoint its `next` at us, and minting a new node NFT for our own entry.
+     *
+     * Mint and registration are one transaction because `issuance_mint`'s
+     * MintingRegistryProof can name the registry node as an OUTPUT of this very
+     * transaction (ctor 1, OutputIndex) rather than as a reference input — so
+     * the token can be minted before its node exists anywhere else.
+     */
+    async register(params: RegisterParams): Promise<UnsignedTx> {
+      const { feePayerAddress, assetName, quantity } = params;
+      const recipient = params.recipientAddress ?? feePayerAddress;
+      const client = ctx.client;
+
+      // The token policy IS issuance_mint parameterised by our minting logic.
+      const issuanceMint = ctx.standardScripts.buildIssuanceMint(issueScript.hash);
+      const tokenPolicyId = issuanceMint.hash;
+      const unit = tokenPolicyId + assetName;
+
+      const registryMintPolicyId = ctx.standardScripts.registryMint.hash;
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+
+      const covering = findCoveringNode(registryUtxos, tokenPolicyId);
+      if (!covering) {
+        throw new Error(
+          `No covering registry node found for policy ${tokenPolicyId}. The registry origin ` +
+            `node must exist (it is created by the protocol bootstrap) and no node with this ` +
+            `key may already be present.`
+        );
+      }
+      const coveringDatumData = getInlineDatum(covering);
+      if (!coveringDatumData) {
+        throw new Error("The covering registry node carries no inline datum");
+      }
+      const coveringNode = decodeRegistryNode(coveringDatumData);
+      if (coveringNode.key === tokenPolicyId) {
+        throw new Error(`Policy ${tokenPolicyId} is already registered`);
+      }
+
+      const plbHash = ctx.standardScripts.programmableLogicBase.hash;
+      const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
+
+      // Our node points where the covering node used to point; the covering
+      // node now points at us. Ordinary singly-linked-list insertion, except a
+      // mistake here is an unspendable token rather than a lost pointer.
+      const newNodeDatum = registryNodeDatum({
+        key: tokenPolicyId,
+        next: coveringNode.next,
+        mintingLogicScript: { type: "script", hash: issueScript.hash },
+        transferLogicScript: { type: "script", hash: transferScript.hash },
+        // dummy has no compliance and no unfracking concept, but these fields
+        // are MANDATORY and must be well-formed 28-byte credentials — upstream
+        // applies the same one-way-brick rule here as to the params datum.
+        // Pointing them at dummy's own transfer logic keeps every path
+        // satisfiable; it is a fixture choice, not a compliance design.
+        thirdPartyTransferLogicScript: { type: "script", hash: transferScript.hash },
+        unfrackingLogicScript: { type: "script", hash: transferScript.hash },
+        globalStateCs: "",
+      });
+      const updatedCoveringDatum = registryNodeDatum({ ...coveringNode, next: tokenPolicyId });
+
+      const registryNftUnit = registryMintPolicyId + tokenPolicyId;
+      const coveringNftUnit = registryMintPolicyId + coveringNode.key;
+
+      // Output order is the contract: the MintingRegistryProof below names our
+      // registry node by OUTPUT INDEX, so moving these outputs silently changes
+      // which output the validator inspects.
+      const OUT_TOKEN = 0;
+      const OUT_NEW_NODE = 1;
+      const OUT_COVERING = 2;
+
+      let tx = client.newTx();
+      tx = tx.collectFrom({ inputs: [covering], redeemer: voidData() });
+
+      // The minting-logic withdraw-0: dummy's `issue` validator, redeemer 100.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(hexToBytes(issueScript.hash)),
+        amount: 0n,
+        redeemer: Data.int(100n),
+      });
+
+      tx = tx.mintAssets({
+        assets: mintAssetsFromMap(new Map([[unit, quantity]])),
+        redeemer: mintingProofOutputIndex(OUT_NEW_NODE),
+      });
+      tx = tx.mintAssets({
+        assets: mintAssetsFromMap(new Map([[registryNftUnit, 1n]])),
+        redeemer: registryInsertRedeemer(tokenPolicyId, { type: "script", hash: issueScript.hash }),
+      });
+
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(recipientPlbAddr),
+        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+      });
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(registrySpendAddr),
+        assets: outputAssets(2_000_000n, new Map([[registryNftUnit, 1n]])),
+        datum: new InlineDatum.InlineDatum({ data: newNodeDatum }),
+      });
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(registrySpendAddr),
+        assets: outputAssets(2_000_000n, new Map([[coveringNftUnit, 1n]])),
+        datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
+      });
+
+      const paramsUtxo = await findParamsUtxo();
+      const issuanceCborUtxo = await findIssuanceCborUtxo();
+      tx = tx.readFrom({ referenceInputs: [paramsUtxo, issuanceCborUtxo] });
+      tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registryMint.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registrySpend.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
+
+      return finish(tx, feePayerAddress, { tokenPolicyId, unit, outputIndices: { OUT_TOKEN, OUT_NEW_NODE, OUT_COVERING } });
     },
 
-    async mint(_params: MintParams): Promise<UnsignedTx> {
-      throw new Error("dummy.mint: not yet implemented");
+    /**
+     * Mint more of an already-registered dummy token.
+     *
+     * Differs from `register` only in where the registry node is: it already
+     * exists, so the proof names it as a REFERENCE input (ctor 0) rather than as
+     * an output of this transaction.
+     */
+    async mint(params: MintParams): Promise<UnsignedTx> {
+      const { feePayerAddress, tokenPolicyId, assetName, quantity } = params;
+      const recipient = params.recipientAddress ?? feePayerAddress;
+      const client = ctx.client;
+      const unit = tokenPolicyId + assetName;
+
+      const issuanceMint = ctx.standardScripts.buildIssuanceMint(issueScript.hash);
+      if (issuanceMint.hash !== tokenPolicyId) {
+        throw new Error(
+          `Policy ${tokenPolicyId} is not a dummy token: issuance_mint parameterised by ` +
+            `dummy's issue logic hashes to ${issuanceMint.hash}.`
+        );
+      }
+
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const node = findRegistryNode(registryUtxos, tokenPolicyId);
+      if (!node) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
+
+      const paramsUtxo = await findParamsUtxo();
+      const refs = [paramsUtxo, node];
+      const nodeIdx = referenceInputIndexOf(refs.map(utxoToTxInput), utxoToTxInput(node));
+
+      const plbHash = ctx.standardScripts.programmableLogicBase.hash;
+      const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
+
+      let tx = client.newTx();
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(hexToBytes(issueScript.hash)),
+        amount: 0n,
+        redeemer: Data.int(100n),
+      });
+      tx = tx.mintAssets({
+        assets: mintAssetsFromMap(new Map([[unit, quantity]])),
+        redeemer: mintingProofRefInput(nodeIdx),
+      });
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(recipientPlbAddr),
+        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+      });
+      tx = tx.readFrom({ referenceInputs: refs });
+      tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
+
+      return finish(tx, feePayerAddress, { tokenPolicyId, unit });
     },
 
     async burn(_params: BurnParams): Promise<UnsignedTx> {
-      throw new Error("dummy.burn: not yet implemented");
+      throw new Error(
+        "dummy.burn: not implemented. register/mint/transfer are implemented; burn was never " +
+          "written and is not in scope for W-D (PLAN.md T-D08)."
+      );
     },
 
     async transfer(params: TransferParams): Promise<UnsignedTx> {
-      // ⚠ BLOCKED ON T-D04 — do not "fix" by deleting this throw.
-      //
-      // Upstream #110/#109 replaced the redeemers this line builds:
-      //   * programmable_logic_base.spend: untyped -> BaseSpendRedeemer,
-      //     i.e. SpendViaTransfer { params_idx, wdrl_idx } for this path;
-      //   * ProgrammableLogicGlobalRedeemer.TransferAct -> the `transfer`
-      //     validator's TransferRedeemer { params_idx, proofs }.
-      //
-      // `params_idx` and `wdrl_idx` are POSITIONS the builder must compute
-      // after coin selection (ledger-sorted reference inputs; ledger-ordered
-      // withdrawal map, script credentials before key credentials, bytewise
-      // within each). Neither is expressible without T-D04.
-      //
-      // The old encoder still exists and still typechecks. Left reachable it
-      // would build a transaction the chain rejects with no local signal —
-      // precisely the failure mode this milestone exists to eliminate. So it
-      // refuses instead, and names its successor.
-      // NOTE the `: boolean` annotation. Without it TypeScript infers the
-      // literal type `false`, folds the branch, and marks the whole body
-      // below unreachable — at which point it stops narrowing and the
-      // pre-existing UTxO guards start reporting `UTxO | undefined`. The
-      // annotation keeps the body type-checked and reviewable so the T-D04
-      // migration is a readable diff rather than a rewrite from memory.
-      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
-      if (!MIGRATED_TO_0_5_ALPHA_2)
-        throw new Error(
-        "dummy.transfer is not yet migrated to CIP-113 0.5.0-alpha.2. " +
-        "programmable_logic_global was dissolved (upstream #110): this path now needs a " +
-        "BaseSpendRedeemer(SpendViaTransfer { params_idx, wdrl_idx }) on every " +
-        "programmable_logic_base input, plus a TransferRedeemer { params_idx, proofs } " +
-        "withdrawal against the `transfer` validator. Blocked on ticket T-D04 " +
-        "(params_idx / wdrl_idx derivation). See PLAN.md, workstream W-D."
-        );
       const { senderAddress, recipientAddress, tokenPolicyId, assetName, quantity } = params;
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
@@ -158,28 +435,39 @@ export function dummySubstandard(config: {
         throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
       }
 
-      // 5. Get protocol params UTxO
-      const ppUnit = ctx.deployment.protocolParams.policyId + stringToHex("ProtocolParams");
-      const ppAddr = EvoAddress.fromBech32(
-        // 0.5.x: the params NFT is locked at coordination_spend, NOT always_fail.
-        // The parameter that names this target kept its arity AND type across
-        // that change, so nothing but this line's correctness stands between a
-        // deployment and a UTxO lookup that silently finds nothing.
-        scriptAddress(networkId, ctx.deployment.coordination.scriptHash)
-      );
-      const ppUtxos = await client.getUtxosWithUnit(ppAddr, ppUnit);
-      if (ppUtxos.length === 0) throw new Error(`Protocol params UTxO not found (unit: ${ppUnit})`);
-      const protocolParamsUtxo = ppUtxos[0];
+      // 5. Get the coordination (protocol params) UTxO
+      const protocolParamsUtxo = await findParamsUtxo();
 
-      // 6. Sort reference inputs
-      const refInputs = [utxoToTxInput(protocolParamsUtxo), utxoToTxInput(registryUtxo)];
-      const sortedRefInputs = sortTxInputs(refInputs);
-      const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
+      // 6. Reference-input indices, in the ledger's own order.
+      //
+      // Both indices below are POSITIONS the validator will resolve. Neither has
+      // a type that can be wrong, and neither fails until the chain runs the
+      // script — see src/core/ledger-order.ts.
+      const refUtxos = [protocolParamsUtxo, registryUtxo];
+      const refInputs = refUtxos.map(utxoToTxInput);
+      const paramsIdx = referenceInputIndexOf(refInputs, utxoToTxInput(protocolParamsUtxo));
+      const registryIdx = referenceInputIndexOf(refInputs, utxoToTxInput(registryUtxo));
 
-      // 7. Build redeemers
-      const plgRedeemer = transferActRedeemer([{ type: "exists", nodeIdx: registryIdx }]);
+      // 7. Withdrawal ordering. The set must be COMPLETE — every withdrawal the
+      // final transaction carries occupies a slot, and script credentials sort
+      // before key credentials regardless of hash.
+      const coreTransferKey: WithdrawalKey = {
+        hash: ctx.standardScripts.transfer.hash,
+        isScript: true,
+      };
+      const allWithdrawals: WithdrawalKey[] = [
+        { hash: transferScript.hash, isScript: true },
+        coreTransferKey,
+      ];
+      const transferWdrlIdx = withdrawalIndexOf(allWithdrawals, coreTransferKey);
+
+      const coreTransferRedeemer = transferRedeemer(paramsIdx, [
+        { type: "exists", nodeIdx: registryIdx },
+      ]);
       const dummyTransferRedeemer = Data.int(200n);
-      const spendRdmr = voidData();
+      // programmable_logic_base no longer takes an untyped redeemer: it dispatches
+      // on the constructor, and witnesses WHERE its delegate's withdrawal sits.
+      const spendRdmr = baseSpendRedeemer("TRANSFER", paramsIdx, transferWdrlIdx);
       const tokenDatum = voidData();
 
       // 8. Get sender's staking credential
@@ -203,7 +491,7 @@ export function dummySubstandard(config: {
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,
-        redeemer: plgRedeemer,
+        redeemer: coreTransferRedeemer,
       });
 
       if (returningAmount > 0n) {

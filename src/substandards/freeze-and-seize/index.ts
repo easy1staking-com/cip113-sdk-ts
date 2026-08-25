@@ -52,8 +52,8 @@ import {
   registryNodeDatum,
   decodeRegistryNode,
   blacklistNodeDatum,
-  issuanceRedeemerFirstMint,
-  issuanceRedeemerRefInput,
+  mintingProofOutputIndex,
+  mintingProofRefInput,
   registryInsertRedeemer,
   transferActRedeemer,
   thirdPartyActRedeemer,
@@ -372,8 +372,8 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 4. Build redeemers — registry output index shifts when CIP-68 adds an extra output
       const registryOutputIndex = hasCIP68 ? 3 : 2;
-      const issuanceRedeemer = issuanceRedeemerFirstMint(scripts.issuerAdmin.hash, registryOutputIndex);
-      const registryMintRedeemer = registryInsertRedeemer(scripts.issuanceMint.hash, scripts.issuerAdmin.hash);
+      const issuanceRedeemer = mintingProofOutputIndex(registryOutputIndex);
+      const registryMintRedeemer = registryInsertRedeemer(scripts.issuanceMint.hash, { type: "script", hash: scripts.issuerAdmin.hash });
       const tokenDatum = voidData();
 
       // 5. Determine if chaining from initCompliance
@@ -501,7 +501,7 @@ export function freezeAndSeizeSubstandard(config: {
       const registryRefIdx = findRefInputIndex(sortedRefInputs, regRef);
 
       // 3. Build redeemers
-      const issuanceRedeemer = issuanceRedeemerRefInput(scripts.issuerAdmin.hash, registryRefIdx);
+      const issuanceRedeemer = mintingProofRefInput(registryRefIdx);
       const tokenDatum = voidData();
 
       // 4. Build PLB address
@@ -574,7 +574,7 @@ export function freezeAndSeizeSubstandard(config: {
       const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
 
       // 4. Build redeemers
-      const issuanceRedeemer = issuanceRedeemerRefInput(scripts.issuerAdmin.hash, registryIdx);
+      const issuanceRedeemer = mintingProofRefInput(registryIdx);
       const plgRedeemer = thirdPartyActRedeemer(registryIdx, 0);
       const tokenDatum = voidData();
 
