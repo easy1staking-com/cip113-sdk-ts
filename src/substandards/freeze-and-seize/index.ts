@@ -109,6 +109,21 @@ interface ResolvedFESScripts {
  * Build the transaction and extract unsigned CBOR + txHash.
  * Works with both ReadOnlyClient (TransactionResultBase) and SigningClient (SignBuilder).
  */
+/**
+ * The evaluator this plugin builds with, set by `init()`.
+ *
+ * Module-scoped rather than threaded through nine call sites. Without it every
+ * script failure in this substandard surfaces as Kupmios's bare
+ * "evaluateTx failed", naming neither the failing validator nor the reason —
+ * which is the difference between a diagnosis and a guess, and it cost a cycle
+ * here exactly as it did in `dummy` before the same fix.
+ *
+ * ⚠ Shared across instances of this plugin in one process. Acceptable because
+ * it only affects DIAGNOSTICS, never the transaction built; if that ever stops
+ * being true, thread it through instead.
+ */
+let sharedEvaluator: unknown | undefined;
+
 async function buildAndSerialize(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   builder: any,
@@ -121,6 +136,9 @@ async function buildAndSerialize(
   const buildOpts: any = {
     changeAddress: EvoAddress.fromBech32(changeAddress),
   };
+  if (sharedEvaluator) {
+    buildOpts.evaluator = sharedEvaluator;
+  }
   if (availableUtxos) {
     buildOpts.availableUtxos = availableUtxos;
   }
@@ -262,6 +280,7 @@ export function freezeAndSeizeSubstandard(config: {
       //
       // Tracked as W-E S-5.
       ctx = context;
+      sharedEvaluator = ctx.evaluator;
       networkId = ctx.client.chain.id;
       const { adminPkh, assetName, blacklistNodePolicyId, blacklistInitTxInput } = config.deployment;
       const fes = createFESScripts(config.blueprint);
@@ -418,10 +437,19 @@ export function freezeAndSeizeSubstandard(config: {
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
-      // New registry node (output 2 or 3)
+      // New registry node (output 2 or 3).
+      //
+      // 3 ADA, not 2: the RegistryNode datum is SEVEN fields in 0.5.x and
+      // min-UTxO scales with serialised output size. MEASURED at 2,038,630 for
+      // a node of this shape — the inherited 2,000,000 was sized for the
+      // five-field datum, and the ledger reports the shortfall as
+      // "insufficient Ada" with a number, never as "your datum grew".
+      // (The covering-node output above needs no change: it carries the
+      // covering UTxO's OWN lovelace forward, so it inherits whatever the
+      // bootstrap funded the origin with.)
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registrySpendAddr),
-        assets: outputAssets(2_000_000n, new Map([[registryNftUnit, 1n]])),
+        assets: outputAssets(3_000_000n, new Map([[registryNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: newRegistryNodeDatum }),
       });
 
