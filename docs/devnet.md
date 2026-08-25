@@ -123,3 +123,44 @@ the suite — which is what `--test-concurrency=1` does — or give each file it
 Serialising is the right default here: the devnet is itself a shared resource, the
 protocol bootstrap is not idempotent, and a concurrency bug that only appears when two
 files happen to overlap is worse than a slower suite.
+
+## Traps met while making the devnet suite green (2026-08-25)
+
+**The faucet does not clamp to what it can afford.** Each genesis account holds 10,000 ADA. The
+bootstrap asked for 500,000 and got HTTP 500 with an empty `statusText`; the only useful content
+was in the response BODY (`{"status":false,"message":"Topup failed"}`), which the harness was
+discarding. It now logs the body on every non-2xx — an error without it reads as "the service is
+broken" when it means "your request was rejected".
+
+**Three unrelated causes all surface as code 3117**, *"unknown UTxO references as inputs"* — an
+error that names a UTxO and reads as a malformed transaction, when the builder faithfully used what
+the provider reported:
+
+1. **Concurrent test files.** `node --test` runs files in separate processes and every devnet test
+   derives the same wallet, so two files bootstrapping at once select the same UTxOs. Hence
+   `--test-concurrency=1`.
+2. **Accumulated state.** After many bootstraps, submissions start failing. `curl -X POST
+   .../admin/devnet/reset` clears it; bootstrap going green immediately afterwards confirms the
+   diagnosis rather than assuming it.
+3. **Indexer lag.** Kupo and yaci-store trail the node, so right after a confirmed transaction
+   `getUtxos` still returns spent inputs. `bootstrapProtocol` waits for two consecutive identical
+   wallet views — a single read cannot tell a settled view from a stale one.
+
+**Settle on the way OUT as well as the way in.** Waiting for a settled view only at the bootstrap's
+entry made its own failure disappear and moved it into `register` and `upgrade`, which build
+immediately after the bootstrap returns. A fixture owes its caller a settled world on exit.
+
+**Kupo survived the reset performed on 2026-08-25**, but the warning above still stands — it has not
+always. Check `:1442` after any reset and restart it with
+`bash ~/.yaci-cli/local-clusters/default/kupo.sh` if it is gone.
+
+## What the devnet suite actually proves
+
+`npm run test:devnet` — 11 tests — covers, on chain: a protocol bootstrap in three transactions
+(one no longer fits the 16 kB limit); the deployed state read BACK and checked field by field; a
+`dummy` token registered, minted and transferred with the balance delta asserted on **both** sides;
+an in-place upgrade proven as a before/after delta; and three upgrade rails proven to be refused by
+`coordination_spend` itself (Ogmios 3010) rather than by client-side validation.
+
+It does **not** prove anything about mainnet or preprod parameters, and it is deliberately not run
+in CI — there is no devnet there.
