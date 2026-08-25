@@ -362,3 +362,21 @@ export {
 // Re-export Client.make as evoClient for convenience
 import { Client } from "@evolution-sdk/evolution";
 export const evoClient = Client.make;
+
+// ---------------------------------------------------------------------------
+// Ledger ordering and 0.5.x redeemers (T-D04)
+// ---------------------------------------------------------------------------
+
+export {
+  compareTxInputs,
+  referenceInputIndexOf,
+  compareWithdrawalKeys,
+  sortWithdrawalKeys,
+  withdrawalIndexOf,
+  BaseSpendVia,
+  baseSpendRedeemer,
+  transferRedeemer,
+  thirdPartyRedeemer,
+  unfrackingRedeemer,
+} from "./core/ledger-order.js";
+export type { WithdrawalKey, BaseSpendVariant, RegistryProofRef } from "./core/ledger-order.js";

@@ -12,25 +12,35 @@ import {
   utxoTxHash,
   utxoOutputIndex,
 } from "./evo-utils.js";
+import { compareTxInputs } from "./ledger-order.js";
 
 // ---------------------------------------------------------------------------
 // Transaction input sorting (matches Cardano ledger canonical order)
 // ---------------------------------------------------------------------------
 
 /**
- * Sort transaction inputs lexicographically by (txHash, outputIndex).
- * This matches the Cardano ledger's canonical ordering.
+ * Sort transaction inputs into the ledger's canonical order: by transaction id,
+ * then by output index.
+ *
+ * Delegates to `compareTxInputs` so there is ONE definition of the ledger's
+ * input ordering in this SDK. This previously compared transaction ids with
+ * `String.localeCompare`, which is a COLLATION comparison, not a byte
+ * comparison — it consults locale and ICU rules and is not guaranteed to agree
+ * with byte order even on lowercase hex. It happened to agree in practice,
+ * which is exactly why it survived: the failure it would cause is a wrong
+ * reference-input index, and a wrong index fails only on chain.
  */
 export function sortTxInputs<T extends TxInput>(inputs: T[]): T[] {
-  return [...inputs].sort((a, b) => {
-    const hashCmp = a.txHash.localeCompare(b.txHash);
-    if (hashCmp !== 0) return hashCmp;
-    return a.outputIndex - b.outputIndex;
-  });
+  return [...inputs].sort(compareTxInputs);
 }
 
 /**
- * Find the index of a TxInput in a sorted list of reference inputs.
+ * Find the index of a TxInput in an ALREADY-SORTED list of reference inputs.
+ *
+ * ⚠ The caller owns the precondition. Passing an unsorted list returns a
+ * plausible integer that is silently wrong, and the transaction fails only on
+ * chain. Prefer `referenceInputIndexOf`, which sorts internally and cannot be
+ * misused this way.
  */
 export function findRefInputIndex(
   sortedRefInputs: TxInput[],
