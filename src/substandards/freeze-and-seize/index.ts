@@ -50,6 +50,7 @@ import {
   MAX_NEXT,
   voidData,
   registryNodeDatum,
+  decodeRegistryNode,
   blacklistNodeDatum,
   issuanceRedeemerFirstMint,
   issuanceRedeemerRefInput,
@@ -237,6 +238,46 @@ export function freezeAndSeizeSubstandard(config: {
     blueprint: config.blueprint,
 
     init(context) {
+      // ---------------------------------------------------------------------
+      // T-D09 QUARANTINE — freeze-and-seize is NOT migrated to 0.5.0-alpha.2.
+      // ---------------------------------------------------------------------
+      //
+      // This plugin refuses to initialise rather than compiling cleanly and
+      // building transactions the chain rejects. Three independent reasons, any
+      // one of which is sufficient:
+      //
+      //  1. `ThirdPartyAct` NO LONGER EXISTS. Upstream #110 dissolved
+      //     programmable_logic_global; seize/clawback is now the standalone
+      //     `third_party` validator, invoked via its own withdraw-0 carrying a
+      //     ThirdPartyRedeemer, with SpendViaThirdParty on every PLB input.
+      //     Every seize path here is written against the removed redeemer.
+      //
+      //  2. Its RegistryNode field reads are POSITIONAL AND NOW OFF BY TWO.
+      //     This code reads transfer at index 2, third-party at 3 and
+      //     globalStateCs at 4 — the pre-#52 five-field layout. In the current
+      //     seven-field layout those live at 3, 4 and 6. The reads still
+      //     typecheck and still return a value; it is simply the wrong field.
+      //
+      //  3. Seize builders must additionally be re-validated against #79's
+      //     UTxO-contamination rules and #80's issuance-delegation scope, and
+      //     against #115, which now bans datum hashes and reference scripts on
+      //     programmable outputs.
+      //
+      // Scope: PLAN.md D-14 puts freeze-and-seize outside this epic ("just
+      // core") with its own epic to follow. Deliberately NOT half-migrated —
+      // a partly-updated compliance substandard is worse than an absent one,
+      // because it looks available.
+      throw new Error(
+        "freeze-and-seize is not migrated to CIP-113 0.5.0-alpha.2 and refuses to initialise. " +
+          "Upstream #110 dissolved programmable_logic_global: seize/clawback now requires the " +
+          "`third_party` validator's withdraw-0 with a ThirdPartyRedeemer plus " +
+          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input, and " +
+          "this plugin's RegistryNode field reads are positional against the retired 5-field " +
+          "layout (transfer/third-party/globalStateCs moved from 2/3/4 to 3/4/6). " +
+          "Use the `dummy` substandard, or pin an SDK release targeting the 0.3.x contracts. " +
+          "Tracked as the freeze-and-seize epic; see PLAN.md D-14."
+      );
+
       ctx = context;
       networkId = ctx.client.chain.id;
       const { adminPkh, assetName, blacklistNodePolicyId, blacklistInitTxInput } = config.deployment;
@@ -293,22 +334,39 @@ export function freezeAndSeizeSubstandard(config: {
       const issuanceCborHexUtxo = await findIssuanceCborHexUtxo(client, networkId, ctx.deployment);
 
       // 3. Build datums
-      const coveringTransferCred = extractCredentialField(coveringDatum, 2) ?? { type: "key" as const, hash: "" };
-      const coveringThirdPartyCred = extractCredentialField(coveringDatum, 3) ?? { type: "key" as const, hash: "" };
+      // UNREACHABLE — this plugin refuses at init (T-D09). Retained, and made to
+      // typecheck against the 7-field layout, so the freeze-and-seize epic gets a
+      // readable diff instead of a rewrite from memory.
+      //
+      // The index-based reads that used to be here (2/3/4) were silently wrong
+      // under the 7-field layout. Replaced with decodeRegistryNode, which is
+      // positional-safe and fails loudly on a short record.
+      if (!coveringDatum) {
+        throw new Error(
+          "register: the covering registry node has no inline datum. The directory " +
+            "cannot be traversed without it — a node with no datum is malformed, not empty."
+        );
+      }
+      const covering = decodeRegistryNode(coveringDatum);
 
       const updatedCoveringDatum = registryNodeDatum({
+        ...covering,
         key: coveringKey,
         next: scripts.tokenPolicyId,
-        transferLogicScript: coveringTransferCred,
-        thirdPartyTransferLogicScript: coveringThirdPartyCred,
-        globalStateCs: extractConstrBytesField(coveringDatum, 4) ?? "",
       });
 
       const newRegistryNodeDatum = registryNodeDatum({
         key: scripts.tokenPolicyId,
         next: coveringNext,
+        mintingLogicScript: { type: "script", hash: scripts.issuerAdmin.hash },
         transferLogicScript: { type: "script", hash: scripts.transfer.hash },
         thirdPartyTransferLogicScript: { type: "script", hash: scripts.issuerAdmin.hash },
+        // ⚠ UNASSIGNED, NOT DECIDED. Upstream added an unfracking delegate per
+        // registry node; freeze-and-seize has no unfracking concept and the
+        // choice belongs to its own epic. Pointing it at issuerAdmin keeps the
+        // shape valid; it is NOT a design decision and is never emitted, because
+        // init() throws before any of this runs.
+        unfrackingLogicScript: { type: "script", hash: scripts.issuerAdmin.hash },
         globalStateCs: "",
       });
 

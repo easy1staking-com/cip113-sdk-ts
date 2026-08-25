@@ -215,28 +215,194 @@ export function extractCredentialField(
 // Datum builders (CIP-113 domain types)
 // ---------------------------------------------------------------------------
 
+export interface Cip113Credential {
+  type: "key" | "script";
+  hash: ScriptHash;
+}
+
+function credToData(cred: Cip113Credential): Data.Data {
+  return cred.type === "script" ? scriptCredential(cred.hash) : keyCredential(cred.hash);
+}
+
+function dataToCred(d: Data.Data, where: string): Cip113Credential {
+  if (!(d instanceof Data.Constr) || d.fields.length !== 1) {
+    throw new Error(`${where}: expected a Credential (Constr with 1 field)`);
+  }
+  const h = expectBytes(d.fields[0]!, `${where}.hash`);
+  if (d.index === 0n) return { type: "key", hash: h };
+  if (d.index === 1n) return { type: "script", hash: h };
+  throw new Error(`${where}: credential constructor index must be 0 or 1, got ${d.index}`);
+}
+
+/**
+ * Data.bytearray() yields a Uint8Array, NOT a hex string — so every decode has
+ * to convert. Done by hand rather than via Buffer: this SDK runs in browsers on
+ * the CIP-30 path, where Buffer does not exist.
+ */
+function bytesToHex(u8: Uint8Array): HexString {
+  let out = "";
+  for (const b of u8) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+function expectBytes(d: Data.Data, where: string): HexString {
+  if (d instanceof Uint8Array) return bytesToHex(d);
+  if (typeof d === "string") return d;
+  throw new Error(`${where}: expected a bytearray, got ${typeof d}`);
+}
+
+/**
+ * A registry node — the per-token record the directory holds.
+ *
+ * SEVEN fields in 0.5.0-alpha.2, and the order is load-bearing: this is a
+ * positional Constr, so an insertion at the wrong index produces a datum that
+ * encodes cleanly and means something else entirely.
+ *
+ * Two fields were inserted, at different times, in the middle:
+ *   index 2  minting_logic_script      (upstream #52)
+ *   index 5  unfracking_logic_script   (unfracking v2)
+ *
+ * ⚠ Upstream's CONTRACT_SURFACE_CHANGES.md asserts this SDK was "already on the
+ * 6-field post-#52 shape (verified: minting_logic_script at index 2)". It was
+ * NOT — this builder emitted five fields with no minting_logic_script at all.
+ * That document is wrong about this repository's own contents; do not take its
+ * word for what is or is not already done here.
+ */
 export interface RegistryNodeData {
   key: HexString;
   next: HexString;
-  transferLogicScript: { type: "key" | "script"; hash: ScriptHash };
-  thirdPartyTransferLogicScript: { type: "key" | "script"; hash: ScriptHash };
+  /** index 2 — added by #52. */
+  mintingLogicScript: Cip113Credential;
+  transferLogicScript: Cip113Credential;
+  thirdPartyTransferLogicScript: Cip113Credential;
+  /** index 5 — added by unfracking v2. */
+  unfrackingLogicScript: Cip113Credential;
   globalStateCs: HexString;
 }
 
-/** Build a RegistryNode datum */
+/** Build a RegistryNode datum. Field order is the on-chain contract. */
 export function registryNodeDatum(node: RegistryNodeData): Data.Data {
-  const credToData = (cred: { type: "key" | "script"; hash: ScriptHash }) =>
-    cred.type === "script"
-      ? scriptCredential(cred.hash)
-      : keyCredential(cred.hash);
-
   return Data.constr(0n, [
     Data.bytearray(node.key),
     Data.bytearray(node.next),
+    credToData(node.mintingLogicScript),
     credToData(node.transferLogicScript),
     credToData(node.thirdPartyTransferLogicScript),
+    credToData(node.unfrackingLogicScript),
     Data.bytearray(node.globalStateCs),
   ]);
+}
+
+/** Parse a RegistryNode datum. Strict on arity — a short record is not a partial one. */
+export function decodeRegistryNode(d: Data.Data): RegistryNodeData {
+  if (!(d instanceof Data.Constr) || d.index !== 0n) {
+    throw new Error("RegistryNode: expected Constr(0, ...)");
+  }
+  if (d.fields.length !== 7) {
+    throw new Error(
+      `RegistryNode: expected exactly 7 fields, got ${d.fields.length}. ` +
+        `The 5-field (pre-#52) and 6-field (pre-unfracking-v2) layouts are NOT ` +
+        `forward-compatible: minting_logic_script was inserted at index 2 and ` +
+        `unfracking_logic_script at index 5, so every later field shifted.`
+    );
+  }
+  const f = d.fields;
+  return {
+    key: expectBytes(f[0]!, "RegistryNode.key"),
+    next: expectBytes(f[1]!, "RegistryNode.next"),
+    mintingLogicScript: dataToCred(f[2]!, "RegistryNode.mintingLogicScript"),
+    transferLogicScript: dataToCred(f[3]!, "RegistryNode.transferLogicScript"),
+    thirdPartyTransferLogicScript: dataToCred(f[4]!, "RegistryNode.thirdPartyTransferLogicScript"),
+    unfrackingLogicScript: dataToCred(f[5]!, "RegistryNode.unfrackingLogicScript"),
+    globalStateCs: expectBytes(f[6]!, "RegistryNode.globalStateCs"),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The coordination datum — the live protocol wiring
+// ---------------------------------------------------------------------------
+
+/**
+ * `ProgrammableLogicGlobalParams` — the datum on the coordination UTxO.
+ *
+ * SEVEN fields, ordered by upstream BY READ FREQUENCY (a deliberate cost
+ * choice: programmable_logic_base reads 2-4 on every dispatch, and the field
+ * is read once per delegate invocation rather than once per input).
+ *
+ * Fields 2-5 are MUTABLE — an in-place upgrade rewrites them in this datum
+ * rather than redeploying programmable_logic_base, whose hash anchors every
+ * programmable token address. `coordination_spend` 28-byte-guards each one and
+ * freezes fields 0 and 1 permanently.
+ *
+ * ⚠ It is SEVEN, not six. Upstream's CONTRACT_SURFACE_CHANGES.md says six in
+ * three places, and in a fourth phrases it as an instruction — "6-field
+ * ProgrammableLogicGlobalParams parser / builder (order above)". Building that
+ * shape yields a malformed datum on EVERY programmable_logic_base spend, not
+ * merely at deploy, with no type error anywhere. `max_inline_datum_bytes`
+ * (index 6) arrives with #115 and is absent from that document.
+ */
+export interface ProtocolParamsData {
+  registryNodeCs: HexString;
+  progLogicCred: Cip113Credential;
+  /** index 2 — mutable. PLG's transfer arm, renamed by #110. */
+  transferCred: Cip113Credential;
+  /** index 3 — mutable. Seize / clawback. */
+  thirdPartyCred: Cip113Credential;
+  /** index 4 — mutable. */
+  unfrackingCred: Cip113Credential;
+  /** index 5 — mutable. The upgrade authority this datum trampolines to. */
+  upgradeCred: Cip113Credential;
+  /**
+   * index 6 — the #106-vector-3 bound. A seizure must reproduce a seized
+   * output's inline datum byte-for-byte, so an unbounded datum pushes the
+   * seizure past maxTxSize and yields an output nobody can seize.
+   *
+   * ⚠ This is a SECURITY PARAMETER with no upstream guidance. Upstream's test
+   * fixtures use 1024; that is a fixture value, not a recommendation. See
+   * PLAN.md D-17 — 1024 is sanctioned for the DEVNET fixture only.
+   */
+  maxInlineDatumBytes: bigint;
+}
+
+/** Build the coordination datum. Field order is the on-chain contract. */
+export function protocolParamsDatum(p: ProtocolParamsData): Data.Data {
+  return Data.constr(0n, [
+    Data.bytearray(p.registryNodeCs),
+    credToData(p.progLogicCred),
+    credToData(p.transferCred),
+    credToData(p.thirdPartyCred),
+    credToData(p.unfrackingCred),
+    credToData(p.upgradeCred),
+    Data.int(p.maxInlineDatumBytes),
+  ]);
+}
+
+/** Parse the coordination datum. */
+export function decodeProtocolParams(d: Data.Data): ProtocolParamsData {
+  if (!(d instanceof Data.Constr) || d.index !== 0n) {
+    throw new Error("ProgrammableLogicGlobalParams: expected Constr(0, ...)");
+  }
+  if (d.fields.length !== 7) {
+    throw new Error(
+      `ProgrammableLogicGlobalParams: expected exactly 7 fields, got ${d.fields.length}. ` +
+        `If you read 6 somewhere, that source predates #115 — max_inline_datum_bytes ` +
+        `is field 6. A 6-field datum is malformed for every programmable_logic_base spend.`
+    );
+  }
+  const f = d.fields;
+  const n = f[6]!;
+  if (typeof n !== "bigint") {
+    throw new Error("ProgrammableLogicGlobalParams.maxInlineDatumBytes: expected an integer");
+  }
+  return {
+    registryNodeCs: expectBytes(f[0]!, "ProtocolParams.registryNodeCs"),
+    progLogicCred: dataToCred(f[1]!, "ProtocolParams.progLogicCred"),
+    transferCred: dataToCred(f[2]!, "ProtocolParams.transferCred"),
+    thirdPartyCred: dataToCred(f[3]!, "ProtocolParams.thirdPartyCred"),
+    unfrackingCred: dataToCred(f[4]!, "ProtocolParams.unfrackingCred"),
+    upgradeCred: dataToCred(f[5]!, "ProtocolParams.upgradeCred"),
+    maxInlineDatumBytes: n,
+  };
 }
 
 /** Build a BlacklistNode datum */
