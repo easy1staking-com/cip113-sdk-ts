@@ -11,6 +11,7 @@
 
 import {
   Address as EvoAddress,
+  Assets as EvoAssets,
   Bytes,
   Data,
   Transaction,
@@ -27,6 +28,7 @@ import type {
   MintParams,
   BurnParams,
   TransferParams,
+  ThirdPartyTransferParams,
   UnsignedTx,
 } from "../interface.js";
 import { getValidatorCode } from "../../standard/blueprint.js";
@@ -40,8 +42,10 @@ import {
 import {
   baseSpendRedeemer,
   transferRedeemer,
+  thirdPartyRedeemer,
   referenceInputIndexOf,
   withdrawalIndexOf,
+  compareTxInputs,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
 import {
@@ -412,6 +416,157 @@ export function dummySubstandard(config: {
         "dummy.burn: not implemented. register/mint/transfer are implemented; burn was never " +
           "written and is not in scope for W-D (PLAN.md T-D08)."
       );
+    },
+
+    /**
+     * Administrative transfer: move a holder's tokens WITHOUT their signature.
+     *
+     * A different on-chain route from `transfer`, not a variant of it.
+     * programmable_logic_base dispatches via `SpendViaThirdParty` to the
+     * standalone `third_party` validator, so this transaction never loads the
+     * `transfer` reference script at all — upstream split them precisely so the
+     * heavy administrative path stops costing every ordinary transfer a
+     * reference-script fee.
+     *
+     * `third_party` requires the registry node's OWN
+     * `third_party_transfer_logic_script` withdraw-0 to be present. That field
+     * is the issuer's authority, and it is the only thing standing between a
+     * token and anyone who wants to move it.
+     *
+     * ⚠ FOR `dummy` THAT AUTHORITY IS DELIBERATELY PERMISSIVE. Its registry node
+     * points `third_party_transfer_logic_script` at dummy's own transfer logic,
+     * which accepts redeemer 200 unconditionally — so ANY caller can seize ANY
+     * dummy token. That is correct for a substandard whose whole purpose is to
+     * be the minimal testable one, and it is why `dummy` must never be
+     * presented as a template for a compliance substandard. `freeze-and-seize`
+     * is where that field points at a real issuer-admin check.
+     */
+    async thirdPartyTransfer(params: ThirdPartyTransferParams): Promise<UnsignedTx> {
+      const { holderAddress, recipientAddress, tokenPolicyId, assetName, quantity, feePayerAddress } =
+        params;
+      const unit = tokenPolicyId + assetName;
+      const client = ctx.client;
+      const plbHash = ctx.standardScripts.programmableLogicBase.hash;
+
+      const holderPlbAddr = baseAddress(networkId, plbHash, holderAddress);
+      const recipientPlbAddr = baseAddress(networkId, plbHash, recipientAddress);
+
+      const holderUtxos = await client.getUtxos(EvoAddress.fromBech32(holderPlbAddr));
+      const tokenUtxos = holderUtxos.filter((u) => utxoUnitQty(u, unit) > 0n);
+      if (tokenUtxos.length === 0) {
+        throw new Error(`No token UTxOs found at ${holderPlbAddr} for ${unit}`);
+      }
+      const { selected, totalTokenAmount } = selectUtxosForAmount(tokenUtxos, unit, quantity);
+      const returningAmount = totalTokenAmount - quantity;
+
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
+      if (!registryUtxo) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
+
+      const protocolParamsUtxo = await findParamsUtxo();
+
+      const refUtxos = [protocolParamsUtxo, registryUtxo];
+      const refInputs = refUtxos.map(utxoToTxInput);
+      const paramsIdx = referenceInputIndexOf(refInputs, utxoToTxInput(protocolParamsUtxo));
+      const registryIdx = referenceInputIndexOf(refInputs, utxoToTxInput(registryUtxo));
+
+      // The complete withdrawal set: the framework's third_party delegate, and
+      // the issuer authority the registry node names. Both are script
+      // credentials, so ledger order is bytewise between them.
+      const thirdPartyKey: WithdrawalKey = {
+        hash: ctx.standardScripts.thirdParty.hash,
+        isScript: true,
+      };
+      const issuerAuthorityKey: WithdrawalKey = { hash: transferScript.hash, isScript: true };
+      const allWithdrawals: WithdrawalKey[] = [thirdPartyKey, issuerAuthorityKey];
+      const thirdPartyWdrlIdx = withdrawalIndexOf(allWithdrawals, thirdPartyKey);
+
+      // ---- Output layout is the contract, and it is NOT the transfer layout --
+      //
+      // `third_party` PAIRS each programmable input with an output, in ledger
+      // input order, and requires that paired output to preserve the input's
+      // ADDRESS, DATUM and REFERENCE SCRIPT, with lovelace only ratcheting up.
+      // The seized amount is the DELTA between the pair.
+      //
+      // So the destination — where the seized tokens actually go — cannot be one
+      // of those paired outputs. It must be among the LEADING outputs that
+      // `outputs_start_idx` tells the validator to skip; their tokens are
+      // accumulated and counted in the conservation check, but they are exempt
+      // from the pairing rule.
+      //
+      //   outputs[0]            destination (skipped, tokens still counted)
+      //   outputs[1..n]         one continuation per spent input, IN LEDGER ORDER
+      //
+      // Getting this backwards — destination last, continuations first — encodes
+      // and submits happily and fails at evaluation with an empty trace list.
+      const OUTPUTS_START_IDX = 1;
+
+      const spendRdmr = baseSpendRedeemer("THIRD_PARTY", paramsIdx, thirdPartyWdrlIdx);
+
+      let tx = client.newTx();
+      tx = tx.collectFrom({ inputs: selected, redeemer: spendRdmr });
+
+      // Destination first.
+      tx = tx.payToAddress({
+        address: EvoAddress.fromBech32(recipientPlbAddr),
+        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+      });
+
+      // Then one continuation per input, in LEDGER ORDER — the validator walks
+      // inputs and outputs in lockstep, and the ledger sorts inputs by
+      // (tx id, index) regardless of the order they were added here.
+      const ordered = [...selected].sort((a, b) =>
+        compareTxInputs(utxoToTxInput(a), utxoToTxInput(b))
+      );
+      let stillToSeize = quantity;
+      for (const input of ordered) {
+        const held = utxoUnitQty(input, unit);
+        const taken = held < stillToSeize ? held : stillToSeize;
+        stillToSeize -= taken;
+        const remaining = held - taken;
+
+        const inputDatum = getInlineDatum(input);
+        const tokens = new Map<string, bigint>();
+        if (remaining > 0n) tokens.set(unit, remaining);
+
+        tx = tx.payToAddress({
+          // SAME address as the input — this is a continuation, not a payment.
+          address: input.address,
+          // Lovelace may only ratchet UP; carrying the input's own is exact and
+          // survives a min-UTxO parameter rise that equality would not.
+          assets: outputAssets(EvoAssets.lovelaceOf(input.assets), tokens),
+          datum: new InlineDatum.InlineDatum({ data: inputDatum ?? voidData() }),
+        });
+      }
+      if (stillToSeize > 0n) {
+        throw new Error(
+          `Selected UTxOs hold ${quantity - stillToSeize} of ${quantity} ${unit} — selection is short`
+        );
+      }
+
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(hexToBytes(ctx.standardScripts.thirdParty.hash)),
+        amount: 0n,
+        redeemer: thirdPartyRedeemer(paramsIdx, registryIdx, OUTPUTS_START_IDX),
+      });
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(hexToBytes(transferScript.hash)),
+        amount: 0n,
+        redeemer: Data.int(200n),
+      });
+
+      tx = tx.readFrom({ referenceInputs: refUtxos });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(transferScript.compiledCode) });
+      tx = tx.attachScript({
+        script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode),
+      });
+
+      // NO holder signature. That is the entire point of this operation, and
+      // adding one "to be safe" would quietly turn it back into a transfer.
+      return finish(tx, feePayerAddress, { tokenPolicyId, unit });
     },
 
     async transfer(params: TransferParams): Promise<UnsignedTx> {

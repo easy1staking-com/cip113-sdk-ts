@@ -30,6 +30,7 @@ import type {
   MintParams,
   BurnParams,
   TransferParams,
+  ThirdPartyTransferParams,
   FreezeParams,
   UnfreezeParams,
   SeizeParams,
@@ -96,6 +97,15 @@ export interface CIP113Protocol {
 
   /** Transfer tokens */
   transfer(params: TransferParams): Promise<UnsignedTx>;
+
+  /**
+   * Administrative transfer: move a holder's tokens without their signature.
+   *
+   * Requires an explicit `substandardId` — unlike mint/burn/transfer there is no
+   * try-all fallback here. Guessing which substandard should be allowed to seize
+   * someone's tokens is not a convenience worth having.
+   */
+  thirdPartyTransfer(params: ThirdPartyTransferParams): Promise<UnsignedTx>;
 
   // -- Compliance operations --
 
@@ -207,6 +217,25 @@ export const CIP113 = {
 
       async register(substandardId, params) {
         return requireSubstandard(substandardId).register(params);
+      },
+
+      async thirdPartyTransfer(params) {
+        if (!params.substandardId) {
+          throw new Error(
+            "thirdPartyTransfer requires an explicit substandardId. There is deliberately no " +
+              "try-all fallback: this operation moves someone else's tokens without their " +
+              "signature, and selecting the authority by trial is not acceptable for that."
+          );
+        }
+        const plugin = requireSubstandard(params.substandardId);
+        if (!plugin.thirdPartyTransfer) {
+          throw new Error(
+            `Substandard "${params.substandardId}" does not support third-party transfers. ` +
+              `Implementing it is a claim that the substandard has an administrative authority ` +
+              `and has wired its registry node's third_party_transfer_logic_script accordingly.`
+          );
+        }
+        return plugin.thirdPartyTransfer(params);
       },
 
       async mint(params) {

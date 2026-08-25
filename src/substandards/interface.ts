@@ -65,6 +65,17 @@ export interface SubstandardPlugin {
   /** Transfer tokens between addresses */
   transfer(params: TransferParams): Promise<UnsignedTx>;
 
+  /**
+   * Administrative transfer of a holder's tokens without the holder's signature.
+   *
+   * OPTIONAL: a substandard with no administrative authority should simply not
+   * implement it, and callers get a refusal naming the substandard rather than
+   * a silent no-op. Implementing it is a claim that this substandard HAS such an
+   * authority and has wired its registry node's
+   * `third_party_transfer_logic_script` to something meaningful.
+   */
+  thirdPartyTransfer?(params: ThirdPartyTransferParams): Promise<UnsignedTx>;
+
   // -- Optional capabilities --
 
   /** Freeze an address (blacklist) */
@@ -173,6 +184,38 @@ export interface TransferParams {
   /** Raw asset name hex (including CIP-67 label if CIP-68) */
   assetName: HexString;
   quantity: bigint;
+  /** Optional: route directly to this substandard instead of trying all */
+  substandardId?: string;
+}
+
+/**
+ * A THIRD-PARTY transfer: an administrator moves a holder's tokens WITHOUT the
+ * holder signing.
+ *
+ * This is the seize / clawback / freeze-enforcement path. It is authorised by
+ * the registry node's `third_party_transfer_logic_script` withdraw-0 — the
+ * issuer's own logic — not by the holder, which is the entire point and the
+ * entire risk.
+ *
+ * On chain it takes a different route from `transfer`: programmable_logic_base
+ * dispatches via `SpendViaThirdParty` to the standalone `third_party` validator,
+ * so a third-party transaction never loads the `transfer` reference script at
+ * all. The two paths share no redeemer.
+ */
+export interface ThirdPartyTransferParams {
+  /**
+   * The current holder, whose tokens are being moved. **This address does NOT
+   * sign the transaction** — that is what makes this a third-party transfer.
+   */
+  holderAddress: Address;
+  /** Where the tokens go. */
+  recipientAddress: Address;
+  tokenPolicyId: PolicyId;
+  /** Raw asset name hex (including CIP-67 label if CIP-68) */
+  assetName: HexString;
+  quantity: bigint;
+  /** The administrator: pays fees and provides the authorising signature. */
+  feePayerAddress: Address;
   /** Optional: route directly to this substandard instead of trying all */
   substandardId?: string;
 }

@@ -153,6 +153,34 @@ test("register, mint and transfer a dummy token end to end", async () => {
     timeoutMs: 120_000,
   });
   assert.equal(await heldAt(senderPlb, policy, assetName), before - 400n, "sender must fall by exactly 400");
+
+  // --- THIRD-PARTY transfer: move the recipient's tokens WITHOUT their key ---
+  //
+  // A different on-chain route, not a variant: SpendViaThirdParty dispatches to
+  // the standalone `third_party` validator and the `transfer` script is never
+  // loaded. The holder does not sign — that is the capability being proven.
+  const beforeHolder = await heldAt(recipientPlb, policy, assetName);
+  const seized = await protocol.thirdPartyTransfer({
+    holderAddress: recipient,
+    recipientAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    quantity: 150n,
+    feePayerAddress: address,
+    substandardId: "dummy",
+  });
+  await seized._signBuilder.signAndSubmit();
+
+  await waitFor(async () => (await heldAt(recipientPlb, policy, assetName)) === beforeHolder - 150n, {
+    what: "the seized tokens to leave the holder",
+    timeoutMs: 120_000,
+  });
+  // Both sides again — and note the holder NEVER SIGNED this transaction.
+  assert.equal(
+    await heldAt(senderPlb, policy, assetName),
+    before - 400n + 150n,
+    "the administrator's balance must rise by exactly what was seized"
+  );
 });
 
 // ---------------------------------------------------------------------------
