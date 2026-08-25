@@ -178,6 +178,33 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     throw new Error("bootstrapProtocol is devnet-only; refusing to run against a non-testnet");
   }
 
+  // ---- Preflight: wait for the indexer to catch up ------------------------
+  //
+  // Kupo and yaci-store lag the node. Immediately after another transaction —
+  // typically the previous test file's — `getUtxos` still reports inputs the
+  // node already knows are spent, and the resulting submission is rejected with
+  // code 3117, "unknown UTxO references as inputs".
+  //
+  // That error names a UTxO and reads as a builder bug. It is not: the builder
+  // faithfully used what the provider told it. Waiting for two consecutive
+  // IDENTICAL reads is a cheap proxy for "the indexer has settled" — a single
+  // read cannot distinguish a settled view from a stale one.
+  const utxoFingerprint = async () =>
+    (await client.getUtxos(addressObj))
+      .map((u: EvoUTxO.UTxO) => `${EvoTransactionHash.toHex(u.transactionId)}#${u.index}`)
+      .sort()
+      .join(",");
+  const settleIndexer = async () => {
+    let previousView = await utxoFingerprint();
+    for (let i = 0; i < 20; i++) {
+      await sleep(1_000);
+      const current = await utxoFingerprint();
+      if (current === previousView) return;
+      previousView = current;
+    }
+  };
+  await settleIndexer();
+
   // ---- Preflight: fund the wallet ----------------------------------------
   let utxos = await client.getUtxos(addressObj);
   let balance = utxos.reduce((s: bigint, u: EvoUTxO.UTxO) => s + EvoAssets.lovelaceOf(u.assets), 0n);
@@ -484,6 +511,13 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
   }
   await submitAndWait(await regTx.build({ changeAddress: addressObj, evaluator }));
+
+  // The caller will immediately build against this wallet, and the indexer is
+  // still catching up with the three transactions above. Settling here rather
+  // than in every caller keeps the hazard in one place — a bootstrap that hands
+  // back a DeploymentParams the chain agrees with, but a wallet view it does
+  // not, is a trap for every test that follows.
+  await settleIndexer();
 
   // ---- Step 6: assemble DeploymentParams ---------------------------------
   //

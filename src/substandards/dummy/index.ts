@@ -539,7 +539,13 @@ export function dummySubstandard(config: {
         txHash = result.chainResult().txHash;
       }
 
-      return { cbor, txHash };
+      // `_signBuilder` is internal but load-bearing: it is how seed-phrase
+      // callers sign and submit, and register/mint already return it. Omitting
+      // it here made transfer the only operation whose result could not be
+      // submitted — surfacing as "Cannot read properties of undefined
+      // (reading 'signAndSubmit')" at the CALL SITE, which reads as a caller
+      // mistake rather than a missing field on the value it was handed.
+      return { cbor, txHash, _signBuilder: result } as UnsignedTx;
     },
   };
 }

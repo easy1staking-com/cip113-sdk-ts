@@ -41,7 +41,21 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
 
           const params: any = { transaction: { cbor } };
           if (ogmiosAdditionalUtxo && ogmiosAdditionalUtxo.length > 0) {
-            params.additionalUtxo = ogmiosAdditionalUtxo;
+            // ⚠ additionalUtxo means "UTxOs the ledger does NOT have yet" — the
+            // outputs of transactions still in flight. Ogmios REJECTS the whole
+            // evaluation if any entry already exists on chain:
+            //
+            //   "Some user-provided additional UTxO entries overlap with those
+            //    that exist in the ledger."
+            //
+            // Evolution keeps handing us chained outputs after they have been
+            // confirmed, so once a fixture awaits each submission — as this one
+            // does — every "additional" UTxO is already on chain and the
+            // evaluation fails for a reason that has nothing to do with the
+            // transaction being evaluated. Ask the ledger which ones it has and
+            // send only the genuine remainder.
+            const fresh = await withoutOnChainUtxos(ogmiosUrl, ogmiosAdditionalUtxo);
+            if (fresh.length > 0) params.additionalUtxo = fresh;
           }
 
           const resp = await fetch(ogmiosUrl, {
@@ -104,6 +118,43 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
  * Convert Evolution SDK UTxOs to Ogmios additionalUtxo format.
  * Ogmios expects: [{ transaction: { id }, index, address, value, datum?, script? }]
  */
+/**
+ * Drop additional-UTxO entries the ledger already knows about.
+ *
+ * Queried from Ogmios rather than inferred: a stale local view is exactly what
+ * causes the overlap in the first place, so inferring from the same stale view
+ * would reproduce the bug.
+ */
+async function withoutOnChainUtxos(ogmiosUrl: string, entries: any[]): Promise<any[]> {
+  const outputReferences = entries.map((e) => ({
+    transaction: { id: e.transaction.id },
+    index: e.index,
+  }));
+  try {
+    const resp = await fetch(ogmiosUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "queryLedgerState/utxo",
+        params: { outputReferences },
+        id: null,
+      }),
+    });
+    const json = await resp.json();
+    if (!Array.isArray(json?.result)) return entries;
+    const onChain = new Set(
+      json.result.map((u: any) => `${u.transaction.id}#${u.index}`)
+    );
+    return entries.filter((e) => !onChain.has(`${e.transaction.id}#${e.index}`));
+  } catch {
+    // If the query itself fails, send what we had — a possibly-rejected
+    // evaluation is better than silently dropping UTxOs a chained transaction
+    // genuinely needs.
+    return entries;
+  }
+}
+
 function toOgmiosAdditionalUtxos(utxos: UTxO.UTxO[]): any[] {
   return utxos.map((utxo) => {
     const txId = EvoTransactionHash.toHex(utxo.transactionId);
