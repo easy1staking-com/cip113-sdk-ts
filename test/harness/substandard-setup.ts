@@ -13,7 +13,6 @@
 import {
   Bytes,
   Credential,
-  DRep,
   TransactionHash as EvoTransactionHash,
 } from "@evolution-sdk/evolution";
 import { buildEvoScript, voidData, type PlutusScript } from "../../dist/index.js";
@@ -41,10 +40,23 @@ export async function registerSubstandardCredentials(
 
   for (const script of scripts) {
     try {
+      // PLAIN registration, NOT registerAndDelegateTo.
+      //
+      // MEASURED: a combined register-and-delegate emits a Conway
+      // vote_reg_deleg_cert (cert type 12), which reaches the publish handler
+      // as a DIFFERENT Certificate constructor than RegisterCredential — and
+      // upstream's publish idiom, which this substandard copies, permits ONLY
+      // RegisterCredential:
+      //
+      //     when c is { RegisterCredential { .. } -> True; _ -> False }
+      //
+      // so the combined certificate is REFUSED by the very validator being
+      // registered. The refusal is correct — it is what stops a third party
+      // deregistering the credential — but it also means a script credential
+      // governed by this idiom cannot be DRep-delegated at all.
       let tx = client.newTx();
-      tx = tx.registerAndDelegateTo({
+      tx = tx.registerStake({
         stakeCredential: Credential.makeScriptHash(Bytes.fromHex(script.hash)),
-        drep: new DRep.AlwaysAbstainDRep({}),
         redeemer: voidData(),
       });
       tx = tx.attachScript({ script: buildEvoScript(script.compiledCode) });

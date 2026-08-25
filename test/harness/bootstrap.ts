@@ -391,9 +391,12 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     assets: outputAssets(2_000_000n, new Map([[protocolParamNftUnit, 1n]])),
     datum: new InlineDatum.InlineDatum({ data: paramsDatum }),
   });
+  // 3 ADA, not 2: the origin node's datum is SEVEN fields now and min-UTxO
+  // scales with serialised output size. MEASURED at 2,038,630 for a node of
+  // this shape — the inherited 2,000,000 was sized for the five-field datum.
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(registrySpendAddr),
-    assets: outputAssets(2_000_000n, new Map([[directoryNftUnit, 1n]])),
+    assets: outputAssets(3_000_000n, new Map([[directoryNftUnit, 1n]])),
     datum: new InlineDatum.InlineDatum({ data: directoryDatum }),
   });
   // The issuance datum carries ~5kB of CBOR; min-UTxO scales with serialized

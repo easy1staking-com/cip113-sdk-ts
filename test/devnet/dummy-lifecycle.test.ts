@@ -21,7 +21,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { Address as EvoAddress } from "@evolution-sdk/evolution";
+import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
 import { dummySubstandard } from "../../dist/substandards/dummy/index.js";
 import {
   CIP113,
@@ -73,12 +73,33 @@ test("register, mint and transfer a dummy token end to end", async () => {
   const assetName = stringToHex("DUMMY");
   const plb = deployment.programmableLogicBase.scriptHash;
 
-  const heldAt = async (addr: string, unit: string) => {
+  /**
+   * Sum a token's quantity across a UTxO set.
+   *
+   * ⚠ NOT `utxo.assets.get(unit)`. Evolution's `Assets` is not a Map keyed by
+   * unit string, so that accessor returns undefined for EVERY asset and this
+   * helper silently reported 0 forever — a balance assertion that can only ever
+   * see zero passes any "before" check and fails every "after" one, which reads
+   * as "the transaction did nothing" rather than "the test cannot see". It cost
+   * a full devnet cycle to notice, because the transaction HAD succeeded.
+   */
+  const heldAt = async (addr: string, policyHex: string, nameHex: string) => {
     const utxos = await client.getUtxos(EvoAddress.fromBech32(addr));
-    return utxos.reduce((n: bigint, u: any) => {
-      const q = u.assets?.get?.(unit);
-      return n + (typeof q === "bigint" ? q : 0n);
-    }, 0n);
+    let total = 0n;
+    for (const u of utxos) {
+      for (const p of EvoAssets.policies(u.assets)) {
+        if (String(p) !== policyHex) continue;
+        for (const [name, qty] of EvoAssets.tokens(u.assets, p).entries()) {
+          const raw = (name as any)?.bytes ?? name;
+          const hex =
+            typeof raw === "string"
+              ? raw
+              : Array.from(raw as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+          if (hex === nameHex) total += qty as bigint;
+        }
+      }
+    }
+    return total;
   };
 
   const reg = await protocol.register("dummy", {
@@ -89,7 +110,7 @@ test("register, mint and transfer a dummy token end to end", async () => {
   const policy = reg.tokenPolicyId!;
   const unit = policy + assetName;
   await reg._signBuilder.signAndSubmit();
-  await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), unit)) === 1_000n, {
+  await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), policy, assetName)) === 1_000n, {
     what: "the registered supply to appear",
     timeoutMs: 120_000,
   });
@@ -104,7 +125,7 @@ test("register, mint and transfer a dummy token end to end", async () => {
     substandardId: "dummy",
   });
   await more._signBuilder.signAndSubmit();
-  await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), unit)) === 1_500n, {
+  await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), policy, assetName)) === 1_500n, {
     what: "the additional mint to settle",
     timeoutMs: 120_000,
   });
@@ -114,7 +135,7 @@ test("register, mint and transfer a dummy token end to end", async () => {
   const recipientPlb = baseAddress(networkId, plb, recipient);
   assert.notEqual(senderPlb, recipientPlb, "a transfer to oneself would prove nothing");
 
-  const before = await heldAt(senderPlb, unit);
+  const before = await heldAt(senderPlb, policy, assetName);
   const tx = await protocol.transfer({
     senderAddress: address,
     recipientAddress: recipient,
@@ -127,11 +148,11 @@ test("register, mint and transfer a dummy token end to end", async () => {
 
   // THE DELTA, both sides: a credit with no matching debit would pass a
   // one-sided assertion while describing a mint.
-  await waitFor(async () => (await heldAt(recipientPlb, unit)) === 400n, {
+  await waitFor(async () => (await heldAt(recipientPlb, policy, assetName)) === 400n, {
     what: "the transferred tokens to arrive",
     timeoutMs: 120_000,
   });
-  assert.equal(await heldAt(senderPlb, unit), before - 400n, "sender must fall by exactly 400");
+  assert.equal(await heldAt(senderPlb, policy, assetName), before - 400n, "sender must fall by exactly 400");
 });
 
 // ---------------------------------------------------------------------------

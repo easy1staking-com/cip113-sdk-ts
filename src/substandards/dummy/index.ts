@@ -320,14 +320,24 @@ export function dummySubstandard(config: {
         assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
         datum: new InlineDatum.InlineDatum({ data: voidData() }),
       });
+      // ⚠ min-UTxO, not a round number pulled from the old code.
+      //
+      // MEASURED: a 7-field RegistryNode datum plus the node NFT requires
+      // 2,038,630 lovelace. The 2,000,000 this was inherited from is below that
+      // — it was sized for the FIVE-field datum. Growing a datum raises the
+      // minimum ADA of every output carrying it, and the ledger reports that as
+      // "insufficient Ada" naming a number, never as "your datum grew".
+      // Deliberately generous rather than exact: min-UTxO scales with
+      // serialised size and with a protocol parameter that can rise.
+      const REGISTRY_NODE_ADA = 3_000_000n;
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registrySpendAddr),
-        assets: outputAssets(2_000_000n, new Map([[registryNftUnit, 1n]])),
+        assets: outputAssets(REGISTRY_NODE_ADA, new Map([[registryNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: newNodeDatum }),
       });
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registrySpendAddr),
-        assets: outputAssets(2_000_000n, new Map([[coveringNftUnit, 1n]])),
+        assets: outputAssets(REGISTRY_NODE_ADA, new Map([[coveringNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
