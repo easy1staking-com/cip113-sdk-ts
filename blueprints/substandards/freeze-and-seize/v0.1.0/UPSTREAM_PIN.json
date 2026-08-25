@@ -9,21 +9,27 @@
     "validators": 10
   },
   "upstream": {
-    "repo": null,
-    "commit": null,
-    "note": "Source project not recorded anywhere in this repo. Distinct from the standard blueprint's project."
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
+    "path": "src/substandards/freeze-and-seize",
+    "commit": "013c11544839754d462e0603de59f4bbf1769479",
+    "note": "SOURCE LOCATED. The previous pin recorded repo: null / provenance: UNKNOWN because nobody had written it down — it is the `freeze-and-seize` substandard in the platform repo, alongside `dummy`. The preamble title 'cip113/freeze-unfreeze' is that directory's aiken.toml project name, not a separate repository."
   },
-  "blueprint_reproduced": false,
-  "provenance": "UNKNOWN",
-  "verified": {
-    "date": "2026-08-14",
-    "findings": [
-      "The directory name v0.1.0 is an invented label: the artifact declares version 0.0.0.",
-      "Built with the same Aiken as the standard blueprint (v1.1.21+42babe5), but from an unrelated source project."
-    ]
-  },
+  "blueprint_reproduced": true,
+  "provenance": "VERIFIED",
   "reproduce": {
     "requires": "Aiken v1.1.21+42babe5",
-    "note": "Cannot be reproduced without locating the source project first."
+    "command": "cd src/substandards/freeze-and-seize && aiken build",
+    "note": "aiken.toml pins compiler v1.1.21 and stdlib v3.0.0. ⚠ aiken BUILDS ANYWAY on a mismatched compiler, emitting only a warning — an artifact built on the wrong toolchain is indistinguishable from a correct one by inspection. Assert the compiler from THIS FILE'S `declares.compiler` and the artifact's own `preamble.compiler`, never from the shell you happen to be in."
+  },
+  "verified": {
+    "date": "2026-08-25",
+    "method": "REPRODUCED FROM SOURCE",
+    "findings": [
+      "OBSERVED: `aiken build` at platform commit 013c1154, with Aiken v1.1.21+42babe5 and stdlib v3.0.0, reproduces this artifact EXACTLY — sha256 9514852e32ad2181595b6c8e65349ce5636cb3a11d0acd2e47dec55ca9f21c8f. Byte-identical across two clean rebuilds, and byte-identical to the copy committed in the platform repo.",
+      "NO DIVERGENCE between the committed artifact and its source. That was the outcome worth checking for: a divergence would have meant the committed blueprint and the code it claims to come from disagree — the silent-corruption channel a shared, mutable toolchain creates.",
+      "The machine-global Aiken was on v1.1.9 when this was rebuilt. It was borrowed to v1.1.21 (the version aiken.toml pins) for the build and RESTORED to v1.1.9 immediately after; the platform repo was left clean.",
+      "This blueprint already carries `publish` handlers on both of its withdraw-0 validators (example_transfer_logic.issuer_admin_contract and .transfer), so — unlike the dummy substandard — it has no registration blocker under CIP-113 0.5.x. Its obstacles are entirely off-chain.",
+      "⚠ PROVENANCE IS VERIFIED FOR THE ARTIFACT, NOT AN ENDORSEMENT OF THE CODE. This blueprint is still written against 0.3.x semantics on the off-chain side: `freeze-and-seize` is quarantined (PLAN.md D-14) and refuses to initialise. Reproducibility says the bytes come from the named source; it says nothing about whether they are correct for the current protocol."
+    ]
   }
 }
