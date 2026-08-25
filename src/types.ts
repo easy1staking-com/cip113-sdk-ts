@@ -160,8 +160,28 @@ export interface DeploymentParams {
   thirdParty: { scriptHash: ScriptHash };
   unfracking: { scriptHash: ScriptHash };
 
-  /** Upgrade authority named by coordination datum field 5 (`upgrade_cred`). */
+  /**
+   * `upgrade_multisig` as deployed — upstream's REFERENCE upgrade authority.
+   *
+   * ⚠ Deployed and hash-asserted, but NOT necessarily the ACTIVE authority. See
+   * `upgradeAuthority`, which records what the coordination datum actually says.
+   */
   upgradeMultisig: { scriptHash: ScriptHash };
+
+  /**
+   * The credential in coordination datum field 5 — the authority that must
+   * produce a withdraw-0 for ANY upgrade, including a change of authority.
+   *
+   * `coordination_spend` only requires this credential to appear in
+   * `tx.withdrawals`; it "never inspects that authority's internals", so a
+   * verification-key credential is as valid as a script one.
+   *
+   * ⚠ AN UNSATISFIABLE VALUE HERE IS A ONE-WAY BRICK, in upstream's own words:
+   * it makes the authority check "permanently unsatisfiable, with no repair
+   * path". A credential that cannot be registered — and therefore cannot appear
+   * in a withdrawals map — is exactly that.
+   */
+  upgradeAuthority: { type: "key" | "script"; hash: ScriptHash };
 
   programmableLogicBase: {
     scriptHash: ScriptHash;

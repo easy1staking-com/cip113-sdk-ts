@@ -43,6 +43,7 @@ import {
   Assets as EvoAssets,
   TransactionHash as EvoTransactionHash,
   Credential,
+  DRep,
   Bytes,
   Data,
   UPLC,
@@ -52,6 +53,7 @@ import {
 
 import {
   createStandardScripts,
+  stakingCredentialHash,
   protocolParamsDatum as buildProtocolParamsDatum,
   registryNodeDatum,
   paymentCredentialHash,
@@ -252,11 +254,40 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   const issuanceCborHexMint = builders.issuanceCborHexMint(utxo2Ref, alwaysFailB.hash);
   const registryMint = builders.registryMint(utxo1Ref, issuanceCborHexMint.hash, registrySpend.hash);
 
-  // The upgrade authority. 1-of-1 on the bootstrapping wallet's own key, per
-  // PLAN.md D-15: "a single key update is fine" relaxes WHO may authorise, not
-  // the mechanism — the coordination UTxO and its datum are fully wired.
+  // upstream's reference upgrade authority. Deployed and hash-asserted, but see
+  // the block below: it is NOT the authority this fixture installs.
   const adminPkh = paymentCredentialHash(address);
   const upgradeMultisig = builders.upgradeMultisig([adminPkh], 1);
+
+  // ---- The active upgrade authority, and why it is NOT upgrade_multisig ----
+  //
+  // coordination_spend's authorisation check is exactly
+  //     self.withdrawals |> pairs.has_key_or_fail(old_params.upgrade_cred)
+  // and it "never inspects that authority's internals". So the credential need
+  // only be able to APPEAR IN A WITHDRAWALS MAP, which requires it to be a
+  // registered stake credential.
+  //
+  // ⚠ upgrade_multisig CANNOT BE REGISTERED through this SDK's toolchain.
+  //   * The blueprint gives it `withdraw` and `else` — NO `publish` handler.
+  //     A Conway RegCert runs the script under the PUBLISH purpose, so a
+  //     script-witnessed registration falls through to `else` and fails. This
+  //     is the same shape as the blocker that stopped the 0.3.x fixture.
+  //   * Registering WITHOUT a witness is refused client-side by Evolution:
+  //     "Redeemer required for script-controlled stake credential registration"
+  //     (OBSERVED on devnet). Whether the Conway ledger itself would permit a
+  //     permissionless registration is UNTESTED — the SDK blocks it before a
+  //     transaction is ever built, and the constitution allows no second
+  //     Cardano library to test it with.
+  //
+  // Pointing upgrade_cred at an unregisterable credential is upstream's
+  // documented ONE-WAY BRICK: "an unsatisfiable upgrade_cred makes this
+  // validator's own authority check permanently unsatisfiable, with no repair
+  // path." So the fixture installs a VERIFICATION-KEY authority instead — the
+  // bootstrapping wallet's own stake key. That is the most literal reading of
+  // PLAN.md D-15 ("a single key update is fine"), and it relaxes WHO may
+  // authorise while leaving the mechanism — coordination UTxO, 7-field datum,
+  // trampoline — fully wired, exactly as D-15 requires.
+  const upgradeStakeKeyHash = stakingCredentialHash(address);
 
   // issuance_mint is parameterised per minting logic, which is not known until
   // a token is registered. Build it once against a placeholder and store the
@@ -286,7 +317,7 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     transferCred: { type: "script", hash: transfer.hash },
     thirdPartyCred: { type: "script", hash: thirdParty.hash },
     unfrackingCred: { type: "script", hash: unfracking.hash },
-    upgradeCred: { type: "script", hash: upgradeMultisig.hash },
+    upgradeCred: { type: "key", hash: upgradeStakeKeyHash },
     maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
   });
 
@@ -400,6 +431,47 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   // logic_base dispatches to these by credential and a credential that is not
   // registered cannot be withdrawn against, so the protocol is inoperable until
   // all three exist — this is not optional setup.
+  // The upgrade authority's own stake credential, in its OWN transaction.
+  // A withdraw-0 cannot reference an unregistered reward account, so without
+  // this the upgrade path is dead on arrival — and coordination_spend offers no
+  // repair path.
+  //
+  // Separate transaction because this credential is the WALLET'S, not the
+  // protocol's: it survives across bootstraps, so a second instance on the same
+  // devnet finds it already registered. That is a legitimate state, not an
+  // error — but it is the ONLY error tolerated here. Anything else propagates,
+  // because a blanket catch around a registration would hide exactly the
+  // publish-purpose failure this fixture exists to surface.
+  try {
+    // Registration is not enough. CONWAY, OBSERVED: a withdrawal — INCLUDING a
+    // zero withdrawal — from a credential not delegated to a DRep is rejected
+    // with code 3150, "credentials that do not engage in on-chain governance".
+    // coordination_spend's authority check is a withdraw-0, so without this
+    // delegation the upgrade path is unusable even though the credential is
+    // registered. Delegating to AlwaysAbstain is the neutral choice: it engages
+    // with governance without casting an opinion.
+    const keyRegTx = client
+      .newTx()
+      .registerAndDelegateTo({
+        stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
+        drep: new DRep.AlwaysAbstainDRep({}),
+      });
+    await submitAndWait(await keyRegTx.build({ changeAddress: addressObj, evaluator }));
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    const alreadyRegistered =
+      msg.includes("already known credential") || msg.includes("3145");
+    if (!alreadyRegistered) throw err;
+    // Registered by an earlier bootstrap on this devnet. The DELEGATION still
+    // has to exist for the withdraw-0 to be accepted, and re-delegating an
+    // already-delegated credential is harmless.
+    const delegateTx = client.newTx().delegateToDRep({
+      stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
+      drep: new DRep.AlwaysAbstainDRep({}),
+    });
+    await submitAndWait(await delegateTx.build({ changeAddress: addressObj, evaluator }));
+  }
+
   let regTx = client.newTx();
   for (const delegate of [transfer, thirdParty, unfracking]) {
     regTx = regTx.registerStake({
@@ -439,6 +511,7 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     thirdParty: { scriptHash: thirdParty.hash },
     unfracking: { scriptHash: unfracking.hash },
     upgradeMultisig: { scriptHash: upgradeMultisig.hash },
+    upgradeAuthority: { type: "key", hash: upgradeStakeKeyHash },
     issuance: {
       txInput: utxo2Ref,
       policyId: issuanceCborHexMint.hash,

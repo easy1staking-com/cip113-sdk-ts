@@ -51,6 +51,7 @@ test("bootstraps a protocol instance on a live devnet", async () => {
     ["thirdParty.scriptHash", deployment.thirdParty.scriptHash],
     ["unfracking.scriptHash", deployment.unfracking.scriptHash],
     ["upgradeMultisig.scriptHash", deployment.upgradeMultisig.scriptHash],
+    ["upgradeAuthority.hash", deployment.upgradeAuthority.hash],
     ["issuance.policyId", deployment.issuance.policyId],
     ["directoryMint.scriptHash", deployment.directoryMint.scriptHash],
     ["directorySpend.scriptHash", deployment.directorySpend.scriptHash],
@@ -146,7 +147,24 @@ test("the deployed protocol state is what the bootstrap intended — read back f
   assert.equal(params.transferCred.hash, deployment.transfer.scriptHash, "field 2 = transfer");
   assert.equal(params.thirdPartyCred.hash, deployment.thirdParty.scriptHash, "field 3 = third_party");
   assert.equal(params.unfrackingCred.hash, deployment.unfracking.scriptHash, "field 4 = unfracking");
-  assert.equal(params.upgradeCred.hash, deployment.upgradeMultisig.scriptHash, "field 5 = upgrade");
+  assert.equal(params.upgradeCred.hash, deployment.upgradeAuthority.hash, "field 5 = upgrade_cred");
+  assert.equal(params.upgradeCred.type, deployment.upgradeAuthority.type, "upgrade_cred kind");
+
+  // ⚠ THE BRICK CHECK. coordination_spend requires upgrade_cred to appear in
+  // tx.withdrawals, and upstream states an unsatisfiable value here makes the
+  // authority check "permanently unsatisfiable, with no repair path". A
+  // credential that cannot be REGISTERED can never appear in a withdrawals map,
+  // so this asserts the installed authority is one we can actually satisfy.
+  //
+  // upgrade_multisig is deployed but is NOT the authority: the blueprint gives
+  // it no `publish` handler, so a script-witnessed RegCert fails under the
+  // publish purpose, and Evolution refuses an unwitnessed one outright.
+  assert.equal(
+    params.upgradeCred.type,
+    "key",
+    "the installed upgrade authority must be a credential this toolchain can register — " +
+      "a script authority without a publish handler is a one-way brick"
+  );
   assert.equal(params.progLogicCred.hash, deployment.programmableLogicBase.scriptHash, "field 1 = PLB");
   assert.equal(params.registryNodeCs, deployment.directoryMint.scriptHash, "field 0 = registry policy");
   assert.equal(params.maxInlineDatumBytes, 1024n, "field 6 = max_inline_datum_bytes (devnet fixture)");

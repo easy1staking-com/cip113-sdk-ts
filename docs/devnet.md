@@ -103,3 +103,23 @@ Two reasons a restart is expensive beyond the coordination:
 The distinction matters and is easy to get backwards: a single-instance *lifecycle* constraint
 is not single-tenancy of the *chain*. Treating it as the latter serialises work that never
 needed serialising.
+
+
+## Why the devnet suite runs with `--test-concurrency=1`
+
+`node --test` runs test FILES concurrently, in separate processes. Every devnet test here
+derives the SAME wallet from the same mnemonic, so two files bootstrapping at once select
+the same UTxOs and the loser's transaction is rejected with:
+
+```
+code 3117 — "The transaction contains unknown UTxO references as inputs. This can happen
+if the inputs you're trying to spend have already been spent"
+```
+
+That error names the symptom (a missing UTxO) and not the cause (another test process
+spent it), so it reads as a bug in the transaction being built. It is not. Either serialise
+the suite — which is what `--test-concurrency=1` does — or give each file its own wallet.
+
+Serialising is the right default here: the devnet is itself a shared resource, the
+protocol bootstrap is not idempotent, and a concurrency bug that only appears when two
+files happen to overlap is worse than a slower suite.
