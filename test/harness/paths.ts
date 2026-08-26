@@ -7,6 +7,11 @@ export function dummyBlueprintPath(): string {
   return resolve(ROOT, "blueprints/substandards/dummy/v0.2.0/plutus.json");
 }
 
+/** The dummy blueprint's DIRECTORY. */
+export function dummyBlueprintDir(): string {
+  return resolve(ROOT, "blueprints/substandards/dummy/v0.2.0");
+}
+
 export function fesBlueprintPath(): string {
   return resolve(ROOT, "blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json");
 }

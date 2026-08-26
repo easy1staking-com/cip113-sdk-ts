@@ -26,7 +26,11 @@ import { requireDevnet, makeClient, settleWallet, STORE_URL } from "../harness/y
 import { bootstrapProtocol } from "../harness/bootstrap.js";
 import { makeFesFixture } from "../harness/fes-setup.js";
 import { buildDeploymentRecord } from "../harness/cip171-record.js";
-import { publishCip171Record } from "../harness/publish-cip171.js";
+import { CIP113 } from "../../dist/index.js";
+import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
+import { loadStandardBlueprint } from "../harness/bootstrap.js";
+import { registerSubstandardCredentials } from "../harness/substandard-setup.js";
+import { dummyBlueprintDir } from "../harness/paths.js";
 import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
 import { fesBlueprintDir } from "../harness/paths.js";
 
@@ -34,11 +38,16 @@ before(async () => {
   await requireDevnet();
 });
 
-test("freeze-and-seize: its CIP-171 record publishes and recomputes to FES's own scripts", async () => {
+test("freeze-and-seize: its REGISTRATION tx carries a CIP-171 record that recomputes", async () => {
   const deployment: any = await bootstrapProtocol();
   const client: any = await makeClient();
   const address = EvoAddress.toBech32(await client.address());
-  const assetName = Buffer.from("FESPROV").toString("hex");
+  // ⚠ DERIVED FROM THE BOOTSTRAP, NOT CONSTANT. `issuer_admin` is parameterised
+  // by (adminPkh, assetName) — both fixed if the name is a literal — so its
+  // stake credential would be IDENTICAL on every run and the second run dies
+  // with 3145, "trying to re-register some already known credentials". The
+  // devnet keeps its chain between runs; only the bootstrap is fresh.
+  const assetName = Buffer.from("FESPROV").toString("hex") + deployment.txHash.slice(0, 6);
   const plb = deployment.programmableLogicBase.scriptHash;
 
   const fes: any = await makeFesFixture(client, address, assetName, plb);
@@ -50,15 +59,47 @@ test("freeze-and-seize: its CIP-171 record publishes and recomputes to FES's own
       "produce an empty record that still encodes and still publishes"
   );
 
-  // The record is DERIVED from those calls, and refuses a blueprint whose
-  // provenance is not VERIFIED.
+  const protocol = CIP113.init({
+    client,
+    standard: { blueprint: loadStandardBlueprint(), deployment },
+    substandards: [
+      freezeAndSeizeSubstandard({ blueprint: fes.blueprint, deployment: fes.deployment }),
+    ],
+    evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
+  });
+
+  const init = await protocol.compliance.init("freeze-and-seize", {
+    feePayerAddress: address,
+    adminAddress: address,
+    assetName,
+  });
+  await init._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+  await registerSubstandardCredentials(fes.withdrawScripts.slice(1));
+
+  // The record is DERIVED from FES's own parameterisations, and refuses a
+  // blueprint whose provenance is not VERIFIED.
   const record: any = buildDeploymentRecord(fesBlueprintDir(), fes.paramEvents);
 
-  const txHash = await publishCip171Record(
-    client,
-    record,
-    createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337")
+  // ⚑ ATTACHED TO THE REGISTRATION TRANSACTION — the one that parameterises
+  // the token's scripts. A standalone record is equally valid to a verifier,
+  // but it must be REMEMBERED to be published; this cannot be forgotten,
+  // because it rides the transaction that creates what it describes.
+  const reg = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+    cip171Record: record,
+  });
+  await reg._signBuilder.signAndSubmit();
+  const txHash = reg.txHash;
+  // The registration tx is the SECOND of a chain — it spends UTxOs initCompliance
+  // produced. Metadata is not free here: anything that grows it eats room the
+  // chain has already committed to. Measured, not assumed.
+  console.error(
+    `=== CIP-171 FES REGISTRATION TX === ${(reg.cbor.length / 2)} bytes unsigned (cap 16384)`
   );
+  await settleWallet(client, await client.address());
 
   // Read it back OFF THE CHAIN, not from the object we built.
   const resp = await fetch(`${STORE_URL}/txs/${txHash}/metadata`);
@@ -107,5 +148,47 @@ test("freeze-and-seize: its CIP-171 record publishes and recomputes to FES's own
   console.error(
     `=== CIP-171 FES === tx ${txHash}; ${decoded.scripts.length} scripts recomputed; ` +
       `compiler ${decoded.compilerVersion}; env "${decoded.env ?? ""}"`
+  );
+});
+
+/**
+ * Dummy's guard, fired ON PURPOSE.
+ *
+ * `dummy/v0.2.0` is pinned UNVERIFIED: its source commit is not reachable
+ * upstream, so no verifier could reproduce the artefact. The record builder
+ * must REFUSE it rather than emit a claim nobody can check — a metadatum,
+ * unlike a file, cannot be deleted.
+ *
+ * This guard has never fired in anger. Watching it fire deliberately is the
+ * difference between "it is in place" and "it works".
+ */
+test("dummy: the record builder REFUSES an UNVERIFIED blueprint", async () => {
+  const deployment: any = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const address = EvoAddress.toBech32(await client.address());
+  const plb = deployment.programmableLogicBase.scriptHash;
+
+  // Reuse FES's fixture purely to obtain a non-empty parameterisation manifest;
+  // the refusal must depend on the BLUEPRINT's provenance, not on the events.
+  const fes: any = await makeFesFixture(
+    client,
+    address,
+    Buffer.from("DUMMYGUARD").toString("hex") + deployment.txHash.slice(0, 6),
+    plb
+  );
+  assert.ok(fes.paramEvents.length > 0, "need a non-empty manifest to prove the refusal is about provenance");
+
+  assert.throws(
+    () => buildDeploymentRecord(dummyBlueprintDir(), fes.paramEvents),
+    (e: Error) => {
+      assert.match(e.message, /UNVERIFIED/, "the refusal must name the provenance state");
+      assert.match(
+        e.message,
+        /cannot be deleted|permanent public claim/,
+        "and must say WHY — a wrong metadatum is not retractable"
+      );
+      return true;
+    },
+    "a non-VERIFIED blueprint must never yield a CIP-171 record"
   );
 });

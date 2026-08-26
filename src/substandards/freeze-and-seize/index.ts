@@ -6,6 +6,7 @@
  * Capabilities: register, mint, burn, transfer, freeze, unfreeze, seize.
  */
 
+import { CIP171_METADATA_LABEL, buildCip171Metadatum } from "../../core/cip171.js";
 import {
   Address as EvoAddress,
   Assets,
@@ -440,6 +441,15 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 8. Build transaction
       let tx = client.newTx();
+      // CIP-171 provenance, carried by the transaction that parameterises the
+      // scripts it describes. Optional: absent, this behaves exactly as before.
+      if (params.cip171Record) {
+        tx = tx.attachMetadata({
+          label: CIP171_METADATA_LABEL,
+          metadata: buildCip171Metadatum(params.cip171Record),
+        });
+      }
+
 
       tx = tx.collectFrom({ inputs: [coveringNodeUtxo], redeemer: voidData() });
 

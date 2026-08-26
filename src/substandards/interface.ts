@@ -7,6 +7,7 @@
  * Substandards receive the Evolution SDK client directly — no adapter layer.
  */
 
+import type { Cip171Record } from "../core/cip171.js";
 import type { ReadOnlyClient, SigningClient } from "@evolution-sdk/evolution/sdk/client/Client";
 import type { ResolvedStandardScripts } from "../standard/scripts.js";
 import type {
@@ -162,6 +163,23 @@ export interface RegisterParams {
   chainedUtxos?: unknown[];
   /** Optional CIP-68 metadata. When provided, mints ref token (label 100) + FT user token (label 333). */
   cip68Metadata?: CIP68MetadataInput;
+  /**
+   * Optional CIP-171 provenance. When provided, the registration transaction
+   * carries the record at metadata label 1984.
+   *
+   * Registration is the right seam for it: this is the transaction that
+   * PARAMETERISES the token's scripts, so the record and the thing it
+   * describes are produced by the same act. A standalone record is equally
+   * valid to a verifier — association is by script hash, not by transaction —
+   * but it has to be REMEMBERED to be published, and this cannot be forgotten.
+   *
+   * ⚠ Build it from the parameterisation itself (see the `onParameterize`
+   * recorder on the script factories), and only for a blueprint whose
+   * provenance is established. A record is a permanent public claim that named
+   * scripts came from a named commit; unlike a file, a metadatum cannot be
+   * deleted.
+   */
+  cip171Record?: Cip171Record;
 }
 
 export interface MintParams {

@@ -9,6 +9,7 @@
  * Uses Evolution SDK directly — no adapter abstraction.
  */
 
+import { CIP171_METADATA_LABEL, buildCip171Metadatum } from "../../core/cip171.js";
 import {
   Address as EvoAddress,
   Assets as EvoAssets,
@@ -302,6 +303,15 @@ export function dummySubstandard(config: {
       const OUT_COVERING = 2;
 
       let tx = client.newTx();
+      // CIP-171 provenance, carried by the transaction that parameterises the
+      // scripts it describes. Optional: absent, this behaves exactly as before.
+      if (params.cip171Record) {
+        tx = tx.attachMetadata({
+          label: CIP171_METADATA_LABEL,
+          metadata: buildCip171Metadatum(params.cip171Record),
+        });
+      }
+
       tx = tx.collectFrom({ inputs: [covering], redeemer: voidData() });
 
       // The minting-logic withdraw-0: dummy's `issue` validator, redeemer 100.
