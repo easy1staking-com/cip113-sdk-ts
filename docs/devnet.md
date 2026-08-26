@@ -180,3 +180,28 @@ bash ~/.yaci-cli/local-clusters/default/kupo.sh &
 
 The failures are not a regression in whatever you changed last, and the timing invites believing
 they are — they arrive immediately after an edit, at the tests furthest from it.
+
+## ⚠ Kupo must be RESTARTED after a devnet reset — an open port is not a healthy index
+
+A reset rewinds the chain. Kupo keeps serving the index it already has, and **its port stays open
+the whole time**, so an "is it up?" check passes while it describes a chain that no longer exists.
+Everything built against that view is rejected with code 3117.
+
+MEASURED: a reset followed by a port check (open → skipped the restart) produced seven failures
+across unrelated tests, including ones whose code had not been touched. The port answering is
+exactly the kind of clean, plausible reading an instrument gives when it cannot see the thing you
+are asking it about.
+
+**Restart it unconditionally after a reset** — and note the second trap below.
+
+```bash
+curl -X POST http://localhost:10000/local-cluster/api/admin/devnet/reset
+setsid nohup bash ~/.yaci-cli/local-clusters/default/kupo.sh >/tmp/kupo.log 2>&1 </dev/null &
+```
+
+### ⛔ `pkill -f kupo` kills the shell that runs it
+
+The same trap this document already records for `pkill -f yaci`: the pattern matches the killing
+command's own command line. MEASURED — a `pkill -f kupo && restart` chain terminated itself with
+exit 144, leaving Kupo down and the rest of the command unexecuted. Start Kupo with `setsid` and
+detached stdin so it survives, and prefer killing by PID.

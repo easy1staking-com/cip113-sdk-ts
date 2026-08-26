@@ -1206,8 +1206,22 @@ export function freezeAndSeizeSubstandard(config: {
       });
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
+      if (process.env.DUMP_TX_STRUCTURE) {
+        // eslint-disable-next-line no-console
+        console.error(
+          "=== SEIZE attached scripts ===\n" +
+            `  programmableLogicBase=${ctx.standardScripts.programmableLogicBase.hash}\n` +
+            `  thirdParty           =${ctx.standardScripts.thirdParty.hash}\n` +
+            `  issuerAdmin          =${scripts.issuerAdmin.hash}\n` +
+            "=== END SEIZE SCRIPTS ==="
+        );
+      }
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
+      // ⚠ `third_party` is NOT attached here. Its withdrawal already carries the
+      // script witness, and attaching it again makes the duplicate extraneous —
+      // the ledger rejects the whole transaction with code 3104. MEASURED: the
+      // hash it names is third_party's, while the withdrawal for that same
+      // credential is present and correct.
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
