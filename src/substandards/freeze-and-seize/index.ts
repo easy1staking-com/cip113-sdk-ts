@@ -1111,7 +1111,38 @@ export function freezeAndSeizeSubstandard(config: {
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
 
       // 3. Sort reference inputs
-      const allRefInputRefs = [utxoToTxInput(protocolParamsUtxo), utxoToTxInput(registryUtxo)];
+      // `third_party`'s script is supplied EXPLICITLY, as a reference input.
+      //
+      // ⚠ It used to arrive BY ACCIDENT: the bootstrap publishes reference
+      // scripts to the fee payer's own address, so `getUtxos(wallet)` returns
+      // them and `slice(0, 2)` sometimes SPENT one. A spent input's reference
+      // script counts as supplied (CIP-33), so the transaction validated —
+      // and CONSUMED the deployment's reference-script UTxO in the process.
+      // When the draw went the other way the script was absent entirely and
+      // the ledger rejected with 3011 (missing script witness). One root
+      // cause, two opposite symptoms; the earlier 3104 was its third face,
+      // an explicit attach duplicating what the spent input already supplied.
+      const thirdPartyRefUtxos = await client.getUtxosByOutRef([
+        new EvoTransactionInput.TransactionInput({
+          transactionId: EvoTransactionHash.fromHex(ctx.deployment.thirdPartyRefInput.txHash),
+          index: BigInt(ctx.deployment.thirdPartyRefInput.outputIndex),
+        }),
+      ]);
+      if (thirdPartyRefUtxos.length === 0) {
+        throw new Error(
+          `third_party reference script not found on-chain at ` +
+            `${ctx.deployment.thirdPartyRefInput.txHash}#${ctx.deployment.thirdPartyRefInput.outputIndex}. ` +
+            `Deployment reference scripts are load-bearing: if an earlier transaction SPENT this ` +
+            `output, the deployment is broken and must be re-published.`
+        );
+      }
+      const thirdPartyRefUtxo = thirdPartyRefUtxos[0]!;
+
+      const allRefInputRefs = [
+        utxoToTxInput(protocolParamsUtxo),
+        utxoToTxInput(registryUtxo),
+        utxoToTxInput(thirdPartyRefUtxo),
+      ];
       const sortedRefInputs = sortTxInputs(allRefInputRefs);
       const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
 
@@ -1167,10 +1198,27 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 7. Get wallet UTxOs
       const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
+      // NEVER spend a deployment reference-script UTxO. Two independent reasons:
+      // spending one destroys protocol infrastructure (the script_ref is not
+      // carried into the change output), and Conway requires a transaction's
+      // inputs and reference inputs to be DISJOINT — so with `third_party` now
+      // read explicitly above, selecting it here would be rejected outright.
+      const deploymentRefOutRefs = new Set(
+        [
+          ctx.deployment.programmableBaseRefInput,
+          ctx.deployment.transferRefInput,
+          ctx.deployment.thirdPartyRefInput,
+          ctx.deployment.unfrackingRefInput,
+        ].map((r) => `${r.txHash}#${r.outputIndex}`)
+      );
+      const spendableUtxos = walletUtxos.filter((u) => {
+        const i = utxoToTxInput(u);
+        return !deploymentRefOutRefs.has(`${i.txHash}#${i.outputIndex}`);
+      });
 
       // 8. Build transaction
       let tx = client.newTx();
-      tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
+      tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.collectFrom({ inputs: [utxoToSeize], redeemer: plbSpendRedeemer });
 
       tx = tx.withdraw({
@@ -1205,7 +1253,7 @@ export function freezeAndSeizeSubstandard(config: {
         datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToSeize) ?? tokenDatum }),
       });
 
-      tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
+      tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo, thirdPartyRefUtxo] });
       if (process.env.DUMP_TX_STRUCTURE) {
         // eslint-disable-next-line no-console
         console.error(
@@ -1225,7 +1273,7 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, spendableUtxos);
       return { cbor, txHash, _signBuilder };
     },
   };
