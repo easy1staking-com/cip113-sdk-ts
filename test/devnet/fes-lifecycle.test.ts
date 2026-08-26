@@ -24,6 +24,24 @@ import { registerSubstandardCredentials } from "../harness/substandard-setup.js"
 import { recipientAddress } from "../harness/recipient.js";
 import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
 
+
+/**
+ * Submit, and make the failure say WHICH step failed.
+ *
+ * A lifecycle test submits many transactions; a raw ledger error names a code
+ * and a UTxO and nothing about which operation produced it. Attributing by
+ * reading the test top-to-bottom is guesswork, and guessing which step failed is
+ * how the wrong cause gets confirmed.
+ */
+async function submitStep(label: string, tx: { _signBuilder: any }): Promise<void> {
+  try {
+    await tx._signBuilder.signAndSubmit();
+  } catch (err) {
+    const msg = String((err as Error)?.message ?? err);
+    throw new Error(`[step: ${label}] ${msg}`);
+  }
+}
+
 before(async () => {
   await requireDevnet();
 });
@@ -106,7 +124,7 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     adminAddress: address,
     assetName,
   });
-  await init._signBuilder.signAndSubmit();
+  await submitStep("initCompliance", init);
   await settleWallet(client, await client.address());
 
   // Now the remaining withdraw-0 credential.
@@ -123,7 +141,7 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     quantity: 1_000n,
   });
   const policy = reg.tokenPolicyId!;
-  await reg._signBuilder.signAndSubmit();
+  await submitStep("register", reg);
 
   const plb = deployment.programmableLogicBase.scriptHash;
   const issuerPlb = baseAddress(networkId, plb, address);
@@ -145,7 +163,7 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     quantity: 300n,
     substandardId: "freeze-and-seize",
   });
-  await xfer._signBuilder.signAndSubmit();
+  await submitStep("transfer-to-holder", xfer);
   // Settle before building the seize: the transfer just consumed wallet UTxOs
   // and the provider has not caught up. Without this the seize is built against
   // a stale view and rejected with 3117.
@@ -213,7 +231,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     adminAddress: address,
     assetName,
   });
-  await init._signBuilder.signAndSubmit();
+  await submitStep("initCompliance", init);
   await settleWallet(client, await client.address());
   await registerSubstandardCredentials(fes.withdrawScripts.slice(1));
 
@@ -223,7 +241,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     quantity: 1_000n,
   });
   const policy = reg.tokenPolicyId!;
-  await reg._signBuilder.signAndSubmit();
+  await submitStep("register", reg);
   await settleWallet(client, await client.address());
 
   const issuerPlb = baseAddress(networkId, plb, address);
@@ -243,7 +261,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     quantity: 300n,
     substandardId: "freeze-and-seize",
   });
-  await xfer._signBuilder.signAndSubmit();
+  await submitStep("transfer-to-holder", xfer);
   await settleWallet(client, await client.address());
   await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 300n, {
     what: "the transfer to reach the holder before seizing",
@@ -266,7 +284,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     assetName,
     targetAddress: address,
   });
-  await freeze._signBuilder.signAndSubmit();
+  await submitStep("freeze", freeze);
   await settleWallet(client, await client.address());
 
   let refusal: unknown;
@@ -310,7 +328,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     assetName,
     targetAddress: address,
   });
-  await unfreeze._signBuilder.signAndSubmit();
+  await submitStep("unfreeze", unfreeze);
   await settleWallet(client, await client.address());
 
   const afterUnfreeze = await protocol.transfer({
@@ -321,7 +339,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     quantity: 100n,
     substandardId: "freeze-and-seize",
   });
-  await afterUnfreeze._signBuilder.signAndSubmit();
+  await submitStep("transfer-after-unfreeze", afterUnfreeze);
   await settleWallet(client, await client.address());
   await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 400n, {
     what: "the transfer to succeed once the address is unfrozen",
@@ -372,7 +390,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     destinationAddress: address,
     holderAddress: holder,
   });
-  await seized._signBuilder.signAndSubmit();
+  await submitStep("seize", seized);
 
   // THE DELTA, both sides — and the holder never signed.
   await waitFor(
