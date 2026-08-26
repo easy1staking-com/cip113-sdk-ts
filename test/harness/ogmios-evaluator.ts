@@ -28,6 +28,41 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
       Effect.tryPromise({
         try: async () => {
           const cbor = Transaction.toCBORHex(tx);
+
+          // DUMP_TX_STRUCTURE=1 prints the transaction as the VALIDATOR will see
+          // it: reference inputs and withdrawals in LEDGER ORDER, which is what
+          // every redeemer index points into.
+          //
+          // This exists because a structural `expect` in a validator fails with
+          // an EMPTY TRACE LIST — there is no message naming the index, so the
+          // only way to check a computed index is to compare it against the
+          // artefact. Reading the code that computes it has been wrong
+          // repeatedly; the transaction is the diagnostic.
+          if (process.env.DUMP_TX_STRUCTURE) {
+            try {
+              const body: any = (tx as any).body ?? tx;
+              const refs = body.referenceInputs ?? body.reference_inputs;
+              console.error("=== TX STRUCTURE (ledger order) ===");
+              console.error("reference_inputs:");
+              for (const [i, r] of [...(refs ?? [])].entries()) {
+                const id = r?.transactionId?.hash ?? r?.transactionId;
+                const hex =
+                  id instanceof Uint8Array
+                    ? Array.from(id, (b: number) => b.toString(16).padStart(2, "0")).join("")
+                    : String(id);
+                console.error(`  [${i}] ${hex}#${r?.index}`);
+              }
+              const wdrls = body.withdrawals ?? body.withdrawal;
+              console.error("withdrawals:", JSON.stringify(wdrls, (_k, v) =>
+                typeof v === "bigint" ? v.toString() : v instanceof Uint8Array
+                  ? Array.from(v, (b: number) => b.toString(16).padStart(2, "0")).join("")
+                  : v
+              )?.slice(0, 600));
+              console.error("=== END STRUCTURE ===");
+            } catch (e: any) {
+              console.error("structure dump failed:", e?.message);
+            }
+          }
           if (process.env.DUMP_TX_CBOR) {
             console.error(`\n=== OGMIOS EVAL CBOR (${cbor.length} chars) ===`);
             console.error(cbor);

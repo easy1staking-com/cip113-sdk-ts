@@ -772,6 +772,23 @@ export function freezeAndSeizeSubstandard(config: {
       const fesLogicKey: WithdrawalKey = { hash: scripts.transfer.hash, isScript: true };
       const transferWdrlIdx = withdrawalIndexOf([coreTransferKey, fesLogicKey], coreTransferKey);
 
+      if (process.env.DUMP_TX_STRUCTURE) {
+        // Computed indices, printed beside the artefact's own order so the two
+        // can be COMPARED rather than reasoned about. A structural expect in
+        // programmable_logic_base fails with an empty trace list, so this is the
+        // only way to see which index is wrong.
+        // eslint-disable-next-line no-console
+        console.error(
+          "=== FES transfer COMPUTED ===\n" +
+            `  refs (sorted): ${sortedRefInputs.map((r) => `${r.txHash.slice(0, 8)}#${r.outputIndex}`).join(" ")}\n` +
+            `  paramsIdx=${paramsIdx} -> ${sortedRefInputs[paramsIdx]?.txHash?.slice(0, 8)}#${sortedRefInputs[paramsIdx]?.outputIndex}\n` +
+            `  registryIdx=${registryIdx}\n` +
+            `  coreTransfer=${ctx.standardScripts.transfer.hash}\n` +
+            `  fesLogic    =${scripts.transfer.hash}\n` +
+            `  transferWdrlIdx=${transferWdrlIdx}\n` +
+            "=== END COMPUTED ==="
+        );
+      }
       const fesTransferRedeemer = Data.list(
         proofIndices.map((idx) => Data.constr(0n, [Data.int(BigInt(idx))]))
       );
@@ -791,9 +808,13 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.collectFrom({ inputs: selected, redeemer: spendRdmr });
 
+      // The TRANSFER delegate — not third_party. programmable_logic_base
+      // resolves the withdrawal at `wdrl_idx` and requires it to equal the
+      // credential the params datum names for THIS dispatch arm, so withdrawing
+      // the wrong delegate fails the spend with an empty trace list.
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(
-          new Uint8Array(Buffer.from(ctx.standardScripts.thirdParty.hash, "hex"))
+          new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))
         ),
         amount: 0n,
         redeemer: plgRedeemer,
