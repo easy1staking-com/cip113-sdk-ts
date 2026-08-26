@@ -187,3 +187,36 @@ export async function waitFor(fn, { timeoutMs = 60_000, intervalMs = 1_000, what
   }
   throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}. Last: ${JSON.stringify(last)}`);
 }
+
+/**
+ * Wait until the provider's view of a wallet stops changing.
+ *
+ * Kupo and yaci-store trail the node, so immediately after a confirmed
+ * transaction `getUtxos` still reports inputs the node knows are spent — and the
+ * NEXT transaction built from that view is rejected with code 3117, "unknown
+ * UTxO references as inputs". That error names a UTxO and reads as a malformed
+ * transaction; the builder faithfully used what it was told.
+ *
+ * Two consecutive IDENTICAL reads is the cheap proxy for "settled": a single
+ * read cannot distinguish a settled view from a stale one.
+ *
+ * ⚠ Call this after EVERY submit that a later transaction depends on. The
+ * bootstrap does it internally at entry and exit; anything chaining operations
+ * in a test has to do it between them.
+ */
+export async function settleWallet(client, addressObj, { attempts = 20, intervalMs = 1000 } = {}) {
+  const fingerprint = async () => {
+    const utxos = await client.getUtxos(addressObj);
+    return utxos
+      .map((u) => `${u.transactionId?.hash ? "" : ""}${JSON.stringify(u.transactionId)}#${u.index}`)
+      .sort()
+      .join(",");
+  };
+  let previous = await fingerprint();
+  for (let i = 0; i < attempts; i++) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    const current = await fingerprint();
+    if (current === previous) return;
+    previous = current;
+  }
+}

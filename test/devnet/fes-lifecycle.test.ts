@@ -17,10 +17,11 @@ import assert from "node:assert/strict";
 import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
 import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
 import { CIP113, stringToHex, baseAddress } from "../../dist/index.js";
-import { requireDevnet, makeClient, waitFor } from "../harness/yaci.mjs";
+import { requireDevnet, makeClient, waitFor, settleWallet } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { makeFesFixture } from "../harness/fes-setup.js";
 import { registerSubstandardCredentials } from "../harness/substandard-setup.js";
+import { recipientAddress } from "../harness/recipient.js";
 import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
 
 before(async () => {
@@ -106,6 +107,7 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     assetName,
   });
   await init._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
 
   // Now the remaining withdraw-0 credential.
   //
@@ -124,39 +126,67 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
   await reg._signBuilder.signAndSubmit();
 
   const plb = deployment.programmableLogicBase.scriptHash;
-  await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), policy, assetName)) === 1_000n, {
+  const issuerPlb = baseAddress(networkId, plb, address);
+  await waitFor(async () => (await heldAt(issuerPlb, policy, assetName)) === 1_000n, {
     what: "the FES supply to appear at the issuer's programmable address",
     timeoutMs: 120_000,
   });
-});
 
-test("NOT MIGRATED: seize and burn refuse, naming the deleted redeemer", async () => {
-  // Asserts the BLOCKER. This file fails the moment S-5 lands, which is the
-  // signal to delete this test rather than a nuisance.
-  const deployment = await bootstrapProtocol();
-  const client: any = await makeClient();
-  const address = EvoAddress.toBech32(await client.address());
-  const assetName = stringToHex("FES" + deployment.txHash.slice(0, 6));
-  const fes = await makeFesFixture(client, address, assetName, deployment.programmableLogicBase.scriptHash);
+  // --- transfer to a holder ------------------------------------------------
+  const holder = recipientAddress(networkId, address);
+  const holderPlb = baseAddress(networkId, plb, holder);
+  assert.notEqual(issuerPlb, holderPlb);
 
-  const protocol = CIP113.init({
-    client,
-    standard: { blueprint: loadStandardBlueprint(), deployment },
-    substandards: [
-      freezeAndSeizeSubstandard({ blueprint: fes.blueprint as never, deployment: fes.deployment as never }),
-    ],
+  const xfer = await protocol.transfer({
+    senderAddress: address,
+    recipientAddress: holder,
+    tokenPolicyId: policy,
+    assetName,
+    quantity: 300n,
+    substandardId: "freeze-and-seize",
+  });
+  await xfer._signBuilder.signAndSubmit();
+  // Settle before building the seize: the transfer just consumed wallet UTxOs
+  // and the provider has not caught up. Without this the seize is built against
+  // a stale view and rejected with 3117.
+  await settleWallet(client, await client.address());
+  await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 300n, {
+    what: "the transfer to reach the holder",
+    timeoutMs: 120_000,
   });
 
-  await assert.rejects(
-    () =>
-      protocol.burn({
-        feePayerAddress: address,
-        tokenPolicyId: "ab".repeat(28),
-        assetName,
-        quantity: 1n,
-        substandardId: "freeze-and-seize",
-      } as never),
-    /not yet migrated to CIP-113 0\.5\.0-alpha\.2/,
-    "burn must refuse by naming the migration, not fail obscurely on chain"
+  // --- SEIZE: take it back without the holder's signature -------------------
+  //
+  // The whole reason this substandard exists. Authorised by the registry node's
+  // `third_party_transfer_logic_script` — which for FES is a REAL issuer-admin
+  // check, unlike dummy's unconditional one.
+  const holderUtxos = await client.getUtxos(EvoAddress.fromBech32(holderPlb));
+  const target = holderUtxos.find((u: any) => {
+    for (const p of EvoAssets.policies(u.assets)) if (String(p) === policy) return true;
+    return false;
+  });
+  assert.ok(target, "expected a holder UTxO carrying the token");
+
+  const { TransactionHash } = await import("@evolution-sdk/evolution");
+  const seized = await protocol.compliance.seize({
+    feePayerAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    utxoTxHash: TransactionHash.toHex(target.transactionId),
+    utxoOutputIndex: Number(target.index),
+    destinationAddress: address,
+    holderAddress: holder,
+  });
+  await seized._signBuilder.signAndSubmit();
+
+  // THE DELTA, both sides — and the holder never signed.
+  await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 0n, {
+    what: "the seized tokens to leave the holder",
+    timeoutMs: 120_000,
+  });
+  assert.equal(
+    await heldAt(issuerPlb, policy, assetName),
+    1_000n,
+    "the issuer must hold the full supply again after seizing it back"
   );
 });

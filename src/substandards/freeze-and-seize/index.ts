@@ -55,7 +55,6 @@ import {
   mintingProofOutputIndex,
   mintingProofRefInput,
   registryInsertRedeemer,
-  thirdPartyActRedeemer,
   blacklistInitRedeemer,
   blacklistAddRedeemer,
   blacklistRemoveRedeemer,
@@ -80,6 +79,7 @@ import {
 import {
   baseSpendRedeemer,
   transferRedeemer,
+  thirdPartyRedeemer,
   withdrawalIndexOf,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
@@ -270,16 +270,17 @@ export function freezeAndSeizeSubstandard(config: {
       // `transfer`, `initCompliance`, `freeze` and `unfreeze` are migrated to
       // CIP-113 0.5.0-alpha.2 and this plugin initialises.
       //
-      // ⚠ `seize` and `burn` are NOT. Both take the THIRD-PARTY route, and
-      // upstream #110 deleted the `ThirdPartyAct` redeemer they are written
-      // against: they now need the standalone `third_party` validator's
-      // withdraw-0 carrying a ThirdPartyRedeemer, plus
-      // BaseSpendRedeemer(SpendViaThirdParty) on every programmable input.
-      // They refuse individually rather than blocking the whole substandard —
-      // an operation that cannot work should fail, but it should not take five
-      // that do work with it.
+      // `seize` and `burn` are migrated too (W-E S-5): both take the
+      // THIRD-PARTY route, which #110 moved off the deleted `ThirdPartyAct` and
+      // onto the standalone `third_party` validator's withdraw-0 with a
+      // ThirdPartyRedeemer, plus BaseSpendRedeemer(SpendViaThirdParty) on every
+      // programmable input.
       //
-      // Tracked as W-E S-5.
+      // ⚠ The seize/burn paths still need re-validating against upstream #79
+      // (UTxO contamination), #80 (issuance delegation scope) and #115 (datum
+      // hashes and reference scripts banned on programmable outputs). Those are
+      // SEMANTIC changes with no signature to catch them, so a green devnet run
+      // is necessary and not sufficient.
       ctx = context;
       sharedEvaluator = ctx.evaluator;
       networkId = ctx.client.chain.id;
@@ -557,23 +558,6 @@ export function freezeAndSeizeSubstandard(config: {
     // BURN
     // ====================================================================
     async burn(params: BurnParams): Promise<UnsignedTx> {
-      // ⚠ NOT MIGRATED — see the migration note in init(). This path is written
-      // against `ThirdPartyAct`, which upstream #110 DELETED.
-      //
-      // The `: boolean` annotation is load-bearing: without it TypeScript infers
-      // the literal `false`, folds the branch, marks the body below unreachable
-      // and stops narrowing — at which point the pre-existing UTxO guards start
-      // reporting `UTxO | undefined`. Keeping the body type-checked keeps S-5 a
-      // readable diff instead of a rewrite from memory.
-      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
-      if (!MIGRATED_TO_0_5_ALPHA_2)
-        throw new Error(
-        "freeze-and-seize.burn is not yet migrated to CIP-113 0.5.0-alpha.2. It takes the " +
-          "third-party route, and #110 replaced that redeemer: it now requires the `third_party` " +
-          "validator's withdraw-0 with a ThirdPartyRedeemer plus " +
-          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input. " +
-          "Tracked as PLAN.md W-E S-5. register/mint/transfer/freeze/unfreeze DO work."
-      );
 
       const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx } = params;
       const holder = params.holderAddress || feePayerAddress;
@@ -610,7 +594,41 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 4. Build redeemers
       const issuanceRedeemer = mintingProofRefInput(registryIdx);
-      const plgRedeemer = thirdPartyActRedeemer(registryIdx, 0);
+      const paramsIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(protocolParamsUtxo));
+
+      // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
+      // administrative path is now the standalone `third_party` validator, and
+      // programmable_logic_base dispatches to it via SpendViaThirdParty — so
+      // this transaction never loads the `transfer` reference script at all.
+      //
+      // The withdrawal set is BOTH scripts: the framework delegate, and the
+      // issuer authority the registry node names in
+      // `third_party_transfer_logic_script`. `third_party` requires the latter
+      // by name — it is the only thing standing between a holder's tokens and
+      // anyone who wants them, and for FES it is a real issuer-admin check
+      // rather than dummy's unconditional one.
+      const thirdPartyKey: WithdrawalKey = {
+        hash: ctx.standardScripts.thirdParty.hash,
+        isScript: true,
+      };
+      const issuerAuthorityKey: WithdrawalKey = { hash: scripts.issuerAdmin.hash, isScript: true };
+      const thirdPartyWdrlIdx = withdrawalIndexOf(
+        [thirdPartyKey, issuerAuthorityKey],
+        thirdPartyKey
+      );
+
+      // outputs_start_idx = 0: `third_party` PAIRS each programmable input with
+      // the NEXT output (same address, datum and reference script, lovelace
+      // ratcheting up) and reads the seized amount as the DELTA. Destination
+      // outputs must therefore sit AMONG THE LEADING ones it skips.
+      // See docs/api-reference.md — getting this backwards fails with an EMPTY
+      // TRACE LIST, because it is a structural expect and not a traced check.
+      const plgRedeemer = thirdPartyRedeemer(paramsIdx, registryIdx, 0);
+      const plbSpendRedeemer = baseSpendRedeemer(
+        "THIRD_PARTY",
+        paramsIdx,
+        thirdPartyWdrlIdx
+      );
       const tokenDatum = voidData();
 
       // 5. Compute remaining assets (remove burned token's policy)
@@ -632,26 +650,33 @@ export function freezeAndSeizeSubstandard(config: {
       // 8. Build transaction
       let tx = client.newTx();
       tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
-      tx = tx.collectFrom({ inputs: [utxoToBurn], redeemer: voidData() });
+      tx = tx.collectFrom({ inputs: [utxoToBurn], redeemer: plbSpendRedeemer });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
         amount: 0n,
         redeemer: voidData(),
       });
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.thirdParty.hash, "hex"))
+        ),
         amount: 0n,
         redeemer: plgRedeemer,
       });
       tx = tx.payToAddress({
         address: utxoToBurn.address,
         assets: outputAssets(utxoLovelace(utxoToBurn), remainingTokens.size > 0 ? remainingTokens : undefined),
-        datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
+        // The PAIRED continuation: `third_party` requires it to preserve the
+        // input's ADDRESS, DATUM and REFERENCE SCRIPT exactly. Carry the input's
+        // own datum rather than a fresh void one — they happen to be equal today
+        // because every programmable output here is void-datumed, and that is a
+        // coincidence rather than a guarantee.
+        datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToBurn) ?? tokenDatum }),
       });
       tx = tx.mintAssets({ assets: burnAssets, redeemer: issuanceRedeemer });
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
@@ -767,7 +792,9 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.collectFrom({ inputs: selected, redeemer: spendRdmr });
 
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.thirdParty.hash, "hex"))
+        ),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -1017,23 +1044,6 @@ export function freezeAndSeizeSubstandard(config: {
     // SEIZE
     // ====================================================================
     async seize(params: SeizeParams): Promise<UnsignedTx> {
-      // ⚠ NOT MIGRATED — see the migration note in init(). This path is written
-      // against `ThirdPartyAct`, which upstream #110 DELETED.
-      //
-      // The `: boolean` annotation is load-bearing: without it TypeScript infers
-      // the literal `false`, folds the branch, marks the body below unreachable
-      // and stops narrowing — at which point the pre-existing UTxO guards start
-      // reporting `UTxO | undefined`. Keeping the body type-checked keeps S-5 a
-      // readable diff instead of a rewrite from memory.
-      const MIGRATED_TO_0_5_ALPHA_2: boolean = false;
-      if (!MIGRATED_TO_0_5_ALPHA_2)
-        throw new Error(
-        "freeze-and-seize.seize is not yet migrated to CIP-113 0.5.0-alpha.2. It takes the " +
-          "third-party route, and #110 replaced that redeemer: it now requires the `third_party` " +
-          "validator's withdraw-0 with a ThirdPartyRedeemer plus " +
-          "BaseSpendRedeemer(SpendViaThirdParty) on every programmable_logic_base input. " +
-          "Tracked as PLAN.md W-E S-5. register/mint/transfer/freeze/unfreeze DO work."
-      );
 
       const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress } = params;
       const unit = tokenPolicyId + assetName;
@@ -1085,7 +1095,41 @@ export function freezeAndSeizeSubstandard(config: {
       const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
 
       // 4. Build redeemers
-      const plgRedeemer = thirdPartyActRedeemer(registryIdx, 1);
+      const paramsIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(protocolParamsUtxo));
+
+      // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
+      // administrative path is now the standalone `third_party` validator, and
+      // programmable_logic_base dispatches to it via SpendViaThirdParty — so
+      // this transaction never loads the `transfer` reference script at all.
+      //
+      // The withdrawal set is BOTH scripts: the framework delegate, and the
+      // issuer authority the registry node names in
+      // `third_party_transfer_logic_script`. `third_party` requires the latter
+      // by name — it is the only thing standing between a holder's tokens and
+      // anyone who wants them, and for FES it is a real issuer-admin check
+      // rather than dummy's unconditional one.
+      const thirdPartyKey: WithdrawalKey = {
+        hash: ctx.standardScripts.thirdParty.hash,
+        isScript: true,
+      };
+      const issuerAuthorityKey: WithdrawalKey = { hash: scripts.issuerAdmin.hash, isScript: true };
+      const thirdPartyWdrlIdx = withdrawalIndexOf(
+        [thirdPartyKey, issuerAuthorityKey],
+        thirdPartyKey
+      );
+
+      // outputs_start_idx = 1: `third_party` PAIRS each programmable input with
+      // the NEXT output (same address, datum and reference script, lovelace
+      // ratcheting up) and reads the seized amount as the DELTA. Destination
+      // outputs must therefore sit AMONG THE LEADING ones it skips.
+      // See docs/api-reference.md — getting this backwards fails with an EMPTY
+      // TRACE LIST, because it is a structural expect and not a traced check.
+      const plgRedeemer = thirdPartyRedeemer(paramsIdx, registryIdx, 1);
+      const plbSpendRedeemer = baseSpendRedeemer(
+        "THIRD_PARTY",
+        paramsIdx,
+        thirdPartyWdrlIdx
+      );
       const tokenDatum = voidData();
 
       // 5. Build recipient PLB address
@@ -1106,7 +1150,7 @@ export function freezeAndSeizeSubstandard(config: {
       // 8. Build transaction
       let tx = client.newTx();
       tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
-      tx = tx.collectFrom({ inputs: [utxoToSeize], redeemer: voidData() });
+      tx = tx.collectFrom({ inputs: [utxoToSeize], redeemer: plbSpendRedeemer });
 
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
@@ -1114,7 +1158,9 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: voidData(),
       });
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.thirdParty.hash, "hex"))
+        ),
         amount: 0n,
         redeemer: plgRedeemer,
       });
@@ -1130,12 +1176,17 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.payToAddress({
         address: utxoToSeize.address,
         assets: outputAssets(utxoLovelace(utxoToSeize), remainingTokens.size > 0 ? remainingTokens : undefined),
-        datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
+        // The PAIRED continuation: `third_party` requires it to preserve the
+        // input's ADDRESS, DATUM and REFERENCE SCRIPT exactly. Carry the input's
+        // own datum rather than a fresh void one — they happen to be equal today
+        // because every programmable output here is void-datumed, and that is a
+        // coincidence rather than a guarantee.
+        datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToSeize) ?? tokenDatum }),
       });
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
