@@ -232,6 +232,16 @@ export interface ThirdPartyTransferParams {
 }
 
 export interface FreezeParams {
+  /**
+   * REQUIRED. Which substandard performs this.
+   *
+   * Deliberately not optional-with-fallback: this is an administrative
+   * operation over someone else's tokens, and selecting the authority by trial
+   * is not a convenience worth having. It also keeps a real validator failure
+   * legible — a try-all reports "no substandard can handle this" when the truth
+   * is "it was handled and the chain refused".
+   */
+  substandardId: string;
   feePayerAddress: Address;
   tokenPolicyId: PolicyId;
   /** Raw asset name hex (including CIP-67 label if CIP-68) */
@@ -240,6 +250,16 @@ export interface FreezeParams {
 }
 
 export interface UnfreezeParams {
+  /**
+   * REQUIRED. Which substandard performs this.
+   *
+   * Deliberately not optional-with-fallback: this is an administrative
+   * operation over someone else's tokens, and selecting the authority by trial
+   * is not a convenience worth having. It also keeps a real validator failure
+   * legible — a try-all reports "no substandard can handle this" when the truth
+   * is "it was handled and the chain refused".
+   */
+  substandardId: string;
   feePayerAddress: Address;
   tokenPolicyId: PolicyId;
   /** Raw asset name hex (including CIP-67 label if CIP-68) */
@@ -248,6 +268,16 @@ export interface UnfreezeParams {
 }
 
 export interface SeizeParams {
+  /**
+   * REQUIRED. Which substandard performs this.
+   *
+   * Deliberately not optional-with-fallback: this is an administrative
+   * operation over someone else's tokens, and selecting the authority by trial
+   * is not a convenience worth having. It also keeps a real validator failure
+   * legible — a try-all reports "no substandard can handle this" when the truth
+   * is "it was handled and the chain refused".
+   */
+  substandardId: string;
   feePayerAddress: Address;
   tokenPolicyId: PolicyId;
   /** Raw asset name hex (including CIP-67 label if CIP-68) */

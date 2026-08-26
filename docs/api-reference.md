@@ -33,9 +33,9 @@ const protocol = CIP113.init({
 | Method | Description |
 |--------|-------------|
 | `compliance.init(substandardId, params)` | Initialize compliance infrastructure |
-| `compliance.freeze(params)` | Add address to blacklist |
-| `compliance.unfreeze(params)` | Remove address from blacklist |
-| `compliance.seize(params)` | Seize tokens from frozen address |
+| `compliance.freeze(params)` | Add address to blacklist. **`params.substandardId` is required** — no try-all fallback |
+| `compliance.unfreeze(params)` | Remove address from blacklist. **`params.substandardId` is required** — no try-all fallback |
+| `compliance.seize(params)` | Seize tokens from frozen address. **`params.substandardId` is required** — no try-all fallback |
 
 ### Runtime
 

@@ -269,24 +269,48 @@ export const CIP113 = {
         },
 
         async freeze(params) {
-          return tryAllSubstandards("freeze", params.tokenPolicyId, (p) => {
-            if (!p.freeze) throw new Error(`${p.id} does not support freeze`);
-            return p.freeze(params);
-          });
+          // Explicit routing, NO try-all. Two reasons, and the second is the one
+          // that cost time: an administrative operation must not pick its own
+          // authority by trial; and a fallback CONVERTS A REAL VALIDATOR FAILURE
+          // INTO "no substandard can handle this", which is a different category
+          // of fault and sends the reader somewhere else entirely.
+          const plugin = requireSubstandard(params.substandardId);
+          if (!plugin.freeze) {
+            throw new Error(
+              `Substandard "${params.substandardId}" does not support freeze.`
+            );
+          }
+          return plugin.freeze(params);
         },
 
         async unfreeze(params) {
-          return tryAllSubstandards("unfreeze", params.tokenPolicyId, (p) => {
-            if (!p.unfreeze) throw new Error(`${p.id} does not support unfreeze`);
-            return p.unfreeze(params);
-          });
+          // Explicit routing, NO try-all. Two reasons, and the second is the one
+          // that cost time: an administrative operation must not pick its own
+          // authority by trial; and a fallback CONVERTS A REAL VALIDATOR FAILURE
+          // INTO "no substandard can handle this", which is a different category
+          // of fault and sends the reader somewhere else entirely.
+          const plugin = requireSubstandard(params.substandardId);
+          if (!plugin.unfreeze) {
+            throw new Error(
+              `Substandard "${params.substandardId}" does not support unfreeze.`
+            );
+          }
+          return plugin.unfreeze(params);
         },
 
         async seize(params) {
-          return tryAllSubstandards("seize", params.tokenPolicyId, (p) => {
-            if (!p.seize) throw new Error(`${p.id} does not support seize`);
-            return p.seize(params);
-          });
+          // Explicit routing, NO try-all. Two reasons, and the second is the one
+          // that cost time: an administrative operation must not pick its own
+          // authority by trial; and a fallback CONVERTS A REAL VALIDATOR FAILURE
+          // INTO "no substandard can handle this", which is a different category
+          // of fault and sends the reader somewhere else entirely.
+          const plugin = requireSubstandard(params.substandardId);
+          if (!plugin.seize) {
+            throw new Error(
+              `Substandard "${params.substandardId}" does not support seize.`
+            );
+          }
+          return plugin.seize(params);
         },
       },
 

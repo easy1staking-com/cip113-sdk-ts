@@ -47,6 +47,7 @@ async function main() {
   });
 
   const result = await protocol.compliance.unfreeze({
+  substandardId: "freeze-and-seize",
     feePayerAddress: state.adminAddress!,
     tokenPolicyId: state.tokenPolicyId!,
     assetName: state.assetNameHex!,

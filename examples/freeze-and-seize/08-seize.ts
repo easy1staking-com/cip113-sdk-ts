@@ -82,6 +82,7 @@ async function main() {
   console.log(`Seizing from UTxO: ${txHash}#${outputIndex}`);
 
   const result = await protocol.compliance.seize({
+  substandardId: "freeze-and-seize",
     feePayerAddress: state.adminAddress!,
     tokenPolicyId: state.tokenPolicyId!,
     assetName: state.assetNameHex!,

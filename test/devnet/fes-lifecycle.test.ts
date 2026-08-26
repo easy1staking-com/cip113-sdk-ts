@@ -279,6 +279,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
   // to be SIGNED to reach validation at all — a transfer nobody can sign is
   // refused for the wrong reason and proves nothing about the blacklist.
   const freeze = await protocol.compliance.freeze({
+    substandardId: "freeze-and-seize",
     feePayerAddress: address,
     tokenPolicyId: policy,
     assetName,
@@ -323,6 +324,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
   // Without this the test cannot distinguish "the blacklist blocked it" from
   // "transfers from this address never worked".
   const unfreeze = await protocol.compliance.unfreeze({
+    substandardId: "freeze-and-seize",
     feePayerAddress: address,
     tokenPolicyId: policy,
     assetName,
@@ -382,6 +384,7 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
 
   const { TransactionHash } = await import("@evolution-sdk/evolution");
   const seized = await protocol.compliance.seize({
+    substandardId: "freeze-and-seize",
     feePayerAddress: address,
     tokenPolicyId: policy,
     assetName,
