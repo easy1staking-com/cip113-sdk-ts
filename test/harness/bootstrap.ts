@@ -73,6 +73,10 @@ import {
 
 import { makeClient, topupAddress } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
+import { buildDeploymentRecord } from "./cip171-record.js";
+import { STANDARD_VALIDATORS } from "../../dist/standard/blueprint.js";
+import { buildCip171Metadatum, CIP171_METADATA_LABEL } from "../../dist/index.js";
+import type { ParameterizationEvent } from "../../dist/standard/scripts.js";
 import type { Evaluator } from "@evolution-sdk/evolution/sdk/builders/TransactionBuilder";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -270,7 +274,11 @@ export async function bootstrapProtocol(
   // ---- Step 2: parameterise the standard scripts -------------------------
   const blueprint = loadStandardBlueprint();
   requirePublishHandlers(blueprint);
-  const builders = createStandardScripts(blueprint);
+  // Record every parameterisation as it happens. The CIP-171 record is DERIVED
+  // from this, never transcribed alongside it: the unapplied hash and the
+  // application-order arguments are properties of these calls and nothing else.
+  const paramEvents: ParameterizationEvent[] = [];
+  const builders = createStandardScripts(blueprint, (e) => paramEvents.push(e));
 
   const alwaysFailB = builders.alwaysFail(ALWAYS_FAIL_NONCE_B);
 
@@ -414,8 +422,31 @@ export async function bootstrapProtocol(
       ? undefined
       : createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"));
 
+  // ---- CIP-171 provenance, carried by Tx 1 --------------------------------
+  // Attached to the bootstrap transaction because that is what was asked for
+  // and because one artefact is easier to inspect. It is NOT required to ride
+  // this tx: the registry's ingest filters on `label == 1984` alone and never
+  // sees the transaction's scripts, so association happens later, by script
+  // hash, at lookup time.
+  //
+  // ⚠ A wrong-arity constr-0 record is DISCARDED SILENTLY — no error, no
+  // REJECTED row, no trace. From outside, dropped and never-published are
+  // indistinguishable. Verify with a POSITIVE lookup by tx hash; "no error
+  // appeared" is consistent with total success and total failure alike.
+  // `issuance_mint` is EXCLUDED, and the exclusion is semantic rather than
+  // convenient: it is parameterised PER MINTING-LOGIC HASH — once per
+  // substandard — so the instance built here belongs to the dummy fixture, not
+  // to the core deployment. Its applied hash is deployed by a substandard
+  // registration, so it belongs in that substandard's record. Recording it here
+  // would name a script this deployment does not run.
+  const coreEvents = paramEvents.filter((e) => e.title !== STANDARD_VALIDATORS.ISSUANCE_MINT);
+  const cip171Chunks = buildCip171Metadatum(
+    buildDeploymentRecord(resolve(ROOT, "blueprints/standard/v0.5.0-alpha.2"), coreEvents) as never
+  );
+
   // ---- Tx 1: mints + protocol state --------------------------------------
   let tx = client.newTx();
+  tx = tx.attachMetadata({ label: CIP171_METADATA_LABEL, metadata: cip171Chunks });
   tx = tx.collectFrom({ inputs: [utxo1, utxo2] });
 
   tx = tx.mintAssets({

@@ -417,6 +417,10 @@ export {
   chunkBytes,
   decodeCip171Metadatum,
   decodeCip171PlutusData,
+  // Serialises one PlutusData parameter to the bytestring-wrapped hex the
+  // format requires. Cip171ScriptEntry's own docs direct callers here, so it
+  // was public API in intent already.
+  cip171Param,
 } from "./core/cip171.js";
 export type {
   Cip171Record,

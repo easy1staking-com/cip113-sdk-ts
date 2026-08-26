@@ -46,6 +46,7 @@ import {
   parameterizeScript,
   outputReference,
   scriptCredential,
+  computeScriptHash,
 } from "../core/evo-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -87,11 +88,35 @@ export interface StandardScripts {
  * Create standard script builders from a blueprint.
  * Uses Evolution SDK directly for parameterization and hashing.
  */
+/**
+ * One parameterisation, as it happened. Emitted by {@link createStandardScripts}
+ * when a recorder is supplied.
+ *
+ * Exists so a CIP-171 record can be DERIVED from the same call path that
+ * actually parameterises the scripts, rather than hand-maintained alongside it.
+ * The record is keyed by the UNAPPLIED hash and its values are in APPLICATION
+ * order; both are properties of this call and of nothing else. A second list
+ * transcribed by hand would agree with the deployment right up until it did
+ * not, and the disagreement would surface as a hash that verifies to nothing.
+ */
+export interface ParameterizationEvent {
+  /** Validator title as it appears in the blueprint. */
+  title: string;
+  /** Blake2b-224 of the UNAPPLIED compiled code — the CIP-171 map key. */
+  rawScriptHash: ScriptHash;
+  /** Arguments applied, in application order. */
+  params: Data.Data[];
+}
+
 export function createStandardScripts(
   blueprint: PlutusBlueprint,
+  onParameterize?: (event: ParameterizationEvent) => void,
 ): StandardScripts {
   function parameterize(validatorTitle: string, params: Data.Data[]): PlutusScript {
     const code = getValidatorCode(blueprint, validatorTitle);
+    if (onParameterize) {
+      onParameterize({ title: validatorTitle, rawScriptHash: computeScriptHash(code), params });
+    }
     return parameterizeScript(code, params);
   }
 
