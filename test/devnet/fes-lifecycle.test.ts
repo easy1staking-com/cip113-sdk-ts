@@ -250,6 +250,84 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     timeoutMs: 120_000,
   });
 
+  // --- FREEZE → BLOCKED TRANSFER REFUSED → UNFREEZE -------------------------
+  //
+  // ⚑ THE REFUSAL IS THE POINT OF THIS SUBSTANDARD. A lifecycle that proves only
+  // the successes proves the wrong half: a freeze that does not actually block a
+  // transfer is precisely the failure freeze-and-seize exists to prevent, and it
+  // would pass every "freeze succeeded" assertion.
+  //
+  // The issuer is frozen rather than the holder because the blocked transfer has
+  // to be SIGNED to reach validation at all — a transfer nobody can sign is
+  // refused for the wrong reason and proves nothing about the blacklist.
+  const freeze = await protocol.compliance.freeze({
+    feePayerAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    targetAddress: address,
+  });
+  await freeze._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+
+  let refusal: unknown;
+  await assert.rejects(
+    async () => {
+      const blocked = await protocol.transfer({
+        senderAddress: address,
+        recipientAddress: holder,
+        tokenPolicyId: policy,
+        assetName,
+        quantity: 100n,
+        substandardId: "freeze-and-seize",
+      });
+      await blocked._signBuilder.signAndSubmit();
+    },
+    (err: unknown) => {
+      refusal = err;
+      return true;
+    },
+    "a transfer from a FROZEN address must be refused — a freeze that does not " +
+      "block is the failure this substandard exists to prevent"
+  );
+
+  // ⚠ AND FOR THE RIGHT REASON. "It threw" is not the assertion: a missing UTxO,
+  // a stale view or a builder bug would also throw, and would leave the
+  // blacklist entirely unexercised while the test went green.
+  const refusalText = String((refusal as Error)?.message ?? refusal);
+  assert.match(
+    refusalText,
+    /Script evaluation failed|terminated with error|blacklist/i,
+    `the refusal must come from validation, not from plumbing — got: ${refusalText.slice(0, 220)}`
+  );
+
+  // --- UNFREEZE, and prove the block LIFTS ---------------------------------
+  //
+  // Without this the test cannot distinguish "the blacklist blocked it" from
+  // "transfers from this address never worked".
+  const unfreeze = await protocol.compliance.unfreeze({
+    feePayerAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    targetAddress: address,
+  });
+  await unfreeze._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+
+  const afterUnfreeze = await protocol.transfer({
+    senderAddress: address,
+    recipientAddress: holder,
+    tokenPolicyId: policy,
+    assetName,
+    quantity: 100n,
+    substandardId: "freeze-and-seize",
+  });
+  await afterUnfreeze._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+  await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 400n, {
+    what: "the transfer to succeed once the address is unfrozen",
+    timeoutMs: 120_000,
+  });
+
   // --- SEIZE: take it back without the holder's signature -------------------
   //
   // The whole reason this substandard exists. Authorised by the registry node's
@@ -261,6 +339,28 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     return false;
   });
   assert.ok(target, "expected a holder UTxO carrying the token");
+
+  // Relative, not absolute: the holder now holds several UTxOs (the original
+  // transfer plus the post-unfreeze one) and seize takes ONE. Asserting
+  // "holder reaches 0" would be asserting the fixture's arithmetic rather than
+  // the seizure.
+  const seizedQty = (() => {
+    for (const p of EvoAssets.policies(target!.assets)) {
+      if (String(p) !== policy) continue;
+      for (const [name, qty] of EvoAssets.tokens(target!.assets, p).entries()) {
+        const raw = (name as any)?.bytes ?? name;
+        const hex =
+          typeof raw === "string"
+            ? raw
+            : Array.from(raw as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+        if (hex === assetName) return qty as bigint;
+      }
+    }
+    return 0n;
+  })();
+  assert.ok(seizedQty > 0n, "the targeted UTxO must actually carry the token");
+  const holderBefore = await heldAt(holderPlb, policy, assetName);
+  const issuerBefore = await heldAt(issuerPlb, policy, assetName);
 
   const { TransactionHash } = await import("@evolution-sdk/evolution");
   const seized = await protocol.compliance.seize({
@@ -275,13 +375,14 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
   await seized._signBuilder.signAndSubmit();
 
   // THE DELTA, both sides — and the holder never signed.
-  await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 0n, {
-    what: "the seized tokens to leave the holder",
-    timeoutMs: 120_000,
-  });
+  await waitFor(
+    async () => (await heldAt(holderPlb, policy, assetName)) === holderBefore - seizedQty,
+    { what: "the seized tokens to leave the holder", timeoutMs: 120_000 }
+  );
   assert.equal(
     await heldAt(issuerPlb, policy, assetName),
-    1_000n,
-    "the issuer must hold the full supply again after seizing it back"
+    issuerBefore + seizedQty,
+    "the issuer must gain exactly what was seized — a credit with no matching debit " +
+      "would pass a one-sided check while describing a mint"
   );
 });
