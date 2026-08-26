@@ -163,6 +163,41 @@ async function buildAndSerialize(
   return { cbor, txHash, chainAvailable, _signBuilder: result };
 }
 
+/**
+ * Wallet UTxOs that are SAFE TO SPEND.
+ *
+ * A deployment's reference scripts live in outputs somewhere on chain, and if
+ * that somewhere is the operator's own wallet — which is exactly what the
+ * devnet harness does — then `getUtxos(wallet)` hands them back alongside
+ * ordinary funds. Spending one DESTROYS protocol infrastructure: the
+ * `script_ref` is not carried into the change output, so the reference input
+ * every later operation depends on simply ceases to exist.
+ *
+ * MEASURED, not theorised: `seize` consumed the deployment's `third_party`
+ * reference-script UTxO this way, which is why it appeared to work at all —
+ * a spent input's reference script counts as supplied (CIP-33) — and why the
+ * next run failed with 3011.
+ */
+function spendableWalletUtxos(
+  walletUtxos: EvoUTxO.UTxO[],
+  deployment: DeploymentParams
+): EvoUTxO.UTxO[] {
+  const reserved = new Set(
+    [
+      deployment.programmableBaseRefInput,
+      deployment.transferRefInput,
+      deployment.thirdPartyRefInput,
+      deployment.unfrackingRefInput,
+    ]
+      .filter(Boolean)
+      .map((r) => `${r.txHash}#${r.outputIndex}`)
+  );
+  return walletUtxos.filter((u) => {
+    const i = utxoToTxInput(u);
+    return !reserved.has(`${i.txHash}#${i.outputIndex}`);
+  });
+}
+
 function selectUtxosForAmount(
   utxos: EvoUTxO.UTxO[],
   unit: string,
@@ -533,7 +568,8 @@ export function freezeAndSeizeSubstandard(config: {
       const tokenAssets = mintAssetsFromMap(new Map([[unit, quantity]]));
 
       let tx = client.newTx();
-      tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
+      const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
+      tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
         amount: 0n,
@@ -550,7 +586,7 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, spendableUtxos);
       return { cbor, txHash, tokenPolicyId, _signBuilder };
     },
 
@@ -649,7 +685,8 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 8. Build transaction
       let tx = client.newTx();
-      tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
+      const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
+      tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.collectFrom({ inputs: [utxoToBurn], redeemer: plbSpendRedeemer });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
@@ -681,7 +718,7 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
 
-      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, spendableUtxos);
       return { cbor, txHash, _signBuilder };
     },
 
@@ -969,7 +1006,8 @@ export function freezeAndSeizeSubstandard(config: {
       const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
 
       let tx = client.newTx();
-      tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
+      const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
+      tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.collectFrom({ inputs: [coveringNode], redeemer: voidData() });
 
       tx = tx.mintAssets({ assets: nftAssets, redeemer: blacklistAddRedeemer(targetStakingHash) });
@@ -996,7 +1034,7 @@ export function freezeAndSeizeSubstandard(config: {
       const managerPkh = paymentCredentialHash(feePayerAddress);
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(managerPkh) });
 
-      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, spendableUtxos);
       return { cbor, txHash, _signBuilder };
     },
 
@@ -1036,7 +1074,8 @@ export function freezeAndSeizeSubstandard(config: {
       const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
 
       let tx = client.newTx();
-      tx = tx.collectFrom({ inputs: walletUtxos.slice(0, 2) });
+      const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
+      tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.collectFrom({ inputs: [nodeToRemove], redeemer: voidData() });
       tx = tx.collectFrom({ inputs: [precedingNode], redeemer: voidData() });
 
@@ -1057,7 +1096,7 @@ export function freezeAndSeizeSubstandard(config: {
       const managerPkh = paymentCredentialHash(feePayerAddress);
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(managerPkh) });
 
-      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, walletUtxos);
+      const { cbor, txHash, _signBuilder } = await buildAndSerialize(tx, feePayerAddress, spendableUtxos);
       return { cbor, txHash, _signBuilder };
     },
 
@@ -1198,23 +1237,8 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 7. Get wallet UTxOs
       const walletUtxos = await client.getUtxos(EvoAddress.fromBech32(feePayerAddress));
-      // NEVER spend a deployment reference-script UTxO. Two independent reasons:
-      // spending one destroys protocol infrastructure (the script_ref is not
-      // carried into the change output), and Conway requires a transaction's
-      // inputs and reference inputs to be DISJOINT — so with `third_party` now
-      // read explicitly above, selecting it here would be rejected outright.
-      const deploymentRefOutRefs = new Set(
-        [
-          ctx.deployment.programmableBaseRefInput,
-          ctx.deployment.transferRefInput,
-          ctx.deployment.thirdPartyRefInput,
-          ctx.deployment.unfrackingRefInput,
-        ].map((r) => `${r.txHash}#${r.outputIndex}`)
-      );
-      const spendableUtxos = walletUtxos.filter((u) => {
-        const i = utxoToTxInput(u);
-        return !deploymentRefOutRefs.has(`${i.txHash}#${i.outputIndex}`);
-      });
+      // NEVER spend a deployment reference-script UTxO — see spendableWalletUtxos.
+      const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
 
       // 8. Build transaction
       let tx = client.newTx();
