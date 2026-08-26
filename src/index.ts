@@ -368,6 +368,7 @@ export {
   parameterizeScript,
   scriptAddress,
   rewardAddress,
+  rewardAddressFromKeyHash,
   baseAddress,
   stakingCredentialHash,
   paymentCredentialHash,

@@ -92,6 +92,20 @@ export function scriptAddress(networkId: number, scriptHash: ScriptHash): string
 /**
  * Build a reward (staking) address from a script hash.
  */
+/**
+ * Build a reward (staking) address from a KEY hash.
+ *
+ * The script-hash variant below covers protocol credentials; this one covers a
+ * wallet's own stake key — the upgrade authority, for instance, whose
+ * registration survives across deployments and therefore has to be CHECKED
+ * rather than assumed.
+ */
+export function rewardAddressFromKeyHash(networkId: number, keyHash: HexString): string {
+  const cred = new KeyHash.KeyHash({ hash: Bytes.fromHex(keyHash) });
+  const addr = new RewardAccount.RewardAccount({ networkId, stakeCredential: cred });
+  return AddressEras.toBech32(addr);
+}
+
 export function rewardAddress(networkId: number, scriptHash: ScriptHash): string {
   const cred = new EvoScriptHash.ScriptHash({ hash: Bytes.fromHex(scriptHash) });
   const addr = new RewardAccount.RewardAccount({ networkId, stakeCredential: cred });

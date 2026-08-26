@@ -75,9 +75,11 @@ import { makeClient, topupAddress } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 import { buildDeploymentRecord } from "./cip171-record.js";
 import { STANDARD_VALIDATORS } from "../../dist/standard/blueprint.js";
+import { rewardAddressFromKeyHash } from "../../dist/index.js";
 import { buildCip171Metadatum, CIP171_METADATA_LABEL } from "../../dist/index.js";
 import type { ParameterizationEvent } from "../../dist/standard/scripts.js";
 import type { Evaluator } from "@evolution-sdk/evolution/sdk/builders/TransactionBuilder";
+import { Transaction as EvoTx } from "@evolution-sdk/evolution";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -182,7 +184,22 @@ function requirePublishHandlers(blueprint: PlutusBlueprint): void {
  * Refuses any non-testnet, injected client or not.
  */
 export async function bootstrapProtocol(
-  opts: { client?: any; evaluator?: Evaluator } = {}
+  opts: {
+    client?: any;
+    evaluator?: Evaluator;
+    /**
+     * Positive check for "is this reward account already registered?".
+     *
+     * The upgrade authority's stake credential belongs to the WALLET, so it
+     * survives across deployments and a second bootstrap legitimately finds it
+     * registered. That was previously tolerated by MATCHING THE ERROR TEXT
+     * ("already known credential" / "3145") — which is Ogmios's vocabulary.
+     * Blockfrost returns an opaque "submitTx failed" for the same condition, so
+     * the tolerance silently did not apply and a redeploy failed outright.
+     * Ask the chain instead of parsing a provider's prose.
+     */
+    isStakeRegistered?: (stakeAddress: string) => Promise<boolean>;
+  } = {}
 ): Promise<DeploymentParams> {
   const client = opts.client ?? (await makeClient());
   const addressObj = await client.address();
@@ -407,8 +424,34 @@ export async function bootstrapProtocol(
   //   3. REGISTER — the three Conway RegCerts. Kept separate because each
   //      executes its script under the PUBLISH purpose, and carrying all three
   //      script bodies alongside the mint witnesses is what breaks the size cap.
-  const submitAndWait = async (built: { signAndSubmit: () => Promise<unknown> }) => {
-    const res = await built.signAndSubmit();
+  // `label` names WHICH transaction failed. Without it a bootstrap failure
+  // reports only "submitTx failed" across five distinct submissions.
+  const submitAndWait = async (built: { signAndSubmit: () => Promise<unknown> }, label = "?") => {
+    if (process.env.TX_SIZE_DIAG) {
+      try {
+        const cbor = EvoTx.toCBORHex(await (built as any).toTransaction());
+        console.error(`  [tx size] ${label}: ${cbor.length / 2} bytes (limit 16384)`);
+      } catch (e) {
+        console.error(`  [tx size] unavailable: ${(e as Error).message}`);
+      }
+    }
+    let res: unknown;
+    try {
+      res = await built.signAndSubmit();
+    } catch (err: any) {
+      // Effect wraps the provider error; the ledger's reason is nested. Walk it.
+      const parts: string[] = [];
+      const walk = (o: any, d = 0) => {
+        if (!o || d > 8) return;
+        if (typeof o === "string") { if (o.length > 3) parts.push(o.slice(0, 800)); return; }
+        if (typeof o !== "object") return;
+        for (const v of Object.values(o)) walk(v, d + 1);
+        if (o.cause) walk(o.cause, d + 1);
+      };
+      walk(err);
+      console.error(`  [submit error] ${label}: ` + "" + [...new Set(parts)].join("\n  | ").slice(0, 2000));
+      throw err;
+    }
     const hash = typeof res === "string" ? res : EvoTransactionHash.toHex(res as never);
     await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
     return hash;
@@ -488,7 +531,7 @@ export async function bootstrapProtocol(
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
 
   const bootstrapTxHash = await submitAndWait(
-    await tx.build({ changeAddress: addressObj, evaluator })
+    await tx.build({ changeAddress: addressObj, evaluator }), "tx1-protocol-state"
   );
 
   // ---- Tx 2: publish reference scripts ------------------------------------
@@ -501,7 +544,7 @@ export async function bootstrapProtocol(
     });
   }
   const refTxHash = await submitAndWait(
-    await refTx.build({ changeAddress: addressObj, evaluator })
+    await refTx.build({ changeAddress: addressObj, evaluator }), "tx2-reference-scripts"
   );
 
   // ---- Tx 3: register the three delegate stake credentials -----------------
@@ -521,7 +564,15 @@ export async function bootstrapProtocol(
   // error — but it is the ONLY error tolerated here. Anything else propagates,
   // because a blanket catch around a registration would hide exactly the
   // publish-purpose failure this fixture exists to surface.
-  try {
+  const upgradeStakeAddr = rewardAddressFromKeyHash(networkId, upgradeStakeKeyHash);
+  const alreadyRegisteredUpfront = opts.isStakeRegistered
+    ? await opts.isStakeRegistered(upgradeStakeAddr)
+    : false;
+  if (alreadyRegisteredUpfront) {
+    console.error(
+      `  [bootstrap] upgrade authority ${upgradeStakeAddr} is already registered — skipping`
+    );
+  } else try {
     // Registration is not enough. CONWAY, OBSERVED: a withdrawal — INCLUDING a
     // zero withdrawal — from a credential not delegated to a DRep is rejected
     // with code 3150, "credentials that do not engage in on-chain governance".
@@ -535,7 +586,7 @@ export async function bootstrapProtocol(
         stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
         drep: new DRep.AlwaysAbstainDRep({}),
       });
-    await submitAndWait(await keyRegTx.build({ changeAddress: addressObj, evaluator }));
+    await submitAndWait(await keyRegTx.build({ changeAddress: addressObj, evaluator }), "tx3-key-register-delegate");
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);
     const alreadyRegistered =
@@ -548,7 +599,7 @@ export async function bootstrapProtocol(
       stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
       drep: new DRep.AlwaysAbstainDRep({}),
     });
-    await submitAndWait(await delegateTx.build({ changeAddress: addressObj, evaluator }));
+    await submitAndWait(await delegateTx.build({ changeAddress: addressObj, evaluator }), "tx4-delegate");
   }
 
   let regTx = client.newTx();
@@ -559,7 +610,7 @@ export async function bootstrapProtocol(
     });
     regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
   }
-  await submitAndWait(await regTx.build({ changeAddress: addressObj, evaluator }));
+  await submitAndWait(await regTx.build({ changeAddress: addressObj, evaluator }), "tx5-script-stake-register");
 
   // The caller will immediately build against this wallet, and the indexer is
   // still catching up with the three transactions above. Settling here rather

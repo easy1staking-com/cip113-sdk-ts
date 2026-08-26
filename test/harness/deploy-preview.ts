@@ -59,7 +59,20 @@ async function main() {
   if (client.chain.id !== 0) throw new Error("refusing: not a testnet");
 
   console.log("\nbootstrapping — 3 transactions, each waited for on chain...\n");
-  const deployment = await bootstrapProtocol({ client });
+  // Ask the chain whether the upgrade authority's stake credential is already
+  // registered, rather than letting the bootstrap infer it from an error
+  // string. The wallet's credential survives across deployments, and
+  // Blockfrost's opaque "submitTx failed" carries none of the words the
+  // devnet-era tolerance matched on.
+  const isStakeRegistered = async (stakeAddress: string) => {
+    const r = await fetch(
+      `https://cardano-preview.blockfrost.io/api/v0/accounts/${stakeAddress}`,
+      { headers: { project_id: env.BLOCKFROST_KEY } }
+    );
+    return r.ok; // 200 registered, 404 not
+  };
+
+  const deployment = await bootstrapProtocol({ client, isStakeRegistered });
 
   const out = new URL("../../deployment-preview.json", import.meta.url).pathname;
   writeFileSync(out, JSON.stringify(deployment, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2));
@@ -68,6 +81,21 @@ async function main() {
 }
 
 main().catch((e) => {
+  // Print the WHOLE error. "Blockfrost submitTx failed" names the caller, not
+  // the cause; the ledger's reason lives in the nested response body.
   console.error("DEPLOYMENT FAILED:", e?.message ?? e);
+  const seen = new Set<unknown>();
+  const dump = (o: any, depth = 0): void => {
+    if (!o || depth > 6 || seen.has(o)) return;
+    seen.add(o);
+    if (typeof o === "object") {
+      for (const [k, v] of Object.entries(o)) {
+        if (typeof v === "string" && v.length < 4000 && /[a-z]/i.test(v)) {
+          console.error(`  ${"  ".repeat(depth)}${k}: ${v.slice(0, 600)}`);
+        } else if (v && typeof v === "object") dump(v, depth + 1);
+      }
+    }
+  };
+  dump(e);
   process.exitCode = 1;
 });
