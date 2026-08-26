@@ -10,3 +10,8 @@ export function dummyBlueprintPath(): string {
 export function fesBlueprintPath(): string {
   return resolve(ROOT, "blueprints/substandards/freeze-and-seize/v0.1.0/plutus.json");
 }
+
+/** The FES blueprint's DIRECTORY — provenance lives beside plutus.json in UPSTREAM_PIN.json. */
+export function fesBlueprintDir(): string {
+  return resolve(ROOT, "blueprints/substandards/freeze-and-seize/v0.1.0");
+}

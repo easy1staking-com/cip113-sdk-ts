@@ -32,8 +32,11 @@ import {
 import { createFESScripts } from "../../dist/substandards/freeze-and-seize/index.js";
 import { paymentCredentialHash, computeScriptHash, type PlutusScript } from "../../dist/index.js";
 import { fesBlueprintPath } from "./paths.js";
+import type { ParameterizationEvent } from "../../dist/standard/scripts.js";
 
 export interface FesFixture {
+  /** Every FES parameterisation, in call order — the CIP-171 record's source. */
+  paramEvents: ParameterizationEvent[];
   /** Ready to hand to `freezeAndSeizeSubstandard({ blueprint, deployment })`. */
   deployment: {
     adminPkh: string;
@@ -65,7 +68,10 @@ export async function makeFesFixture(
   plbHash: string
 ): Promise<FesFixture> {
   const blueprint = JSON.parse(readFileSync(fesBlueprintPath(), "utf-8"));
-  const fes = createFESScripts(blueprint);
+  // Recorded so a CIP-171 record for FES can be DERIVED from the calls that
+  // actually parameterise its validators, exactly as the standard chain does.
+  const paramEvents: ParameterizationEvent[] = [];
+  const fes = createFESScripts(blueprint, (e) => paramEvents.push(e));
   const adminPkh = paymentCredentialHash(adminAddress);
 
   // Pick the bootstrap UTxO EXPLICITLY, and pick a fat one: it has to survive
@@ -96,6 +102,7 @@ export async function makeFesFixture(
   const fesTransfer = fes.buildTransfer(plbHash, blacklistMint.hash);
 
   return {
+    paramEvents,
     blueprint,
     deployment: {
       adminPkh,

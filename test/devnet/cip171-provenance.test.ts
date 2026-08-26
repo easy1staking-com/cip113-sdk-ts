@@ -19,7 +19,14 @@
  *   1. the transaction submitted            — worthless on its own
  *   2. a lookup by tx hash returns 200      — proves INGESTION ONLY; a PENDING
  *                                             row and a REJECTED row both 200
- *   3. the `status` field reports SUCCESS   — the only one that means accepted
+ *   3. `status == "VERIFIED"` AND every covered script is COMPLETE or
+ *      NONE_REQUIRED (never PARTIAL) — the only level that means accepted.
+ *      ⚠ A record can be VERIFIED while a script inside it proves nothing:
+ *      mainnet `a58e18c4…` is VERIFIED with one script PARTIAL, finalHash
+ *      null, 0 of 8 parameters. The per-script half is load-bearing.
+ *      ⚠ The literal is VERIFIED. An earlier draft said "SUCCESS" — a
+ *      plausible gloss that API cannot emit, so the check would have run and
+ *      meant nothing. Nothing in THIS repo could have typechecked it.
  *
  * MEASURED: preview tx 20da8206… passed 1 and 2 while verification was failing
  * with `No parser found for Aiken version: v1.1.23+8949565`.

@@ -10,6 +10,7 @@ import type { HexString, PlutusBlueprint, PlutusScript, ScriptHash, TxInput } fr
 import { getValidatorCode } from "../../standard/blueprint.js";
 import {
   parameterizeScript,
+  computeScriptHash,
   keyCredential,
   scriptCredential,
   outputReference,
@@ -41,11 +42,19 @@ export interface FESScripts {
  * Create FES script builders from a blueprint.
  * Uses Evolution SDK directly for parameterization and hashing.
  */
+import type { ParameterizationEvent } from "../../standard/scripts.js";
+
 export function createFESScripts(
   blueprint: PlutusBlueprint,
+  onParameterize?: (event: ParameterizationEvent) => void,
 ): FESScripts {
   function parameterize(validatorTitle: string, params: Data.Data[]): PlutusScript {
     const code = getValidatorCode(blueprint, validatorTitle);
+    // Same recorder contract as the standard chain: a CIP-171 record is DERIVED
+    // from the calls that actually parameterise, never transcribed beside them.
+    if (onParameterize) {
+      onParameterize({ title: validatorTitle, rawScriptHash: computeScriptHash(code), params });
+    }
     return parameterizeScript(code, params);
   }
 
