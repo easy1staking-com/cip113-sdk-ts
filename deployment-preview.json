@@ -1,0 +1,74 @@
+{
+  "txHash": "3f4920991d4e738c84098ab61fae9b7783af53dc1106d98d04434993193ddfd1",
+  "coordinationNonce": "5c1d0f3ab7e64c2189af03d6e5b7c4128d9e6a0f3b2c5d8e1f4a7b0c3d6e9f21",
+  "coordination": {
+    "scriptHash": "f9b1f1efb72945ec62905d4430bb8438bc729f2833d37fc52cbdf7ba",
+    "utxo": {
+      "txHash": "3f4920991d4e738c84098ab61fae9b7783af53dc1106d98d04434993193ddfd1",
+      "outputIndex": 0
+    }
+  },
+  "protocolParams": {
+    "txInput": {
+      "txHash": "b62b6fe749bd6aa9af73e502defcfbabcce44e80795ce2fd054331824449c168",
+      "outputIndex": 0
+    },
+    "policyId": "233f54ac45435f92ca83f7cdf85fbff9a449525a3b25746e1e901615",
+    "coordinationScriptHash": "f9b1f1efb72945ec62905d4430bb8438bc729f2833d37fc52cbdf7ba"
+  },
+  "programmableLogicBase": {
+    "scriptHash": "d44022f91840e3c38c4d7163a25864d5b99182aac445ae19e7995021"
+  },
+  "transfer": {
+    "scriptHash": "abcdaf1c235e564bf6b82c33b6812217b8a5d4e9fc99eb53f18ca122"
+  },
+  "thirdParty": {
+    "scriptHash": "c1e58f25da2a38084f6e3d93a49f7c23fb7b1eb39aea38b4f05d4514"
+  },
+  "unfracking": {
+    "scriptHash": "05cacd417c4f5c850cb6fb96ab1dd88db1a232c056a804fc1b147b01"
+  },
+  "upgradeMultisig": {
+    "scriptHash": "c7cb1ac472208bc8ff1a006903dcb6773faed8b2efe24712861668f6"
+  },
+  "upgradeAuthority": {
+    "type": "key",
+    "hash": "219ad1301592c6e16b74c49b1b1f8ffdf7e87e22a85c8e63bbed49cf"
+  },
+  "issuance": {
+    "txInput": {
+      "txHash": "b62b6fe749bd6aa9af73e502defcfbabcce44e80795ce2fd054331824449c168",
+      "outputIndex": 1
+    },
+    "policyId": "56425f305e32028f460473d635284f12bd765dc6d906208f65078b37",
+    "alwaysFailScriptHash": "5ff3439ab5b059889fbaf360195275d8471de9ad939e1bb6c3a7b74c"
+  },
+  "directoryMint": {
+    "txInput": {
+      "txHash": "b62b6fe749bd6aa9af73e502defcfbabcce44e80795ce2fd054331824449c168",
+      "outputIndex": 0
+    },
+    "issuanceScriptHash": "56425f305e32028f460473d635284f12bd765dc6d906208f65078b37",
+    "scriptHash": "f45e8e8f381c42702f9e5b84c3169bf53e30436e8c2d29f720002a9f"
+  },
+  "directorySpend": {
+    "policyId": "233f54ac45435f92ca83f7cdf85fbff9a449525a3b25746e1e901615",
+    "scriptHash": "f7850fdfdf73a420ae81852502d99d579c4f5a8be6776773d4df623a"
+  },
+  "programmableBaseRefInput": {
+    "txHash": "15b8ffe0b22a6030df82fa511dde729fe15301a8c7f88664b980a108d6fc8b78",
+    "outputIndex": 0
+  },
+  "transferRefInput": {
+    "txHash": "15b8ffe0b22a6030df82fa511dde729fe15301a8c7f88664b980a108d6fc8b78",
+    "outputIndex": 1
+  },
+  "thirdPartyRefInput": {
+    "txHash": "15b8ffe0b22a6030df82fa511dde729fe15301a8c7f88664b980a108d6fc8b78",
+    "outputIndex": 2
+  },
+  "unfrackingRefInput": {
+    "txHash": "15b8ffe0b22a6030df82fa511dde729fe15301a8c7f88664b980a108d6fc8b78",
+    "outputIndex": 3
+  }
+}

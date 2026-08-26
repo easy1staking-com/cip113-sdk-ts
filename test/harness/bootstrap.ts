@@ -73,6 +73,7 @@ import {
 
 import { makeClient, topupAddress } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
+import type { Evaluator } from "@evolution-sdk/evolution/sdk/builders/TransactionBuilder";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -166,11 +167,20 @@ function requirePublishHandlers(blueprint: PlutusBlueprint): void {
 }
 
 /**
- * Bootstrap a protocol instance on the devnet. Returns DeploymentParams.
- * Devnet only — throws if the client is not pointed at a testnet.
+ * Bootstrap a protocol instance on a TESTNET. Returns DeploymentParams.
+ *
+ * Defaults to the local Yaci devnet. Pass `client`/`evaluator` to run the same
+ * sequence against another testnet — preview, say, via a Blockfrost provider.
+ * Only two things were ever devnet-specific: where the client points, and the
+ * evaluator. The faucet call is already self-skipping (it is guarded on
+ * balance < MIN_WALLET_ADA), and indexer settling is provider-agnostic.
+ *
+ * Refuses any non-testnet, injected client or not.
  */
-export async function bootstrapProtocol(): Promise<DeploymentParams> {
-  const client = await makeClient();
+export async function bootstrapProtocol(
+  opts: { client?: any; evaluator?: Evaluator } = {}
+): Promise<DeploymentParams> {
+  const client = opts.client ?? (await makeClient());
   const addressObj = await client.address();
   const address = EvoAddress.toBech32(addressObj);
   const networkId = client.chain.id;
@@ -395,7 +405,14 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
     await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
     return hash;
   };
-  const evaluator = createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337");
+  // An injected client brings its own evaluation; only the devnet needs the
+  // custom Ogmios evaluator (it exists for the Aiken traces, which Blockfrost
+  // does not return).
+  const evaluator =
+    opts.evaluator ??
+    (opts.client
+      ? undefined
+      : createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"));
 
   // ---- Tx 1: mints + protocol state --------------------------------------
   let tx = client.newTx();
