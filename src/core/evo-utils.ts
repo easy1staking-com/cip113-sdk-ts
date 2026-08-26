@@ -318,6 +318,29 @@ export function decodeRegistryNode(d: Data.Data): RegistryNodeData {
   };
 }
 
+/**
+ * Minimum lovelace for an output carrying a RegistryNode datum plus its NFT.
+ *
+ * ⚑ ONE constant, deliberately, because this defect has now been introduced
+ * THREE TIMES INDEPENDENTLY — in the bootstrap, in `dummy`, and in
+ * `freeze-and-seize` — each time by someone (me) who had already fixed it
+ * elsewhere and did not think to check the next site.
+ *
+ * The cause is always the same: min-UTxO scales with SERIALISED OUTPUT SIZE, so
+ * widening a datum raises the floor of every output that carries it. The
+ * RegistryNode datum went from FIVE fields to SEVEN in 0.5.x, and the inherited
+ * 2,000,000 was sized for the five-field shape. MEASURED requirement for the
+ * seven-field shape: 2,038,630.
+ *
+ * The ledger reports the shortfall as "insufficient Ada" with a number and
+ * NEVER as "your datum grew", so it surfaces as an unrelated funding error,
+ * often in a different ticket from the change that caused it.
+ *
+ * A rule written in a document has to be REMEMBERED. A constant has to be
+ * CHANGED. Deliberately generous: min-UTxO also moves with protocol parameters.
+ */
+export const REGISTRY_NODE_MIN_ADA = 3_000_000n;
+
 // ---------------------------------------------------------------------------
 // The coordination datum — the live protocol wiring
 // ---------------------------------------------------------------------------

@@ -348,6 +348,7 @@ export {
   stakingCredentialHash,
   paymentCredentialHash,
   getInlineDatum,
+  REGISTRY_NODE_MIN_ADA,
   stringToHex,
   MAX_NEXT,
   voidData,

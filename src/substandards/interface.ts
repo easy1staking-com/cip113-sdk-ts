@@ -142,7 +142,18 @@ export interface CIP68MetadataInput {
 
 export interface RegisterParams {
   feePayerAddress: Address;
-  assetName: string;
+  /**
+   * Raw asset name HEX, CIP-67 label included — the convention at every API
+   * boundary in this SDK (see CLAUDE.md).
+   *
+   * ⚠ This was typed `string` while every sibling field was `HexString`, and the
+   * two shipped substandards read it DIFFERENTLY as a result: `dummy` used it
+   * as hex, `freeze-and-seize` ran `stringToHex` over it and double-encoded
+   * anything already hex. Both were internally consistent, which is why neither
+   * looked wrong; the mismatch only appeared when the same value was passed to
+   * both. The type now says what the convention always did.
+   */
+  assetName: HexString;
   quantity: bigint;
   recipientAddress?: Address;
   /** Substandard-specific config (e.g., adminPkh for FES) */

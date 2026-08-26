@@ -69,6 +69,7 @@ import {
   utxoOutputIndex,
   outputAssets,
   mintAssetsFromMap,
+  REGISTRY_NODE_MIN_ADA,
   Credential,
   KeyHash,
   InlineDatum,
@@ -309,7 +310,12 @@ export function freezeAndSeizeSubstandard(config: {
       const { feePayerAddress, assetName, quantity, recipientAddress } = params;
       const recipient = recipientAddress || feePayerAddress;
       const chainedUtxos = (params.chainedUtxos ?? []) as EvoUTxO.UTxO[];
-      const assetNameHex = stringToHex(assetName);
+      // Already hex: `assetName` is raw asset-name HEX at every API boundary in
+      // this SDK. This previously ran stringToHex over it, double-encoding any
+      // caller who followed the convention — and silently producing a DIFFERENT
+      // token, under a policy derived from a different issuer_admin, so nothing
+      // failed; the tokens simply were not where anyone looked for them.
+      const assetNameHex = assetName;
       const hasCIP68 = !!params.cip68Metadata;
       const client = ctx.client;
 
@@ -449,7 +455,7 @@ export function freezeAndSeizeSubstandard(config: {
       // bootstrap funded the origin with.)
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registrySpendAddr),
-        assets: outputAssets(3_000_000n, new Map([[registryNftUnit, 1n]])),
+        assets: outputAssets(REGISTRY_NODE_MIN_ADA, new Map([[registryNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: newRegistryNodeDatum }),
       });
 

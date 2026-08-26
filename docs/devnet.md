@@ -164,3 +164,19 @@ an in-place upgrade proven as a before/after delta; and three upgrade rails prov
 
 It does **not** prove anything about mainnet or preprod parameters, and it is deliberately not run
 in CI — there is no devnet there.
+
+## Kupo does not survive a long suite
+
+Observed three times on 2026-08-25/26: `:1442` goes away mid-run while every other port stays up.
+There is no partial-failure mode — the harness's precondition check fails loudly and every
+remaining test reports `hookFailed`, which is correct behaviour and looks alarming.
+
+**If several consecutive tests fail with `No usable Yaci devnet` and only Kupo is named, restart it
+and re-run before investigating anything else:**
+
+```bash
+bash ~/.yaci-cli/local-clusters/default/kupo.sh &
+```
+
+The failures are not a regression in whatever you changed last, and the timing invites believing
+they are — they arrive immediately after an edit, at the tests furthest from it.

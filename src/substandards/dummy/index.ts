@@ -62,6 +62,7 @@ import {
   mintingProofOutputIndex,
   mintingProofRefInput,
   mintAssetsFromMap,
+  REGISTRY_NODE_MIN_ADA,
   getInlineDatum,
   utxoUnitQty,
   outputAssets,
@@ -333,7 +334,7 @@ export function dummySubstandard(config: {
       // "insufficient Ada" naming a number, never as "your datum grew".
       // Deliberately generous rather than exact: min-UTxO scales with
       // serialised size and with a protocol parameter that can rise.
-      const REGISTRY_NODE_ADA = 3_000_000n;
+      const REGISTRY_NODE_ADA = REGISTRY_NODE_MIN_ADA;
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registrySpendAddr),
         assets: outputAssets(REGISTRY_NODE_ADA, new Map([[registryNftUnit, 1n]])),

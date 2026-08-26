@@ -64,6 +64,7 @@ import {
   voidData,
   stringToHex,
   mintAssetsFromMap,
+  REGISTRY_NODE_MIN_ADA,
   outputAssets,
   type DeploymentParams,
   type PlutusBlueprint,
@@ -423,7 +424,7 @@ export async function bootstrapProtocol(): Promise<DeploymentParams> {
   // this shape — the inherited 2,000,000 was sized for the five-field datum.
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(registrySpendAddr),
-    assets: outputAssets(3_000_000n, new Map([[directoryNftUnit, 1n]])),
+    assets: outputAssets(REGISTRY_NODE_MIN_ADA, new Map([[directoryNftUnit, 1n]])),
     datum: new InlineDatum.InlineDatum({ data: directoryDatum }),
   });
   // The issuance datum carries ~5kB of CBOR; min-UTxO scales with serialized
