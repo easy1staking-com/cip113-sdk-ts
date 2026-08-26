@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
 import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
 import { CIP113, stringToHex, baseAddress } from "../../dist/index.js";
-import { requireDevnet, makeClient, waitFor, settleWallet } from "../harness/yaci.mjs";
+import { requireDevnet, makeClient, waitFor, settleWallet, KUPO_URL } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { makeFesFixture } from "../harness/fes-setup.js";
 import { registerSubstandardCredentials } from "../harness/substandard-setup.js";
@@ -405,5 +405,173 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
     issuerBefore + seizedQty,
     "the issuer must gain exactly what was seized — a credit with no matching debit " +
       "would pass a one-sided check while describing a mint"
+  );
+});
+
+
+/**
+ * `burn`'s FIRST EVER EXECUTION.
+ *
+ * Migrated in S-5 and exercised by nothing until now — it was "clean by
+ * construction", which is a different word from "verified". It is also the
+ * operation that turned out to hold the REFERENCE IMPLEMENTATION for the
+ * seize defect: it withdraws at `third_party` and ATTACHES it, which is
+ * exactly what seize did before 09bd468 removed it. Nobody compared against
+ * `burn` because it sat outside the feature area.
+ *
+ * ⚠ THE ASSERTION IS SUPPLY, NOT BALANCE. "The issuer's balance went down"
+ * is equally consistent with a TRANSFER, and a burn that silently moved
+ * tokens instead of destroying them would pass a balance check. Total supply
+ * is summed chain-wide from Kupo across every unspent output carrying the
+ * asset, so a token that merely moved still counts.
+ */
+test("freeze-and-seize: burn destroys tokens — chain-wide supply falls, not just a balance", async () => {
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const networkId = client.chain.id;
+  const address = EvoAddress.toBech32(await client.address());
+  const assetName = stringToHex("BRN" + deployment.txHash.slice(0, 6));
+  const plb = deployment.programmableLogicBase.scriptHash;
+
+  const fes = await makeFesFixture(client, address, assetName, plb);
+  const protocol = CIP113.init({
+    client,
+    standard: { blueprint: loadStandardBlueprint(), deployment },
+    substandards: [
+      freezeAndSeizeSubstandard({
+        blueprint: fes.blueprint as never,
+        deployment: fes.deployment as never,
+      }),
+    ],
+    evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
+  });
+
+  // Chain-wide supply: every unspent output carrying this exact asset.
+  // ⚠ `?unspent` IS LOad-BEARING. Kupo's /matches returns every output it has
+  // ever indexed, SPENT ONES INCLUDED — so without it this function sums
+  // historical outputs and reports supply that no longer exists. It cost a
+  // false accusation against `burn`: the pre-burn UTxO was still counted, the
+  // total looked unchanged, and a working burn read as "it moved the tokens
+  // instead of destroying them".
+  const totalSupply = async (policyHex: string, nameHex: string) => {
+    const resp = await fetch(`${KUPO_URL}/matches/${policyHex}.${nameHex}?unspent`);
+    const body = await resp.json();
+    if (!Array.isArray(body)) {
+      throw new Error(`Kupo asset pattern rejected — cannot measure supply: ${JSON.stringify(body).slice(0, 200)}`);
+    }
+    let total = 0n;
+    for (const m of body) {
+      const assets = m?.value?.assets ?? {};
+      for (const [unit, qty] of Object.entries(assets)) {
+        if (unit.replace(".", "") === policyHex + nameHex) total += BigInt(qty as never);
+      }
+    }
+    return total;
+  };
+
+  const init = await protocol.compliance.init("freeze-and-seize", {
+    feePayerAddress: address,
+    adminAddress: address,
+    assetName,
+  });
+  await submitStep("initCompliance", init);
+  await settleWallet(client, await client.address());
+  await registerSubstandardCredentials(fes.withdrawScripts.slice(1));
+
+  const reg = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+  });
+  const policy = reg.tokenPolicyId!;
+  await submitStep("register", reg);
+  await settleWallet(client, await client.address());
+
+  const issuerPlb = baseAddress(networkId, plb, address);
+  await waitFor(async () => (await totalSupply(policy, assetName)) === 1_000n, {
+    what: "the registered supply to be visible chain-wide before burning",
+    timeoutMs: 120_000,
+  });
+
+  // Pick the UTxO to burn and record what it carries — `burn` destroys the
+  // WHOLE quantity held by the chosen UTxO, so the expected delta is that
+  // UTxO's own amount rather than a number the test picks.
+  const issuerUtxos = await client.getUtxos(EvoAddress.fromBech32(issuerPlb));
+  const target = issuerUtxos.find((u: any) => {
+    for (const p of EvoAssets.policies(u.assets)) {
+      if (String(p) === policy) return true;
+    }
+    return false;
+  });
+  assert.ok(target, "expected an issuer UTxO carrying the token to burn");
+
+  const { TransactionHash } = await import("@evolution-sdk/evolution");
+  const burnedQty = (() => {
+    for (const p of EvoAssets.policies(target.assets)) {
+      if (String(p) !== policy) continue;
+      for (const [name, qty] of EvoAssets.tokens(target.assets, p).entries()) {
+        const raw = (name as any)?.bytes ?? name;
+        const hex =
+          typeof raw === "string"
+            ? raw
+            : Array.from(raw as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+        if (hex === assetName) return qty as bigint;
+      }
+    }
+    return 0n;
+  })();
+  assert.ok(burnedQty > 0n, "the targeted UTxO must actually carry the token");
+
+  const supplyBefore = await totalSupply(policy, assetName);
+
+  const burned = await protocol.burn({
+    substandardId: "freeze-and-seize",
+    feePayerAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    utxoTxHash: TransactionHash.toHex(target.transactionId),
+    utxoOutputIndex: Number(target.index),
+    holderAddress: address,
+  });
+  await submitStep("burn", burned);
+
+  // Poll, then REPORT THE NUMBERS. "Timed out waiting for X" tells you the
+  // assertion failed but not what the chain actually did, and the difference
+  // between "supply unchanged" (burn moved tokens) and "supply fell by the
+  // wrong amount" (burn destroyed the wrong quantity) is the whole diagnosis.
+  let observed = supplyBefore;
+  for (let i = 0; i < 40; i++) {
+    observed = await totalSupply(policy, assetName);
+    if (observed === supplyBefore - burnedQty) break;
+    await new Promise((r) => setTimeout(r, 3_000));
+  }
+  const holders = await (async () => {
+    const r = await fetch(`${KUPO_URL}/matches/${policy}.${assetName}?unspent`);
+    const b = await r.json();
+    return (Array.isArray(b) ? b : []).map((m: any) => `${m.address?.slice(0, 24)}… ${JSON.stringify(m.value?.assets)}`);
+  })();
+  console.error(`=== BURN: WHO HOLDS THE ASSET AFTER === ${JSON.stringify(holders, null, 1)}`);
+  console.error(`=== BURN: policy=${policy} assetName=${assetName} issuerPlb=${issuerPlb}`);
+  console.error(
+    `=== BURN SUPPLY === before=${supplyBefore} burnedQty=${burnedQty} ` +
+      `expected=${supplyBefore - burnedQty} observed=${observed} ` +
+      `issuerPlbAfter=${await (async () => {
+        const us = await client.getUtxos(EvoAddress.fromBech32(issuerPlb));
+        let t = 0n;
+        for (const u of us) for (const pp of EvoAssets.policies(u.assets)) {
+          if (String(pp) !== policy) continue;
+          for (const [n, q] of EvoAssets.tokens(u.assets, pp).entries()) {
+            const raw = (n as any)?.bytes ?? n;
+            const hex = typeof raw === "string" ? raw : Array.from(raw as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+            if (hex === assetName) t += q as bigint;
+          }
+        }
+        return t;
+      })()}`
+  );
+  assert.equal(
+    await totalSupply(policy, assetName),
+    supplyBefore - burnedQty,
+    "supply must fall by exactly the burned quantity — a smaller fall means tokens moved rather than died"
   );
 });
