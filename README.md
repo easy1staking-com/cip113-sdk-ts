@@ -103,6 +103,8 @@ Each script is standalone — run them sequentially to walk through the complete
 
 ## Documentation
 
+- [Provenance: CIP-171 and blueprint pins](docs/provenance.md) — what ships, how to build a record, and why `compilerVersion` must come from the artefact
+
 - [Getting Started](docs/getting-started.md) — prerequisites, setup, first token
 - [API Reference](docs/api-reference.md) — all types, methods, utilities
 - [Freeze-and-Seize](docs/substandards/freeze-and-seize.md) — compliance substandard
