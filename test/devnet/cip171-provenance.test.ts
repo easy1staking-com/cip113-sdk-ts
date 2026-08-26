@@ -11,6 +11,19 @@
  *
  * A record that does not survive that is decoration.
  *
+ * ⚠ THIS TEST IS NECESSARY AND NOT SUFFICIENT. It proves the record describes
+ * the scripts we actually deployed. It does NOT prove any registry will accept
+ * it — that is a separate, three-level question, and only the third level is
+ * acceptance:
+ *
+ *   1. the transaction submitted            — worthless on its own
+ *   2. a lookup by tx hash returns 200      — proves INGESTION ONLY; a PENDING
+ *                                             row and a REJECTED row both 200
+ *   3. the `status` field reports SUCCESS   — the only one that means accepted
+ *
+ * MEASURED: preview tx 20da8206… passed 1 and 2 while verification was failing
+ * with `No parser found for Aiken version: v1.1.23+8949565`.
+ *
  * NOT CIRCULAR: the record is read back through CBOR encode -> decode, and the
  * comparison target comes from DeploymentParams, which is produced by a
  * different path than the recorder that built the record.
