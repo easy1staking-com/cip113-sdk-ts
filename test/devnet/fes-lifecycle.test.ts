@@ -155,6 +155,101 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     timeoutMs: 120_000,
   });
 
+});
+
+/**
+ * Seize, as its OWN test.
+ *
+ * Split from the lifecycle deliberately: when the combined arc failed at a
+ * programmable_logic_base spend, the failure could have belonged to FES's
+ * transfer path (S-4 code that register/mint never exercised) or to seize (S-5).
+ * A single test covering both cannot tell you which, and picking the one you
+ * just wrote is how a wrong cause gets confirmed.
+ *
+ * Two tests cost one extra bootstrap and answer it outright.
+ */
+test("freeze-and-seize: seize takes tokens back without the holder's signature", async () => {
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const networkId = client.chain.id;
+  const address = EvoAddress.toBech32(await client.address());
+  const assetName = stringToHex("FES" + deployment.txHash.slice(0, 6));
+  const plb = deployment.programmableLogicBase.scriptHash;
+
+  const fes = await makeFesFixture(client, address, assetName, plb);
+  const protocol = CIP113.init({
+    client,
+    standard: { blueprint: loadStandardBlueprint(), deployment },
+    substandards: [
+      freezeAndSeizeSubstandard({
+        blueprint: fes.blueprint as never,
+        deployment: fes.deployment as never,
+      }),
+    ],
+    evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
+  });
+
+  const heldAt = async (addr: string, policyHex: string, nameHex: string) => {
+    const utxos = await client.getUtxos(EvoAddress.fromBech32(addr));
+    let total = 0n;
+    for (const u of utxos) {
+      for (const p of EvoAssets.policies(u.assets)) {
+        if (String(p) !== policyHex) continue;
+        for (const [name, qty] of EvoAssets.tokens(u.assets, p).entries()) {
+          const raw = (name as any)?.bytes ?? name;
+          const hex =
+            typeof raw === "string"
+              ? raw
+              : Array.from(raw as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+          if (hex === nameHex) total += qty as bigint;
+        }
+      }
+    }
+    return total;
+  };
+
+  const init = await protocol.compliance.init("freeze-and-seize", {
+    feePayerAddress: address,
+    adminAddress: address,
+    assetName,
+  });
+  await init._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+  await registerSubstandardCredentials(fes.withdrawScripts.slice(1));
+
+  const reg = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+  });
+  const policy = reg.tokenPolicyId!;
+  await reg._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+
+  const issuerPlb = baseAddress(networkId, plb, address);
+  await waitFor(async () => (await heldAt(issuerPlb, policy, assetName)) === 1_000n, {
+    what: "the FES supply to appear before seizing",
+    timeoutMs: 120_000,
+  });
+
+  // Put tokens in a holder's hands first — you cannot seize from nobody.
+  const holder = recipientAddress(networkId, address);
+  const holderPlb = baseAddress(networkId, plb, holder);
+  const xfer = await protocol.transfer({
+    senderAddress: address,
+    recipientAddress: holder,
+    tokenPolicyId: policy,
+    assetName,
+    quantity: 300n,
+    substandardId: "freeze-and-seize",
+  });
+  await xfer._signBuilder.signAndSubmit();
+  await settleWallet(client, await client.address());
+  await waitFor(async () => (await heldAt(holderPlb, policy, assetName)) === 300n, {
+    what: "the transfer to reach the holder before seizing",
+    timeoutMs: 120_000,
+  });
+
   // --- SEIZE: take it back without the holder's signature -------------------
   //
   // The whole reason this substandard exists. Authorised by the registry node's
