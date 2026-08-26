@@ -419,6 +419,23 @@ test("freeze-and-seize: seize takes tokens back without the holder's signature",
  * exactly what seize did before 09bd468 removed it. Nobody compared against
  * `burn` because it sat outside the feature area.
  *
+ * PROOF OF HARNESS — two mutations, and they proved DIFFERENT things:
+ *
+ *   1. src, burn half (`-(burnAmount / 2n)`)  → RED, but at SUBMIT, not here:
+ *      the validator refuses a partial burn outright. That proves the CHAIN
+ *      enforces full destruction; it never reaches this assertion, so it
+ *      discharges nothing about the guard. Recorded because a red that never
+ *      touched the assertion is not evidence for the assertion.
+ *   2. assertion expects one token too few      → RED HERE, ERR_ASSERTION,
+ *      `actual 0n !== expected -1n`, after a SUCCESSFUL burn. That is the
+ *      guard reading real chain state and comparing it exactly — so it is
+ *      not vacuous and not merely checking "supply went down".
+ *
+ * ⚠ Neither mutation simulates the defect this guard is really aimed at —
+ * a burn that MOVES tokens instead of destroying them — because the
+ * validator will not build such a transaction. That case remains covered by
+ * construction (supply is chain-wide) rather than by demonstration.
+ *
  * ⚠ THE ASSERTION IS SUPPLY, NOT BALANCE. "The issuer's balance went down"
  * is equally consistent with a TRANSFER, and a burn that silently moved
  * tokens instead of destroying them would pass a balance check. Total supply
