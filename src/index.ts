@@ -423,6 +423,16 @@ export {
   // was public API in intent already.
   cip171Param,
 } from "./core/cip171.js";
+
+// Provenance: assemble a CIP-171 record from a bundled blueprint's pin.
+// Import the pin itself as JSON via the "./blueprints/*" export path — a
+// consumer that COPIES the repo/commit/compiler triple instead gets a second
+// copy that drifts silently and still verifies.
+export {
+  provenanceFromPin,
+  buildCip171RecordFromPin,
+} from "./core/provenance.js";
+export type { UpstreamPin, ParameterizedScript } from "./core/provenance.js";
 export type {
   Cip171Record,
   Cip171ScriptEntry,

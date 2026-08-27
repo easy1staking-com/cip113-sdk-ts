@@ -9,7 +9,8 @@
     ".": "./dist/index.js",
     "./evolution": "./dist/provider/evolution-adapter.js",
     "./dummy": "./dist/substandards/dummy/index.js",
-    "./freeze-and-seize": "./dist/substandards/freeze-and-seize/index.js"
+    "./freeze-and-seize": "./dist/substandards/freeze-and-seize/index.js",
+    "./blueprints/*": "./blueprints/*"
   },
   "scripts": {
     "build": "tsc",

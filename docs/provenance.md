@@ -11,7 +11,8 @@ Two related questions this package answers, and several it deliberately does not
 | **Emission** — attaching a record to a real transaction | **no** | `test/harness/`, excluded from the tarball |
 | **Deployment** of a protocol instance | **no** | `test/harness/`, and see the constitution |
 
-> **The package cannot publish a CIP-171 record.** It can build one. Publishing is the
+> **The package cannot publish a CIP-171 record.** It can build one — including from a bundled
+> blueprint's pin, via `buildCip171RecordFromPin` (see below). Publishing is the
 > deploying system's job — the record's content (this repo, this commit, this compiler, *these*
 > parameters) only exists at deploy time. `DeploymentParams` is an input to this SDK.
 
@@ -64,6 +65,37 @@ of writing) and it is what the reference implementation's parser requires. A fiv
 are the parameter's CBOR. Use `cip171Param`. Emitting inline `PlutusData` is not rejected — the
 registry reads `.bytes` on each element, gets nothing, and stores a record whose parameters have
 silently vanished while the record itself still parses.
+
+## Building one from a bundled pin — a convenience, and its limits
+
+`buildCip171RecordFromPin(blueprint, pin, scripts)` assembles a record from a blueprint shipped in
+this package and its `UPSTREAM_PIN.json`. Import both through the `./blueprints/*` export path.
+It reads no files and works in a browser.
+
+It exists because a backend that serves a blueprint over an API typically **strips the
+`preamble`**, so a consumer holding that blueprint has no compiler version — and the repo and
+commit were never served at all.
+
+> ⚠ **THIS IS A CONVENIENCE, NOT THE ARCHITECTURALLY CORRECT HOME.** This package's pin describes
+> **what it bundled**. A deploying system must describe **what it deploys**. Those coincide only
+> while the two artefacts agree, and a CIP-171 record is a permanent public claim. A deployer that
+> serves its own provenance — commit, path and the `preamble.compiler` it already holds — is
+> strictly more correct, and should prefer that.
+
+**Do not copy the repo/commit/compiler triple into your own code instead.** A second copy drifts
+silently: the day this package ships a new blueprint, the copied triple still encodes, still
+publishes, and still *verifies* — against the wrong source.
+
+The helper refuses rather than guesses. It requires the pin to be `VERIFIED`, to name a full
+40-character commit, and to agree with the blueprint on title, compiler and validator count — and
+then, because those catch a wrong pin but not a differently-compiled artefact sharing a preamble,
+**every recorded script must exist in the blueprint the pin describes**. A script parameterised
+from elsewhere is refused, because a record naming this commit beside that hash would verify
+against source that never produced it.
+
+⛔ **What it cannot check:** that the commit is still *reachable* upstream. That needs the network,
+and a `provenance` field is a claim while reachability is a fact — a squash-merge can orphan a
+commit that was reachable when the pin was written. Assert it separately before publishing.
 
 ## Verifying a record you built
 
