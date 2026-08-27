@@ -9,3 +9,9 @@ dist/
 # Yaci DevKit droppings (created when running yaci-devkit from the repo root)
 logs/
 yaci-cli.history
+
+# Local iteration artefacts. `npm pack` output is handed to a consumer by path
+# so the PACKAGING BOUNDARY gets tested — npm link and file: deps honour
+# `exports` but NOT `files`, so anything missing from `files` resolves locally
+# and 404s on publish. Never commit the tarball itself.
+*.tgz
