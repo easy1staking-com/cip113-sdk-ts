@@ -114,6 +114,30 @@ Offline, the strongest check is **recomputation**: parameterise the raw script w
 arguments, hash it, and compare against the hash actually deployed. See
 `test/devnet/cip171-provenance.test.ts`.
 
+**The comparison needs two operands, and one of them must not come from this package.**
+`ParameterizationEvent` carries both hashes so the check is buildable at all:
+
+| field | what it is | role |
+|---|---|---|
+| `rawScriptHash` | blake2b-224 of the **unapplied** code | the CIP-171 map **key** |
+| `appliedScriptHash` | blake2b-224 **after** `params` were applied | the hash that gets deployed |
+
+Recompute from `rawScriptHash` + `params`, then compare against `appliedScriptHash` — and
+compare *that* against a hash you obtained **independently**: `DeploymentParams`, the chain, an
+explorer. Comparing your recomputation only to your own recomputation runs, passes, and proves
+nothing; it is the same vacuous shape as a record that reports `VERIFIED` with a `PARTIAL`
+script inside it.
+
+Two traps in this pair:
+
+- **They are one field apart and read alike.** Keying a record on `appliedScriptHash` produces a
+  record no verifier can match, because verifiers rebuild from source and therefore only ever
+  hold the *unapplied* hash.
+- **The recorder fires per parameterisation, not per distinct script**, and `createFESScripts`
+  runs inside the plugin's `init()`. A second `init` appends a second full set — 8 events, still
+  4 distinct scripts. **Dedupe by `rawScriptHash` before counting**; a coverage guard pinned
+  against the raw event count refuses a correct record on the second mount.
+
 ## Where a record may live
 
 CIP-0171 associates a record with a script **by script hash, not by transaction** — verifiers

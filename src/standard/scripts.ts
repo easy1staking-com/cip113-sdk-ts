@@ -102,8 +102,30 @@ export interface StandardScripts {
 export interface ParameterizationEvent {
   /** Validator title as it appears in the blueprint. */
   title: string;
-  /** Blake2b-224 of the UNAPPLIED compiled code — the CIP-171 map key. */
+  /**
+   * Blake2b-224 of the UNAPPLIED compiled code — the CIP-171 map KEY.
+   *
+   * NOT the hash of anything that gets deployed. Two deployments with
+   * different parameters share this value; that is the point of it.
+   */
   rawScriptHash: ScriptHash;
+  /**
+   * Blake2b-224 of the compiled code AFTER {@link params} were applied — the
+   * hash that is actually deployed, referenced on-chain, and appears in
+   * `DeploymentParams`.
+   *
+   * Emitted so that the offline recomputation `docs/provenance.md` recommends
+   * has a SECOND OPERAND. Without it a consumer can re-apply the recorded
+   * params and hash the result, but has nothing independent to compare against
+   * — a check that compares a computation to itself, which always passes and
+   * proves nothing. Compare this against a hash obtained from somewhere this
+   * package did not produce: the deployment, the chain, an explorer.
+   *
+   * Do NOT key a CIP-171 record on this. The key is {@link rawScriptHash};
+   * this is the value side's subject. The two are one field apart and a tired
+   * reader gets them backwards.
+   */
+  appliedScriptHash: ScriptHash;
   /** Arguments applied, in application order. */
   params: Data.Data[];
 }
@@ -114,10 +136,19 @@ export function createStandardScripts(
 ): StandardScripts {
   function parameterize(validatorTitle: string, params: Data.Data[]): PlutusScript {
     const code = getValidatorCode(blueprint, validatorTitle);
+    // Parameterise FIRST: the applied hash is a by-product of the work, not a
+    // second hashing pass. A recorder that fired before the application would
+    // also report parameterisations that went on to throw.
+    const script = parameterizeScript(code, params);
     if (onParameterize) {
-      onParameterize({ title: validatorTitle, rawScriptHash: computeScriptHash(code), params });
+      onParameterize({
+        title: validatorTitle,
+        rawScriptHash: computeScriptHash(code),
+        appliedScriptHash: script.hash,
+        params,
+      });
     }
-    return parameterizeScript(code, params);
+    return script;
   }
 
   return {

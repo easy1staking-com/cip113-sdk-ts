@@ -52,10 +52,16 @@ export function createFESScripts(
     const code = getValidatorCode(blueprint, validatorTitle);
     // Same recorder contract as the standard chain: a CIP-171 record is DERIVED
     // from the calls that actually parameterise, never transcribed beside them.
+    const script = parameterizeScript(code, params);
     if (onParameterize) {
-      onParameterize({ title: validatorTitle, rawScriptHash: computeScriptHash(code), params });
+      onParameterize({
+        title: validatorTitle,
+        rawScriptHash: computeScriptHash(code),
+        appliedScriptHash: script.hash,
+        params,
+      });
     }
-    return parameterizeScript(code, params);
+    return script;
   }
 
   return {
