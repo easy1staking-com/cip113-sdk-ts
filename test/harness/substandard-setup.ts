@@ -30,13 +30,20 @@ import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
  * accounting rather than about governance.
  */
 export async function registerSubstandardCredentials(
-  scripts: readonly PlutusScript[]
+  scripts: readonly PlutusScript[],
+  opts: { client?: any; evaluator?: unknown } = {}
 ): Promise<void> {
-  const client: any = await makeClient();
+  // Same injection contract as bootstrapProtocol: default to the local devnet,
+  // accept a client for any other testnet. An injected client brings its own
+  // evaluation — the custom Ogmios evaluator exists for Aiken traces, which
+  // Blockfrost does not return.
+  const client: any = opts.client ?? (await makeClient());
   const addressObj = await client.address();
-  const evaluator = createOgmiosEvaluator(
-    process.env.OGMIOS_URL ?? "http://localhost:1337"
-  );
+  const evaluator =
+    opts.evaluator ??
+    (opts.client
+      ? undefined
+      : createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"));
 
   for (const script of scripts) {
     try {

@@ -100,6 +100,14 @@ export async function makeFesFixture(
   // FES's transfer logic is parameterised by BOTH the PLB hash and the
   // blacklist policy — so it only exists once the blacklist policy above does.
   const fesTransfer = fes.buildTransfer(plbHash, blacklistMint.hash);
+  // Built so the CIP-171 record COVERS it. The plugin derives blacklist_spend
+  // internally from the same policy id, so this parameterisation is identical
+  // to the one actually deployed — but the plugin's own script factory has no
+  // recorder attached, so without this call the validator is simply absent
+  // from the record and the registry reports it PARTIAL with 0 of 1 parameters.
+  // MEASURED on core's first live record: an uncovered validator does not
+  // fail loudly, it reports a null finalHash inside a VERIFIED record.
+  fes.buildBlacklistSpend(blacklistMint.hash);
 
   return {
     paramEvents,
