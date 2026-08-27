@@ -38,14 +38,43 @@ async function main() {
   // Poll the same source we will read the deployment back from. Evolution's
   // awaitTx timed out at 90s on preview while the transaction was already in a
   // block — a deployment aborting on a transaction that had succeeded.
+  // ⚠ TX VISIBILITY IS NOT UTxO-SET VISIBILITY. `/txs/{hash}` returning 200
+  // means the transaction is indexed; the evaluator reads a DIFFERENT view, and
+  // that one lags. Building against outputs the evaluator cannot see yet fails
+  // with "Unknown transaction input (missing from UTxO set)" — code 3117, which
+  // reads like a malformed transaction and is really a race.
+  //
+  // So settle on the thing that will actually be consulted: wait until the new
+  // outputs are in the ADDRESS's UTxO set, not merely until the tx is indexed.
+  const settleOutputs = async (txHash: string) => {
+    const deadline = Date.now() + 5 * 60_000;
+    while (Date.now() < deadline) {
+      const r = await fetch(`${BF}/addresses/${address}/utxos?count=100`, {
+        headers: { project_id: env.BLOCKFROST_KEY },
+      });
+      if (r.ok) {
+        const utxos: Array<{ tx_hash: string }> = await r.json();
+        if (utxos.some((u) => u.tx_hash === txHash)) return;
+      }
+      await new Promise((res) => setTimeout(res, 5_000));
+    }
+    throw new Error(`outputs of ${txHash} never reached the UTxO set`);
+  };
+
   const awaitTx = async (txHash: string) => {
     const deadline = Date.now() + 6 * 60_000;
     while (Date.now() < deadline) {
       const r = await fetch(`${BF}/txs/${txHash}`, { headers: { project_id: env.BLOCKFROST_KEY } });
-      if (r.ok) return;
+      if (r.ok) break;
       await new Promise((res) => setTimeout(res, 5_000));
     }
-    throw new Error(`tx ${txHash} not visible after 6 minutes`);
+    // ⚠ AND THEN WAIT FOR THE UTxO SET, WHICH IS A DIFFERENT VIEW AND LAGS THE
+    // TRANSACTION INDEX. Waiting only on `/txs/{hash}` leaves the NEXT
+    // transaction selecting inputs this one already spent — the ledger answers
+    // "All inputs are spent. Transaction has probably already been included",
+    // which reads like a duplicate submission and is really a stale read.
+    // MEASURED: it killed tx2 of the bootstrap immediately after tx1 landed.
+    await settleOutputs(txHash);
   };
 
   const isStakeRegistered = async (stakeAddress: string) => {
@@ -83,7 +112,8 @@ async function main() {
   const init = await fesProtocol.compliance.init("freeze-and-seize", {
     feePayerAddress: address, adminAddress: address, assetName: fesAsset,
   });
-  await awaitTx((await init._signBuilder.signAndSubmit(), init.txHash));
+  await init._signBuilder.signAndSubmit();
+  await awaitTx(init.txHash);
   await registerSubstandardCredentials(fes.withdrawScripts.slice(1), { client, isStakeRegistered });
   const fesRecord: any = buildDeploymentRecord(fesBlueprintDir(), fes.paramEvents);
   const fesReg = await fesProtocol.register("freeze-and-seize", {
