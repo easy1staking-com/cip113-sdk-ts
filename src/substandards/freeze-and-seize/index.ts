@@ -19,6 +19,7 @@ import {
 import type { UTxO as EvoUTxO } from "@evolution-sdk/evolution";
 
 import type { PlutusBlueprint, PlutusScript, DeploymentParams, HexString } from "../../types.js";
+import type { ParameterizationEvent } from "../../standard/scripts.js";
 import type {
   SubstandardPlugin,
   SubstandardContext,
@@ -308,6 +309,24 @@ function findBlacklistCoveringNode(
 export function freezeAndSeizeSubstandard(config: {
   blueprint: PlutusBlueprint;
   deployment: FESDeploymentParams;
+  /**
+   * Observe every parameterisation this substandard performs.
+   *
+   * Required to build a CIP-171 record for a registration: the register path
+   * parameterises SEVERAL scripts, and without this the caller can only see the
+   * ones it happens to derive itself.
+   *
+   * ⛔ A PARTIAL MANIFEST IS THE DANGEROUS CASE, NOT AN OBVIOUS ONE. A record
+   * built from a subset encodes cleanly, publishes, and VERIFIES — while the
+   * scripts it omits have had their parameters silently never stated. There is
+   * no error anywhere: the registry reports the omitted ones PARTIAL with a
+   * null final hash inside a record whose status is VERIFIED.
+   *
+   * ⇒ Derive the record from this, never from a hand-written list. A second
+   * list agrees with the deployment right up until it does not, and the
+   * disagreement surfaces only as a hash that verifies to nothing.
+   */
+  onParameterize?: (event: ParameterizationEvent) => void;
 }): SubstandardPlugin {
   let ctx: SubstandardContext;
   let scripts: ResolvedFESScripts;
@@ -342,7 +361,7 @@ export function freezeAndSeizeSubstandard(config: {
       sharedEvaluator = ctx.evaluator;
       networkId = ctx.client.chain.id;
       const { adminPkh, assetName, blacklistNodePolicyId, blacklistInitTxInput } = config.deployment;
-      const fes = createFESScripts(config.blueprint);
+      const fes = createFESScripts(config.blueprint, config.onParameterize);
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
 
       const issuerAdmin = fes.buildIssuerAdmin(adminPkh, assetName);
