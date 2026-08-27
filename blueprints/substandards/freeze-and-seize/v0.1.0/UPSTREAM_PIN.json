@@ -11,8 +11,9 @@
   "upstream": {
     "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
     "path": "src/substandards/freeze-and-seize",
-    "commit": "013c11544839754d462e0603de59f4bbf1769479",
-    "note": "SOURCE LOCATED. The previous pin recorded repo: null / provenance: UNKNOWN because nobody had written it down — it is the `freeze-and-seize` substandard in the platform repo, alongside `dummy`. The preamble title 'cip113/freeze-unfreeze' is that directory's aiken.toml project name, not a separate repository."
+    "commit": "12637c7c8c7b2bbd08b59100bf7ff714401618da",
+    "note": "⚠ THIS PIN PREVIOUSLY NAMED 013c11544839754d462e0603de59f4bbf1769479 — AN ORPHAN, reachable from no ref, while the provenance field said VERIFIED. The registry caught what our own guard did not: it cloned and failed with `fatal: reference is not a tree`, and the record went to FAILED. A `provenance: VERIFIED` field is a CLAIM; reachability is a FACT, and they had diverged. Now 12637c7c8c7b2bbd08b59100bf7ff714401618da, verified an ancestor of origin/main, whose src/substandards/freeze-and-seize/plutus.json is sha256 9514852e… — byte-identical to this vendored artefact.",
+    "ref": "main"
   },
   "blueprint_reproduced": true,
   "provenance": "VERIFIED",

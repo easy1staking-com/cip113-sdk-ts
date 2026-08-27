@@ -18,7 +18,7 @@
  */
 import { readFileSync } from "node:fs";
 import { Data } from "@evolution-sdk/evolution";
-import { cip171Param, CompilerType } from "../../dist/index.js";
+import { cip171Param, CompilerType, computeScriptHash } from "../../dist/index.js";
 import type { ParameterizationEvent } from "../../dist/standard/scripts.js";
 
 export interface Cip171Source {
@@ -39,6 +39,15 @@ export function readProvenance(blueprintDir: string) {
         `file a metadatum cannot be deleted. Establish provenance first.`
     );
   }
+  const commit = pin?.upstream?.commit;
+  if (typeof commit !== "string" || !/^[0-9a-f]{40}$/.test(commit)) {
+    throw new Error(
+      `CIP-171 REFUSED for ${blueprintDir}: upstream.commit is ${JSON.stringify(commit)}, ` +
+        `not a full 40-character sha. An abbreviation is one more thing that can drift, and a ` +
+        `missing commit means the record names nothing a verifier can fetch.`
+    );
+  }
+
   const compilerVersion = bp?.preamble?.compiler?.version;
   if (!compilerVersion) {
     throw new Error(`${blueprintDir}/plutus.json has no preamble.compiler.version`);
@@ -110,4 +119,85 @@ export function buildDeploymentRecord(
     env: p.env,
     scripts: scriptEntriesFrom(events, only),
   };
+}
+
+/**
+ * Entries for a blueprint whose validators take NO parameters.
+ *
+ * The dummy substandard is this shape: its plugin reads `compiledCode` straight
+ * from the blueprint and never parameterises, so there are no recorded events
+ * to derive from — and a record with no scripts is refused by the encoder,
+ * correctly, because it claims nothing.
+ *
+ * An empty parameter list is a POSITIVE statement, not an omission: it says
+ * this script takes no arguments, so its deployed hash IS its raw hash. The
+ * registry reports such scripts `NONE_REQUIRED` and can finalise them without
+ * being given anything. That is the opposite of `PARTIAL`, which means the
+ * final hash could not be computed.
+ *
+ * ⚠ Refuses any validator that DECLARES parameters — for those, an empty list
+ * would be a silent omission dressed as a claim, and the registry would report
+ * PARTIAL with a null finalHash inside an otherwise VERIFIED record.
+ */
+export function unparameterisedEntries(
+  blueprintDir: string
+): Array<{ rawScriptHash: string; params: string[] }> {
+  const bp = JSON.parse(readFileSync(`${blueprintDir}/plutus.json`, "utf8"));
+  const out = new Map<string, { rawScriptHash: string; params: string[] }>();
+  for (const v of bp.validators ?? []) {
+    if (!v.compiledCode) continue;
+    const declared = (v.parameters ?? []).length;
+    if (declared > 0) {
+      throw new Error(
+        `CIP-171: ${v.title} declares ${declared} parameter(s); it cannot be recorded as ` +
+          `unparameterised. Supply its arguments from the parameterisation that built it, ` +
+          `or the registry will report it PARTIAL with a null finalHash.`
+      );
+    }
+    const h = computeScriptHash(v.compiledCode).toLowerCase();
+    if (!out.has(h)) out.set(h, { rawScriptHash: h, params: [] });
+  }
+  return [...out.values()];
+}
+
+/** A record for a blueprint whose validators take no parameters. */
+export function buildUnparameterisedRecord(blueprintDir: string) {
+  const p = readProvenance(blueprintDir);
+  return {
+    compilerType: CompilerType.AIKEN,
+    sourceUrl: p.sourceUrl,
+    commitHash: p.commitHash,
+    sourcePath: p.sourcePath,
+    compilerVersion: p.compilerVersion,
+    env: p.env,
+    scripts: unparameterisedEntries(blueprintDir),
+  };
+}
+
+/**
+ * Assert the pinned commit is REACHABLE from a ref, not merely well-formed.
+ *
+ * ⚠ THE GAP THIS CLOSES, MEASURED: freeze-and-seize's pin said
+ * `provenance: VERIFIED` while naming an orphan. `readProvenance` read the
+ * FIELD and passed it, we published, and the registry failed with
+ * `fatal: reference is not a tree`. A provenance field is a CLAIM; reachability
+ * is a FACT, and nothing local was comparing them.
+ *
+ * Async and network-touching, so it is a separate call: the record builder
+ * stays pure, and a deployer asserts this before publishing.
+ */
+export async function assertCommitReachable(blueprintDir: string): Promise<void> {
+  const pin = JSON.parse(readFileSync(`${blueprintDir}/UPSTREAM_PIN.json`, "utf8"));
+  const { repo, commit } = pin.upstream ?? {};
+  const m = String(repo).match(/github\.com\/([^/]+)\/([^/.]+)/);
+  if (!m) throw new Error(`cannot parse a GitHub owner/repo from ${repo}`);
+  const r = await fetch(`https://api.github.com/repos/${m[1]}/${m[2]}/commits/${commit}`);
+  if (!r.ok) {
+    throw new Error(
+      `CIP-171 REFUSED for ${blueprintDir}: commit ${commit} is NOT REACHABLE upstream ` +
+        `(GitHub returned ${r.status}). A verifier clones and checks out this commit; if it ` +
+        `cannot, the record fails with "reference is not a tree" and proves nothing. ` +
+        `provenance says "${pin.provenance}" — that field is a claim, this is the fact.`
+    );
+  }
 }

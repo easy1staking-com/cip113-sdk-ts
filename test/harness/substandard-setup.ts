@@ -15,7 +15,7 @@ import {
   Credential,
   TransactionHash as EvoTransactionHash,
 } from "@evolution-sdk/evolution";
-import { buildEvoScript, voidData, type PlutusScript } from "../../dist/index.js";
+import { buildEvoScript, voidData, rewardAddress, type PlutusScript } from "../../dist/index.js";
 import { makeClient } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 
@@ -31,7 +31,21 @@ import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
  */
 export async function registerSubstandardCredentials(
   scripts: readonly PlutusScript[],
-  opts: { client?: any; evaluator?: unknown } = {}
+  opts: {
+    client?: any;
+    evaluator?: unknown;
+    /**
+     * Positive "is this reward account already registered?" check.
+     *
+     * ⚠ THIRD INSTANCE of the same defect class in this harness. The catch
+     * below tolerates re-registration by matching "already known credential" /
+     * "3145" — Ogmios's vocabulary. Blockfrost returns an opaque failure for
+     * the identical condition, so the tolerance silently does not apply off
+     * devnet and a second run dies on a state the code already knows is fine.
+     * A guard written against one provider's error prose does not transfer.
+     */
+    isStakeRegistered?: (stakeAddress: string) => Promise<boolean>;
+  } = {}
 ): Promise<void> {
   // Same injection contract as bootstrapProtocol: default to the local devnet,
   // accept a client for any other testnet. An injected client brings its own
@@ -45,7 +59,15 @@ export async function registerSubstandardCredentials(
       ? undefined
       : createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"));
 
+  const networkId = client.chain.id;
   for (const script of scripts) {
+    if (opts.isStakeRegistered) {
+      const addr = rewardAddress(networkId, script.hash);
+      if (await opts.isStakeRegistered(addr)) {
+        console.error(`  [substandard] ${script.hash.slice(0, 12)}… already registered — skipping`);
+        continue;
+      }
+    }
     try {
       // PLAIN registration, NOT registerAndDelegateTo.
       //

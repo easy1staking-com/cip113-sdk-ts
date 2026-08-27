@@ -74,6 +74,7 @@ import {
 import { makeClient, topupAddress } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 import { buildDeploymentRecord } from "./cip171-record.js";
+import { explainError } from "./explain-error.js";
 import { STANDARD_VALIDATORS } from "../../dist/standard/blueprint.js";
 import { rewardAddressFromKeyHash } from "../../dist/index.js";
 import { buildCip171Metadatum, CIP171_METADATA_LABEL } from "../../dist/index.js";
@@ -199,6 +200,17 @@ export async function bootstrapProtocol(
      * Ask the chain instead of parsing a provider's prose.
      */
     isStakeRegistered?: (stakeAddress: string) => Promise<boolean>;
+    /**
+     * Wait for a transaction to be visible on chain.
+     *
+     * ⚠ MEASURED: Evolution's own awaitTx gave up after 90s on preview while
+     * the transaction had ALREADY been included — Blockfrost's confirmation
+     * view lags block inclusion. A deployment then aborted on a transaction
+     * that had succeeded. The devnet's default is fine; a public provider
+     * wants a poller that asks the same source the deployment will be read
+     * from afterwards.
+     */
+    awaitTx?: (txHash: string) => Promise<void>;
   } = {}
 ): Promise<DeploymentParams> {
   const client = opts.client ?? (await makeClient());
@@ -426,6 +438,22 @@ export async function bootstrapProtocol(
   //      script bodies alongside the mint witnesses is what breaks the size cap.
   // `label` names WHICH transaction failed. Without it a bootstrap failure
   // reports only "submitTx failed" across five distinct submissions.
+  /**
+   * Wallet UTxOs that are safe to SPEND.
+   *
+   * ⛔ EXCLUDES ANY UTxO CARRYING A REFERENCE SCRIPT, whoever created it — not
+   * merely this deployment's four. MEASURED on preview: after three
+   * deployments the wallet held 11 script-bearing UTxOs of 22, and Evolution's
+   * coin selection is free to pick them. Spending one DESTROYS that
+   * deployment's infrastructure AND drags the script's bytes into the
+   * transaction, which is what burst the 16,384-byte cap on tx2.
+   *
+   * The narrower filter in the FES plugin knows only about the CURRENT
+   * DeploymentParams. On a long-lived testnet wallet that is not enough: every
+   * past deployment left four behind.
+   */
+  const spendable = (all: EvoUTxO.UTxO[]) => all.filter((u: any) => !u.scriptRef);
+
   const submitAndWait = async (built: { signAndSubmit: () => Promise<unknown> }, label = "?") => {
     if (process.env.TX_SIZE_DIAG) {
       try {
@@ -449,11 +477,12 @@ export async function bootstrapProtocol(
         if (o.cause) walk(o.cause, d + 1);
       };
       walk(err);
-      console.error(`  [submit error] ${label}: ` + "" + [...new Set(parts)].join("\n  | ").slice(0, 2000));
+      console.error(`  [submit error] ${label}:\n  | ` + explainError(err));
       throw err;
     }
     const hash = typeof res === "string" ? res : EvoTransactionHash.toHex(res as never);
-    await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
+    if (opts.awaitTx) await opts.awaitTx(hash);
+    else await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
     return hash;
   };
   // An injected client brings its own evaluation; only the devnet needs the
@@ -531,7 +560,7 @@ export async function bootstrapProtocol(
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
 
   const bootstrapTxHash = await submitAndWait(
-    await tx.build({ changeAddress: addressObj, evaluator }), "tx1-protocol-state"
+    await tx.build({ changeAddress: addressObj, evaluator, availableUtxos: spendable(await client.getUtxos(addressObj)) }), "tx1-protocol-state"
   );
 
   // ---- Tx 2: publish reference scripts ------------------------------------
@@ -544,7 +573,7 @@ export async function bootstrapProtocol(
     });
   }
   const refTxHash = await submitAndWait(
-    await refTx.build({ changeAddress: addressObj, evaluator }), "tx2-reference-scripts"
+    await refTx.build({ changeAddress: addressObj, evaluator, availableUtxos: spendable(await client.getUtxos(addressObj)) }), "tx2-reference-scripts"
   );
 
   // ---- Tx 3: register the three delegate stake credentials -----------------
