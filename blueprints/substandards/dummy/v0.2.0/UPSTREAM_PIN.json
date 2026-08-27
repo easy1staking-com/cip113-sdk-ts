@@ -11,20 +11,20 @@
   "upstream": {
     "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens-platform",
     "path": "src/substandards/dummy",
-    "commit": "2e067fe",
-    "note": "Commit is now REACHABLE: pushed 2026-08-27 as PR #11. The pin previously named 013c1154, an ORPHAN on no branch anywhere — a sha that resolves locally tells you nothing about whether anyone else can fetch it. 2e067fe is that same change cherry-picked onto current origin/main, and the plutus.json at 2e067fe is BYTE-IDENTICAL to this vendored artefact (sha256 verified both sides). ⚠ If PR #11 is closed without merging and the branch deleted, this becomes unreachable again — re-pin to the merge commit once it lands.",
-    "ref": "fix/dummy-publish-handlers (PR #11, open)"
+    "commit": "e63fa0af433ee39b2069521c2dd7579e1c919f89",
+    "note": "REACHABLE from origin/main, verified with `git merge-base --is-ancestor` after a fetch — not inferred from a PR being merged. Merged and reachable are different claims. ⚠ THIS PIN HAS NAMED AN ORPHAN TWICE. First 013c1154, a commit on no branch anywhere. Then 2e067fe, the PR branch head — GitHub SQUASHED PR #11, so the branch head became unreachable the moment it merged and b169255 with it. A sha that resolves locally, or that you watched being pushed, tells you nothing about whether anyone can fetch it. Full 40-char sha recorded deliberately: an abbreviation is one more thing that can drift.",
+    "ref": "main"
   },
   "blueprint_reproduced": true,
-  "provenance": "UNVERIFIED",
+  "provenance": "VERIFIED",
   "reproduce": {
     "requires": "Aiken v1.1.21+42babe5",
     "command": "cd src/substandards/dummy && aiken build",
     "note": "aiken.toml pins v1.1.21. ⚠ aiken BUILDS ANYWAY on a mismatched compiler, emitting only a warning — a blueprint built on the wrong toolchain is indistinguishable from a correct one by inspection. Check the preamble's compiler field, do not trust the environment."
   },
   "verified": {
-    "date": "2026-08-25",
-    "method": "BUILT FROM LOCATED SOURCE",
+    "date": "2026-08-27",
+    "method": "REBUILT FROM THE PINNED REACHABLE COMMIT",
     "findings": [
       "OBSERVED: adds `transfer.issue.publish` and `transfer.transfer.publish`, which v0.1.0 lacked entirely. Without them the stake credentials of these two withdraw-0 validators CANNOT BE REGISTERED (a Conway RegCert runs the script under the PUBLISH purpose and falls through to `else`), so the substandard could not register, mint or transfer at all under CIP-113 0.5.x.",
       "OBSERVED: byte-identical across two clean rebuilds with the pinned compiler.",
@@ -33,6 +33,6 @@
       "v0.1.0 is retained alongside, unchanged. It is the artifact this SDK shipped and its provenance record is part of the history; it is also now known non-functional against 0.5.x.",
       "For the record, v0.1.0 did NOT match this source project's own committed blueprint either: v0.1.0 is sha256 42d95e76… built with Aiken v1.1.19, while the platform repo's committed copy at 61374e3 is sha256 6574d840… built with v1.1.21. The SDK was shipping an artifact older than the source project's own."
     ],
-    "remaining": "ONLY the reproduction step remains. The artefact was previously BUILT FROM LOCATED SOURCE with Aiken v1.1.21+42babe5, and the source at 2e067fe is byte-identical — but that build predates this commit's tree, which sits on newer main and may differ in aiken.toml or dependencies. A rebuild AT 2e067fe is required before this may be called VERIFIED. ⚠ That needs Aiken v1.1.21 while this machine is on v1.1.9, and aiken is MACHINE-GLOBAL — the switch affects concurrent sessions and should be coordinated, not taken unilaterally."
+    "reproduction": "Cloned the platform repo at e63fa0af433ee39b2069521c2dd7579e1c919f89 (verified an ancestor of origin/main), ran `aiken build` in src/substandards/dummy with Aiken v1.1.21 as aiken.toml pins. Resulting plutus.json sha256 c75e41f6ff3f71c278ac4765741ea6cf1e222fa24d5601d85e5e3a25bb15ed0f — byte-identical to this vendored artefact. preamble.compiler read FROM THE REBUILT ARTEFACT: Aiken v1.1.21+42babe5. The machine's own toolchain was v1.1.9 before and after; it was borrowed for the build and restored."
   }
 }

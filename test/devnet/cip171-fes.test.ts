@@ -30,7 +30,7 @@ import { CIP113 } from "../../dist/index.js";
 import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
 import { loadStandardBlueprint } from "../harness/bootstrap.js";
 import { registerSubstandardCredentials } from "../harness/substandard-setup.js";
-import { dummyBlueprintDir } from "../harness/paths.js";
+import { dummyBlueprintDir, standardV030Dir } from "../harness/paths.js";
 import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
 import { fesBlueprintDir } from "../harness/paths.js";
 
@@ -152,34 +152,33 @@ test("freeze-and-seize: its REGISTRATION tx carries a CIP-171 record that recomp
 });
 
 /**
- * Dummy's guard, fired ON PURPOSE.
+ * The provenance guard, both directions.
  *
- * `dummy/v0.2.0` is pinned UNVERIFIED: its source commit is not reachable
- * upstream, so no verifier could reproduce the artefact. The record builder
- * must REFUSE it rather than emit a claim nobody can check — a metadatum,
- * unlike a file, cannot be deleted.
+ * NEGATIVE against `standard/v0.3.0`, which is PERMANENTLY UNVERIFIED: its pin
+ * matches no commit anywhere upstream, so no push can ever clear it. That makes
+ * it a durable negative fixture — dummy/v0.2.0 used to serve this role and no
+ * longer can, because it reached VERIFIED on 2026-08-27.
  *
- * This guard has never fired in anger. Watching it fire deliberately is the
- * difference between "it is in place" and "it works".
+ * POSITIVE for `dummy/v0.2.0`, asserted rather than assumed: the flip from
+ * UNVERIFIED to VERIFIED is only real if the guard actually stops refusing.
  */
-test("dummy: the record builder REFUSES an UNVERIFIED blueprint", async () => {
+test("provenance guard: refuses an UNVERIFIED blueprint, admits a VERIFIED one", async () => {
   const deployment: any = await bootstrapProtocol();
   const client: any = await makeClient();
   const address = EvoAddress.toBech32(await client.address());
   const plb = deployment.programmableLogicBase.scriptHash;
 
-  // Reuse FES's fixture purely to obtain a non-empty parameterisation manifest;
-  // the refusal must depend on the BLUEPRINT's provenance, not on the events.
   const fes: any = await makeFesFixture(
     client,
     address,
-    Buffer.from("DUMMYGUARD").toString("hex") + deployment.txHash.slice(0, 6),
+    Buffer.from("GUARD").toString("hex") + deployment.txHash.slice(0, 6),
     plb
   );
-  assert.ok(fes.paramEvents.length > 0, "need a non-empty manifest to prove the refusal is about provenance");
+  assert.ok(fes.paramEvents.length > 0, "need a non-empty manifest so a refusal is about provenance");
 
+  // NEGATIVE — permanently unverifiable, so this case cannot rot.
   assert.throws(
-    () => buildDeploymentRecord(dummyBlueprintDir(), fes.paramEvents),
+    () => buildDeploymentRecord(standardV030Dir(), fes.paramEvents),
     (e: Error) => {
       assert.match(e.message, /UNVERIFIED/, "the refusal must name the provenance state");
       assert.match(
@@ -191,4 +190,11 @@ test("dummy: the record builder REFUSES an UNVERIFIED blueprint", async () => {
     },
     "a non-VERIFIED blueprint must never yield a CIP-171 record"
   );
+
+  // POSITIVE — dummy reached VERIFIED once its source commit became reachable
+  // and the artefact was rebuilt from it. Asserted, because "we flipped the
+  // field" and "the guard admits it" are different claims.
+  const dummyRecord: any = buildDeploymentRecord(dummyBlueprintDir(), fes.paramEvents);
+  assert.equal(dummyRecord.compilerVersion, "v1.1.21+42babe5", "dummy's OWN compiler, from its artefact");
+  assert.ok(dummyRecord.scripts.length > 0, "a VERIFIED blueprint must yield a populated record");
 });

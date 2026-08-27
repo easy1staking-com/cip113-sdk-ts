@@ -7,6 +7,11 @@ export function dummyBlueprintPath(): string {
   return resolve(ROOT, "blueprints/substandards/dummy/v0.2.0/plutus.json");
 }
 
+/** standard/v0.3.0 — PERMANENTLY UNVERIFIED, so it is a durable negative fixture. */
+export function standardV030Dir(): string {
+  return resolve(ROOT, "blueprints/standard/v0.3.0");
+}
+
 /** The dummy blueprint's DIRECTORY. */
 export function dummyBlueprintDir(): string {
   return resolve(ROOT, "blueprints/substandards/dummy/v0.2.0");

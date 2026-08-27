@@ -113,7 +113,7 @@ compiler required to reproduce it, and a `provenance` field:
 | `standard/v0.5.0-alpha.2` | **VERIFIED** |
 | `substandards/freeze-and-seize/v0.1.0` | **VERIFIED** |
 | `standard/v0.3.0` | `UNVERIFIED` — **not recoverable by pushing**: its pin names *no commit at all*, because the artefact matches no commit in upstream's history. A legacy blueprint; `src/` does not load it |
-| `substandards/dummy/v0.2.0` | `UNVERIFIED` — **one step from VERIFIED**: its commit is now reachable (`2e067fe`, PR #11) and the artefact there is byte-identical; only a rebuild at that commit with Aiken v1.1.21 remains |
+| `substandards/dummy/v0.2.0` | **VERIFIED** (2026-08-27) — rebuilt from `e63fa0a` with Aiken v1.1.21; sha256 byte-identical |
 | `substandards/dummy/v0.1.0` | `UNKNOWN` — **PERMANENT**: `upstream.repo` and `upstream.commit` are both null; the source project was never recorded anywhere in this repo, so there is no origin to recover and no push or rebuild can manufacture one |
 
 > **Do not emit a CIP-171 record for a blueprint that is not `VERIFIED`.** A record is a
