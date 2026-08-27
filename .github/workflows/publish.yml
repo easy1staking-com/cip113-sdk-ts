@@ -1,8 +1,19 @@
 name: Publish to npm
 
 on:
+  # ⛔ TWO TRIGGERS ON PURPOSE. A GitHub *release* is what a human creates; a
+  # *tag* is what they remember to push. Publishing fired only on `release`, so
+  # tag-and-push looked complete — commit pushed, tag on the remote, CI green
+  # beside it — and published nothing. That happened to v0.5.0 AND v0.6.0, the
+  # second time WITH a written warning in hand.
+  #
+  # ⇒ Restating a step whose omission is silent does not work. The gap is closed
+  # here instead: either path publishes, and the guard below makes the overlap
+  # a no-op rather than a duplicate-publish failure.
   release:
     types: [published]
+  push:
+    tags: ["v*"]
 
 permissions:
   id-token: write
@@ -21,4 +32,39 @@ jobs:
       - run: npm --version
       - run: npm ci
       - run: npm run build
-      - run: npm publish --access public
+      # Idempotent: with two triggers a tag push and a release can both fire.
+      # Skip rather than fail — a red workflow on an already-published version
+      # trains people to ignore red workflows.
+      - name: Skip if this version is already on the registry
+        id: check
+        run: |
+          V=$(node -p "require('./package.json').version")
+          LIVE=$(curl -s "https://registry.npmjs.org/@easy1staking%2Fcip113-sdk-ts" \
+                  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                      try{console.log(Object.keys(JSON.parse(s).versions||{}).join(' '))}catch{console.log('')}})")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if echo " $LIVE " | grep -q " $V "; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$V is already published; skipping"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.already == 'false'
+        run: npm publish --access public
+
+      # ⛔ VERIFY AGAINST THE RAW REGISTRY, CHAINED SO IT GATES RATHER THAN LOGS.
+      # `npm view` serves a client cache — it returned the PREVIOUS version
+      # thirty seconds after a successful publish today, and a green workflow
+      # plus a stale client is indistinguishable from a publish that failed.
+      - name: Verify the registry actually has it
+        run: |
+          V="${{ steps.check.outputs.version }}"
+          for i in $(seq 1 20); do
+            LATEST=$(curl -s "https://registry.npmjs.org/@easy1staking%2Fcip113-sdk-ts" \
+                      | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
+                          try{console.log(JSON.parse(s)['dist-tags'].latest)}catch{console.log('')}})")
+            [ "$LATEST" = "$V" ] && { echo "registry dist-tags.latest = $LATEST"; exit 0; }
+            sleep 10
+          done
+          echo "::error::registry never reported $V (last saw '$LATEST')"; exit 1
