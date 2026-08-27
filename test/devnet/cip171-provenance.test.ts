@@ -122,6 +122,35 @@ test("the bootstrap's CIP-171 record recomputes to the deployed script hashes", 
       unmatched.push(`${s.rawScriptHash} -> ${applied.hash} (not among the deployed hashes)`);
     }
   }
+  // ⇒ COVERAGE, THE OTHER HALF — AND IT IS A PINNED NUMBER ON PURPOSE.
+  //
+  // Recomputation proves every RECORDED script is real. It cannot prove that
+  // no USED script was omitted: a missing entry simply is not there to fail.
+  // That is exactly how FES shipped covering 3 of its 4 scripts.
+  //
+  // There is no general automatic test for "should this validator have been
+  // covered?" — core's issuance_mint is legitimately absent (its parameter
+  // `minting_logic_cred` is a SUBSTANDARD's identity, which core does not
+  // have), while FES's blacklist_spend was a real omission. Both look like
+  // "one fewer than the blueprint holds".
+  //
+  // So the number is PINNED. If coverage changes in either direction this
+  // fails, and a human decides which case it is. A guard that cannot decide
+  // should stop, not guess.
+  const distinctInBlueprint = new Set(
+    (blueprint.validators ?? [])
+      .filter((v: any) => v.compiledCode)
+      .map((v: any) => computeScriptHash(v.compiledCode).toLowerCase())
+  ).size;
+  assert.equal(
+    record.scripts.length,
+    11,
+    `core's record must cover exactly 11 scripts of the blueprint's ${distinctInBlueprint}. ` +
+      `The one absent is issuance_mint, which takes a substandard's minting_logic_cred and ` +
+      `therefore CANNOT be parameterised by a core deployment. If this number moved, decide ` +
+      `deliberately whether a script became coverable or one was dropped — do not adjust it.`
+  );
+
   assert.deepEqual(
     unmatched,
     [],
