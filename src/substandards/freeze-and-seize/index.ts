@@ -325,6 +325,19 @@ export function freezeAndSeizeSubstandard(config: {
    * ⇒ Derive the record from this, never from a hand-written list. A second
    * list agrees with the deployment right up until it does not, and the
    * disagreement surfaces only as a hash that verifies to nothing.
+   *
+   * ⚠ FIRES ONCE PER PARAMETERISATION, NOT ONCE PER DISTINCT SCRIPT, and this
+   * plugin parameterises inside `init`. So initialising twice — a re-render, or
+   * `CIP113.init` alongside a direct `init` on this plugin — appends a SECOND
+   * full set: 8 events, still 4 distinct scripts.
+   *
+   * ⇒ DEDUPE BY `rawScriptHash` BEFORE COUNTING. A guard that pins the expected
+   * number against the raw event count refuses a perfectly correct record on
+   * the second init, and the failure looks like a coverage bug rather than a
+   * lifecycle one.
+   *
+   * The raw stream is deliberately not deduped here: it carries application
+   * ORDER, which the record depends on and a deduped set would lose.
    */
   onParameterize?: (event: ParameterizationEvent) => void;
 }): SubstandardPlugin {

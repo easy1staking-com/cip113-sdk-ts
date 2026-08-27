@@ -72,3 +72,19 @@ test("FES plugin: accepts an onParameterize and does not require it", () => {
   assert.ok(freezeAndSeizeSubstandard({ blueprint: BP, deployment }));
   assert.ok(freezeAndSeizeSubstandard({ blueprint: BP, deployment, onParameterize: () => {} }));
 });
+
+test("FES recorder: fires per parameterisation, so a second pass appends", () => {
+  // Documented contract, asserted so it cannot drift into a surprise. A
+  // consumer that pins its expected count against the RAW EVENT COUNT will
+  // refuse a correct record the second time the plugin initialises — and the
+  // failure reads as a coverage bug rather than a lifecycle one.
+  const events = [];
+  driveRegisterPath((e) => events.push(e));
+  driveRegisterPath((e) => events.push(e));
+  assert.equal(events.length, 8, "append-only: one event per parameterisation");
+  assert.equal(
+    new Set(events.map((e) => e.rawScriptHash.toLowerCase())).size,
+    4,
+    "still 4 DISTINCT scripts — dedupe by rawScriptHash before counting"
+  );
+});
