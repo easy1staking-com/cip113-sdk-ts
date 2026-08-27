@@ -195,8 +195,28 @@ export function dummySubstandard(config: {
     changeAddress: string,
     extra: { tokenPolicyId?: string; unit?: string; outputIndices?: Record<string, number> } = {}
   ): Promise<UnsignedTx> {
+    // ⛔ NEVER LET COIN SELECTION REACH A REFERENCE-SCRIPT UTxO.
+    //
+    // Without `availableUtxos` the builder queries the wallet itself and may
+    // spend ANYTHING in it — including outputs carrying reference scripts.
+    // Spending one destroys protocol infrastructure silently: the script_ref is
+    // not carried into the change output, nothing errors, and the damage
+    // surfaces only when a later operation needs the script.
+    //
+    // MEASURED on preview: two of a LIVE deployment's four reference scripts
+    // were consumed this way during a failed retry — the deployment two
+    // VERIFIED CIP-171 records describe. On mainnet the same selection spends
+    // live reference scripts that running contracts depend on, and it looks
+    // like a successful transaction.
+    //
+    // The rule needs no knowledge of whose deployment a script belongs to: if a
+    // wallet UTxO carries a reference script, it is infrastructure, not funds.
+    const walletUtxos: Array<{ scriptRef?: unknown }> = await (ctx.client as any).getUtxos(
+      EvoAddress.fromBech32(changeAddress)
+    );
     const result = await (tx as any).build({
       changeAddress: EvoAddress.fromBech32(changeAddress),
+      availableUtxos: walletUtxos.filter((u) => !u.scriptRef),
       ...(ctx.evaluator ? { evaluator: ctx.evaluator } : {}),
     });
     const txObj = await result.toTransaction();

@@ -194,6 +194,27 @@ function spendableWalletUtxos(
       .map((r) => `${r.txHash}#${r.outputIndex}`)
   );
   return walletUtxos.filter((u) => {
+    // ⛔ ANY UTxO CARRYING A REFERENCE SCRIPT IS OFF LIMITS, not merely the four
+    // this deployment names.
+    //
+    // MEASURED, THE EXPENSIVE WAY: the named-four filter was not enough. A
+    // long-lived wallet accumulates reference scripts from EVERY deployment it
+    // has ever made, and coin selection is free to spend any of them. On
+    // preview it consumed two of the LIVE deployment's own four during a
+    // failed retry — the deployment two VERIFIED CIP-171 records describe —
+    // because those four were reached through a path that did not consult this
+    // filter at all.
+    //
+    // Spending one destroys protocol infrastructure silently: the script_ref is
+    // not carried into the change output, nothing errors, and the damage
+    // surfaces only when a later operation needs the script. On mainnet this is
+    // spending live reference scripts that running contracts depend on, and it
+    // would look like a successful transaction.
+    //
+    // The safe rule needs no knowledge of WHOSE deployment a script belongs to:
+    // if a wallet UTxO carries a reference script, it is infrastructure, not
+    // funds.
+    if ((u as { scriptRef?: unknown }).scriptRef) return false;
     const i = utxoToTxInput(u);
     return !reserved.has(`${i.txHash}#${i.outputIndex}`);
   });
