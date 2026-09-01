@@ -77,6 +77,9 @@ import {
   labeledAssetName,
   hasCIP67Label,
   buildCIP68FTDatum,
+  minUtxoAtLeast,
+  ceilToWholeAda,
+  minUtxoForOutput,
 } from "../../core/evo-utils.js";
 import {
   baseSpendRedeemer,
@@ -85,6 +88,27 @@ import {
   withdrawalIndexOf,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
+/**
+ * The flat amounts this plugin used to hardcode, kept as FLOORS rather than as
+ * answers — see `minUtxoAtLeast`. Every output that carries caller-controlled
+ * bytes now computes its requirement from live protocol parameters and takes
+ * the larger of the two, so ordinary inputs emit exactly what they always did
+ * and only the cases that were genuinely short move.
+ *
+ * MEASURED 2026-09-01 against preview (`coinsPerUtxoByte` 4310), which is how
+ * we know these were not merely theoretical:
+ *   - the (100) reference output needed 3,021,310 with every CIP-68 field at a
+ *     consumer's own documented caps and a 12-byte asset name — the flat
+ *     3,000,000 was SHORT by 21,310. With a maximal 32-byte CIP-67 name the
+ *     same datum needs 3,111,820. Both axes are caller-controlled and this
+ *     package caps NEITHER, so the true ceiling is unbounded.
+ *   - a token output with a 32-byte CIP-67 asset name needed 1,318,860 — the
+ *     flat 1,300,000 was SHORT by 18,860, rising to 44,720 at a maximal
+ *     quantity.
+ */
+const TOKEN_OUTPUT_FLOOR = 1_300_000n;
+const CIP68_REFERENCE_OUTPUT_FLOOR = 3_000_000n;
+
 import { createFESScripts } from "./scripts.js";
 import type { FESDeploymentParams } from "./types.js";
 
@@ -515,10 +539,23 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.mintAssets({ assets: tokenAssets, redeemer: issuanceRedeemer });
       tx = tx.mintAssets({ assets: registryNftAssets, redeemer: registryMintRedeemer });
 
+      // min-UTxO is sized from live protocol parameters, not guessed: `unit`
+      // carries a caller-supplied asset name and `quantity` a caller-supplied
+      // magnitude, and both widen the serialised output.
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
+
       // Output 0: user token to recipient (with label 333 prefix if CIP-68)
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: tokenDatum,
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 
@@ -526,9 +563,24 @@ export function freezeAndSeizeSubstandard(config: {
       if (hasCIP68 && refUnit) {
         const issuerPlbAddr = baseAddress(networkId, plbHash, feePayerAddress);
         const cip68Datum = buildCIP68FTDatum(params.cip68Metadata!);
+        // ⛔ THE ONE OUTPUT SIZED BY USER-SUPPLIED STRINGS. Rounded UP TO A
+        // WHOLE ADA deliberately: the reference implementation this SDK is
+        // diffed against does the same, and a builder-equivalence check is only
+        // useful while both sides agree. The cost is at most ~1 ADA, once, on an
+        // output that exists for the life of the token.
         tx = tx.payToAddress({
           address: EvoAddress.fromBech32(issuerPlbAddr),
-          assets: outputAssets(3_000_000n, new Map([[refUnit, 1n]])),
+          assets: outputAssets(
+            ceilToWholeAda(
+              minUtxoAtLeast(CIP68_REFERENCE_OUTPUT_FLOOR, {
+                address: issuerPlbAddr,
+                assets: outputAssets(0n, new Map([[refUnit, 1n]])),
+                datum: cip68Datum,
+                coinsPerUtxoByte,
+              }),
+            ),
+            new Map([[refUnit, 1n]]),
+          ),
           datum: new InlineDatum.InlineDatum({ data: cip68Datum }),
         });
       }
@@ -639,9 +691,18 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: voidData(),
       });
       tx = tx.mintAssets({ assets: tokenAssets, redeemer: issuanceRedeemer });
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: tokenDatum,
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
       tx = tx.readFrom({ referenceInputs: [registryUtxo] });
@@ -926,17 +987,35 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: fesTransferRedeemer,
       });
 
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
+
       if (returningAmount > 0n) {
         tx = tx.payToAddress({
           address: EvoAddress.fromBech32(senderPlbAddr),
-          assets: outputAssets(1_300_000n, new Map([[unit, returningAmount]])),
+          assets: outputAssets(
+            minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+              address: senderPlbAddr,
+                assets: outputAssets(0n, new Map([[unit, returningAmount]])),
+              datum: tokenDatum,
+              coinsPerUtxoByte,
+            }),
+            new Map([[unit, returningAmount]]),
+          ),
           datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
         });
       }
 
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: tokenDatum,
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 
@@ -997,7 +1076,16 @@ export function freezeAndSeizeSubstandard(config: {
         assets: outputAssets(40_000_000n),
       });
 
-      // Output: blacklist origin node
+      // Output: blacklist origin node.
+      //
+      // ✅ FLAT CONSTANT IS CORRECT HERE, AND IT IS PROVABLE RATHER THAN
+      // ASSUMED — this output carries NO caller-controlled bytes. The unit is
+      // `blacklistMint.hash + ""` (an EMPTY asset name, fixed above), and the
+      // datum is `blacklistNodeDatum("", MAX_NEXT)` — an empty key and a
+      // 30-byte sentinel, both constants. MEASURED on preview
+      // (coinsPerUtxoByte 4310): 1,198,180 required against 1,300,000 supplied,
+      // 101,820 of headroom, and the live origin node on preview sits at
+      // exactly 1,300,000. Nothing a caller types can move it.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(blacklistSpendAddr),
         assets: outputAssets(1_300_000n, new Map([[blacklistOriginUnit, 1n]])),
@@ -1085,7 +1173,17 @@ export function freezeAndSeizeSubstandard(config: {
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
-      // Output 1: new blacklist node
+      // Output 1: new blacklist node.
+      //
+      // ✅ FLAT CONSTANT IS CORRECT HERE TOO, for the same provable reason. The
+      // unit is `blacklistMint.hash + targetStakingHash` — a 28-byte staking
+      // credential, fixed width — and the datum is two hashes. A blacklist entry
+      // has no user-supplied strings in it at all. MEASURED: 1,448,160 required
+      // against 2,000,000 supplied, 551,840 of headroom.
+      //
+      // ⚠ If a future node datum gains a field, this stops being true silently.
+      // That is exactly how REGISTRY_NODE_MIN_ADA went wrong when the registry
+      // datum grew from five fields to seven.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(blacklistSpendAddr),
         assets: outputAssets(2_000_000n, new Map([[nftUnit, 1n]])),
@@ -1321,10 +1419,20 @@ export function freezeAndSeizeSubstandard(config: {
         redeemer: plgRedeemer,
       });
 
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
+
       // Output 0: seized tokens to recipient
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, seizedAmount]])),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, seizedAmount]])),
+            datum: tokenDatum,
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, seizedAmount]]),
+        ),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 

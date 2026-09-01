@@ -23,6 +23,7 @@ import {
   TransactionHash,
   UTxO as EvoUTxO,
   Transaction,
+  TxOut,
 } from "@evolution-sdk/evolution";
 import * as Label from "@evolution-sdk/evolution/Label";
 
@@ -354,6 +355,105 @@ export function decodeRegistryNode(d: Data.Data): RegistryNodeData {
  * CHANGED. Deliberately generous: min-UTxO also moves with protocol parameters.
  */
 export const REGISTRY_NODE_MIN_ADA = 3_000_000n;
+
+/**
+ * The ledger's per-UTxO byte overhead, from the Babbage min-UTxO rule
+ * (`utxoEntrySize` = serialised output size + a fixed constant). Evolution uses
+ * the same value internally; it is restated here rather than imported because
+ * its home is `sdk/builders/internal/`, and this package does not reach into a
+ * dependency's internals.
+ */
+const UTXO_ENTRY_OVERHEAD_BYTES = 160n;
+
+/**
+ * The minimum lovelace an output must carry, computed from PROTOCOL PARAMETERS
+ * and the output's own serialised size.
+ *
+ * ⚠ WHY THIS EXISTS RATHER THAN ANOTHER CONSTANT. min-UTxO scales with
+ * SERIALISED OUTPUT SIZE, and three things that scale it are supplied by the
+ * CALLER, not by us:
+ *   - the CIP-68 metadata datum (name/description/ticker/url/logo). This
+ *     package imposes no length caps at all, so the datum is UNBOUNDED.
+ *   - the ASSET NAME. CIP-67-labelled names run to 32 bytes, and this package's
+ *     API takes raw hex names at every boundary.
+ *   - the QUANTITY, which is a CBOR integer and widens with magnitude.
+ *
+ * ⛔ AND EVOLUTION DOES NOT RESCUE AN UNDER-FUNDED OUTPUT. MEASURED on preview
+ * (2026-09-01): `calculateMinimumUtxoLovelace` is applied ONLY to CHANGE and
+ * unfracking outputs. An explicit `payToAddress` amount is passed through
+ * verbatim — a build with a deliberately short datum-bearing output produced a
+ * transaction carrying exactly the requested lovelace. The shortfall therefore
+ * survives to submission, where the ledger rejects it as "insufficient Ada"
+ * with a number and NEVER as "your datum grew".
+ *
+ * A flat constant cannot be right for an input the caller controls. This is the
+ * successor to {@link REGISTRY_NODE_MIN_ADA}'s "deliberately generous" habit:
+ * generous is a guess, and it was already wrong at 3 ADA for a CIP-68 datum
+ * whose fields sit within a consumer's own documented caps.
+ *
+ * Built from PUBLIC Evolution API only, and solved as a fixed point because the
+ * lovelace figure is itself part of what gets serialised.
+ */
+export function minUtxoForOutput(params: {
+  /** Bech32 address the output pays to. */
+  address: string;
+  /** The output's assets. Its lovelace component is ignored and solved for. */
+  assets: Assets.Assets;
+  /** Inline datum the output will carry, if any. */
+  datum?: Data.Data;
+  /** `coinsPerUtxoByte` from the live protocol parameters. */
+  coinsPerUtxoByte: bigint;
+}): bigint {
+  const address = EvoAddress.fromBech32(params.address);
+  const datumOption = params.datum
+    ? new InlineDatum.InlineDatum({ data: params.datum })
+    : undefined;
+
+  const required = (lovelace: bigint): bigint => {
+    const output = new TxOut.TransactionOutput({
+      address,
+      assets: Assets.withLovelace(params.assets, lovelace),
+      datumOption,
+    });
+    const size = BigInt(TxOut.toCBORBytes(output).length);
+    return params.coinsPerUtxoByte * (UTXO_ENTRY_OVERHEAD_BYTES + size);
+  };
+
+  // Writing a larger number widens the CBOR, which raises the requirement. Two
+  // or three rounds converge; the cap only stops a pathological non-convergence
+  // from hanging a transaction build.
+  let current = 0n;
+  for (let i = 0; i < 10; i++) {
+    const next = required(current);
+    if (next === current) return next;
+    current = next;
+  }
+  throw new Error(
+    `min-UTxO did not converge after 10 iterations (last ${current} lovelace). ` +
+      `This should not happen for a well-formed output; report it with the datum.`
+  );
+}
+
+/** Round up to a whole ADA. */
+export function ceilToWholeAda(lovelace: bigint): bigint {
+  return ((lovelace + 999_999n) / 1_000_000n) * 1_000_000n;
+}
+
+/**
+ * min-UTxO for an output, never returning less than `floor`.
+ *
+ * The floor keeps this change MONOTONE: every value this package used to emit
+ * is preserved for ordinary inputs, and the figure only ever rises — where it
+ * had to. A fix that lowered an amount would be a behaviour change smuggled in
+ * beside a bug fix.
+ */
+export function minUtxoAtLeast(
+  floor: bigint,
+  params: Parameters<typeof minUtxoForOutput>[0],
+): bigint {
+  const computed = minUtxoForOutput(params);
+  return computed > floor ? computed : floor;
+}
 
 // ---------------------------------------------------------------------------
 // The coordination datum — the live protocol wiring

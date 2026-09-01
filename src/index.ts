@@ -374,6 +374,13 @@ export {
   paymentCredentialHash,
   getInlineDatum,
   REGISTRY_NODE_MIN_ADA,
+  // min-UTxO computed from live protocol parameters. Public because a consumer
+  // building its own outputs against this protocol needs the same arithmetic,
+  // and because a flat constant is wrong for any output whose size the caller
+  // controls — see the block comment on minUtxoForOutput.
+  minUtxoForOutput,
+  minUtxoAtLeast,
+  ceilToWholeAda,
   stringToHex,
   MAX_NEXT,
   voidData,
