@@ -424,24 +424,26 @@ export function dummySubstandard(config: {
 
       const paramsUtxo = await findParamsUtxo();
       const issuanceCborUtxo = await findIssuanceCborUtxo();
-      // ⛔ THE PROTOCOL-PARAMS REFERENCE INPUT STAYS, AND NOT BY OVERSIGHT.
+      // ⛔ THE PROTOCOL-PARAMS REFERENCE INPUT STAYS — and as of S-11 that is a
+      // MEASURED decision, not a cautious one.
       //
-      // alpha.3's registry no longer reads it: the merged validator derives the
-      // node policy from its OWN input's payment credential, so a registry-node
-      // spend has no reference-input requirement of its own any more (#117).
-      // That made "drop it from registry spends" look like free fee savings.
+      // alpha.3's registry no longer reads it (#117). `issuance_mint` does, to
+      // pull the LIVE delegate credentials from its datum, and that locate is
+      // DELIBERATELY NON-FAILING: absent params UTxO means "no delegation",
+      // falling back to local `no_escape` custody. So removing it raises no
+      // error — it silently selects a different custody path.
       //
-      // It is not free HERE, because a second script in this same transaction
-      // reads it. `issuance_mint` locates the params UTxO among the reference
-      // inputs and pulls the LIVE delegate credentials out of its datum — and
-      // that locate is DELIBERATELY NON-FAILING: absent params UTxO means "no
-      // delegation", falling back to local `no_escape` custody. So removing it
-      // does not raise an error, it SILENTLY SELECTS A DIFFERENT CUSTODY PATH.
+      // MEASURED ON DEVNET (S-11): removing it from BOTH substandards' register
+      // paths, the full lifecycle still passes — dummy 2/2, FES 3/3. The two
+      // custody branches do converge here, as the reasoning predicted.
       //
-      // Whether the two paths agree for this transaction is a question about
-      // ledger behaviour, and this repo cannot answer it offline. Left attached
-      // until a devnet run can measure it (S-11). A reference input costs bytes;
-      // a silently different custody model costs more.
+      // ⇒ AND IT STAYS ANYWAY, for a reason the measurement itself supplies:
+      // the tests pass EITHER WAY. That is precisely what makes dropping it
+      // unsafe to keep. Nothing in this suite would notice if `issuance_mint`'s
+      // delegation semantics changed and the absent input started to matter —
+      // the guard against that is the input being there, not a test. The saving
+      // is one reference input on a once-per-token transaction; the exposure is
+      // a silent custody change nobody would see.
       tx = tx.readFrom({ referenceInputs: [paramsUtxo, issuanceCborUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
