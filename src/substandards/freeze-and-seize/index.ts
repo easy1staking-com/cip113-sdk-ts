@@ -86,6 +86,8 @@ import {
   transferRedeemer,
   thirdPartyRedeemer,
   withdrawalIndexOf,
+  plbWithdrawalPlan,
+  programmableLogicGlobalRedeemer,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
 /**
@@ -777,10 +779,12 @@ export function freezeAndSeizeSubstandard(config: {
         isScript: true,
       };
       const issuerAuthorityKey: WithdrawalKey = { hash: scripts.issuerAdmin.hash, isScript: true };
-      const thirdPartyWdrlIdx = withdrawalIndexOf(
-        [thirdPartyKey, issuerAuthorityKey],
-        thirdPartyKey
-      );
+      // alpha.3: the DISPATCHER withdraws on every programmable transaction and
+      // PLB's wdrl_idx points at IT, not at the delegate.
+      const plan = plbWithdrawalPlan({
+        plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
+        others: [thirdPartyKey, issuerAuthorityKey],
+      });
 
       // outputs_start_idx = 0: `third_party` PAIRS each programmable input with
       // the NEXT output (same address, datum and reference script, lovelace
@@ -788,12 +792,9 @@ export function freezeAndSeizeSubstandard(config: {
       // outputs must therefore sit AMONG THE LEADING ones it skips.
       // See docs/api-reference.md — getting this backwards fails with an EMPTY
       // TRACE LIST, because it is a structural expect and not a traced check.
-      const plgRedeemer = thirdPartyRedeemer(paramsIdx, registryIdx, 0);
-      const plbSpendRedeemer = baseSpendRedeemer(
-        "THIRD_PARTY",
-        paramsIdx,
-        thirdPartyWdrlIdx
-      );
+      // params_idx dropped: delegates no longer read the params datum.
+      const plgRedeemer = thirdPartyRedeemer(registryIdx, 0);
+      const plbSpendRedeemer = baseSpendRedeemer(paramsIdx, plan.plgIdx);
       const tokenDatum = voidData();
 
       // 5. Compute remaining assets (remove burned token's policy)
@@ -821,6 +822,15 @@ export function freezeAndSeizeSubstandard(config: {
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
         amount: 0n,
         redeemer: voidData(),
+      });
+      // The DISPATCHER's own withdraw-0 — new in alpha.3, required on every
+      // programmable transaction, and the entry PLB's wdrl_idx resolves to.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))
+        ),
+        amount: 0n,
+        redeemer: programmableLogicGlobalRedeemer("THIRD_PARTY"),
       });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(
@@ -928,15 +938,19 @@ export function freezeAndSeizeSubstandard(config: {
       // 9. Build redeemers — 0.5.x shapes.
       //
       // The withdrawal set must be COMPLETE and in LEDGER order: script
-      // credentials before key credentials, bytewise within each. This
-      // transaction carries two, both scripts — the framework's `transfer`
-      // delegate and this substandard's own transfer logic.
+      // credentials before key credentials, bytewise within each. alpha.3 makes
+      // it THREE, all scripts — the dispatcher, the framework's `transfer`
+      // delegate, and this substandard's own transfer logic. Every index in the
+      // transaction shifted when the dispatcher joined.
       const coreTransferKey: WithdrawalKey = {
         hash: ctx.standardScripts.transfer.hash,
         isScript: true,
       };
       const fesLogicKey: WithdrawalKey = { hash: scripts.transfer.hash, isScript: true };
-      const transferWdrlIdx = withdrawalIndexOf([coreTransferKey, fesLogicKey], coreTransferKey);
+      const transferPlan = plbWithdrawalPlan({
+        plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
+        others: [coreTransferKey, fesLogicKey],
+      });
 
       if (process.env.DUMP_TX_STRUCTURE) {
         // Computed indices, printed beside the artefact's own order so the two
@@ -951,22 +965,19 @@ export function freezeAndSeizeSubstandard(config: {
             `  registryIdx=${registryIdx}\n` +
             `  coreTransfer=${ctx.standardScripts.transfer.hash}\n` +
             `  fesLogic    =${scripts.transfer.hash}\n` +
-            `  transferWdrlIdx=${transferWdrlIdx}\n` +
+            `  plgWdrlIdx=${transferPlan.plgIdx}\n` +
             "=== END COMPUTED ==="
         );
       }
       const fesTransferRedeemer = Data.list(
         proofIndices.map((idx) => Data.constr(0n, [Data.int(BigInt(idx))]))
       );
-      // TransferRedeemer { params_idx, proofs } — params_idx was PREPENDED by
-      // #109; an old TransferAct encoder's bytes are not compatible.
-      const plgRedeemer = transferRedeemer(paramsIdx, [
-        { type: "exists", nodeIdx: registryIdx },
-      ]);
-      // programmable_logic_base no longer takes an untyped redeemer: it
-      // dispatches on the constructor and witnesses where its delegate's
-      // withdrawal sits.
-      const spendRdmr = baseSpendRedeemer("TRANSFER", paramsIdx, transferWdrlIdx);
+      // TransferRedeemer { proofs } — params_idx was dropped in alpha.3; the
+      // delegates stop reading the params datum entirely.
+      const plgRedeemer = transferRedeemer([{ type: "exists", nodeIdx: registryIdx }]);
+      // PLB witnesses where the DISPATCHER's withdrawal sits; the dispatch
+      // choice itself moved to the dispatcher's own redeemer.
+      const spendRdmr = baseSpendRedeemer(paramsIdx, transferPlan.plgIdx);
       const tokenDatum = voidData();
 
       // 10. Build transaction
@@ -978,6 +989,15 @@ export function freezeAndSeizeSubstandard(config: {
       // resolves the withdrawal at `wdrl_idx` and requires it to equal the
       // credential the params datum names for THIS dispatch arm, so withdrawing
       // the wrong delegate fails the spend with an empty trace list.
+      // The DISPATCHER's own withdraw-0 — new in alpha.3, required on every
+      // programmable transaction, and the entry PLB's wdrl_idx resolves to.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))
+        ),
+        amount: 0n,
+        redeemer: programmableLogicGlobalRedeemer("TRANSFER"),
+      });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(
           new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))
@@ -1370,10 +1390,12 @@ export function freezeAndSeizeSubstandard(config: {
         isScript: true,
       };
       const issuerAuthorityKey: WithdrawalKey = { hash: scripts.issuerAdmin.hash, isScript: true };
-      const thirdPartyWdrlIdx = withdrawalIndexOf(
-        [thirdPartyKey, issuerAuthorityKey],
-        thirdPartyKey
-      );
+      // alpha.3: the DISPATCHER withdraws on every programmable transaction and
+      // PLB's wdrl_idx points at IT, not at the delegate.
+      const plan = plbWithdrawalPlan({
+        plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
+        others: [thirdPartyKey, issuerAuthorityKey],
+      });
 
       // outputs_start_idx = 1: `third_party` PAIRS each programmable input with
       // the NEXT output (same address, datum and reference script, lovelace
@@ -1381,12 +1403,9 @@ export function freezeAndSeizeSubstandard(config: {
       // outputs must therefore sit AMONG THE LEADING ones it skips.
       // See docs/api-reference.md — getting this backwards fails with an EMPTY
       // TRACE LIST, because it is a structural expect and not a traced check.
-      const plgRedeemer = thirdPartyRedeemer(paramsIdx, registryIdx, 1);
-      const plbSpendRedeemer = baseSpendRedeemer(
-        "THIRD_PARTY",
-        paramsIdx,
-        thirdPartyWdrlIdx
-      );
+      // params_idx dropped: delegates no longer read the params datum.
+      const plgRedeemer = thirdPartyRedeemer(registryIdx, 1);
+      const plbSpendRedeemer = baseSpendRedeemer(paramsIdx, plan.plgIdx);
       const tokenDatum = voidData();
 
       // 5. Build recipient PLB address
@@ -1415,6 +1434,15 @@ export function freezeAndSeizeSubstandard(config: {
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
         amount: 0n,
         redeemer: voidData(),
+      });
+      // The DISPATCHER's own withdraw-0 — new in alpha.3, required on every
+      // programmable transaction, and the entry PLB's wdrl_idx resolves to.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(
+          new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))
+        ),
+        amount: 0n,
+        redeemer: programmableLogicGlobalRedeemer("THIRD_PARTY"),
       });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(

@@ -154,45 +154,148 @@ export function withdrawalIndexOf(
   return idx;
 }
 
+/**
+ * The withdrawal plan for a programmable-token transaction.
+ *
+ * ⛔ EXISTS TO MAKE THE DISPATCHER UNFORGETTABLE. alpha.3 adds one withdraw-0 to
+ * EVERY programmable transaction — the dispatcher's — and `programmable_logic_base`
+ * resolves `wdrl_idx` against it. Omitting it from the set does not produce a
+ * missing-withdrawal error: it produces a set that is one entry short, so every
+ * index computed from it is wrong by one or more, and the failure surfaces as a
+ * credential-equality mismatch that names nothing.
+ *
+ * You cannot get `plgIdx` without having supplied `plgHash`, and the index is
+ * computed over the COMPLETE set including it. That is the whole point of
+ * returning them together rather than offering two helpers.
+ */
+export function plbWithdrawalPlan(params: {
+  /** programmable_logic_global's script hash — the credential PLB checks. */
+  plgHash: HexString;
+  /** Every OTHER withdrawal the final transaction will carry. */
+  others: readonly WithdrawalKey[];
+}): {
+  /** The complete set, unsorted — pass it on if another index is needed. */
+  all: WithdrawalKey[];
+  /** Position of the dispatcher's withdrawal — this is PLB's `wdrl_idx`. */
+  plgIdx: number;
+  /** Position of any other member of the set. */
+  indexOf(target: WithdrawalKey): number;
+} {
+  const plgKey: WithdrawalKey = { hash: params.plgHash, isScript: true };
+  const all = [plgKey, ...params.others];
+
+  const dupes = all.filter(
+    (k, i) => all.findIndex((o) => compareWithdrawalKeys(o, k) === 0) !== i
+  );
+  if (dupes.length > 0) {
+    throw new Error(
+      `plbWithdrawalPlan: duplicate withdrawal credential ${dupes[0]!.hash}. A credential ` +
+        `occupies exactly one slot in the ledger's withdrawal map, so listing it twice ` +
+        `produces indices that do not match the transaction the builder emits.`
+    );
+  }
+
+  return {
+    all,
+    plgIdx: withdrawalIndexOf(all, plgKey),
+    indexOf: (target) => withdrawalIndexOf(all, target),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // BaseSpendRedeemer — programmable_logic_base.spend
 // ---------------------------------------------------------------------------
 
 /**
- * Which delegate programmable_logic_base dispatches to.
+ * Build a `BaseSpendRedeemer { params_idx, wdrl_idx }`.
  *
- * Constructor indices are the on-chain contract: 0/1/2. Exactly one framework
- * delegate may be invoked per transaction.
- */
-export const BaseSpendVia = {
-  TRANSFER: 0n,
-  THIRD_PARTY: 1n,
-  UNFRACKING: 2n,
-} as const;
-
-export type BaseSpendVariant = keyof typeof BaseSpendVia;
-
-/**
- * Build a BaseSpendRedeemer.
+ * ⛔ THIS IS THE MOST DANGEROUS CHANGE IN THE alpha.3 MIGRATION, AND IT IS
+ * DANGEROUS BECAUSE IT IS INVISIBLE. In alpha.2 this redeemer was an ENUM of
+ * three constructors — `SpendViaTransfer` / `SpendViaThirdParty` /
+ * `SpendViaUnfracking` — each carrying the same two ints. It is now a single
+ * RECORD.
  *
- * Replaces the untyped redeemer of 0.3.x and the bare `Int` of #109. Every
- * programmable_logic_base input in the transaction needs one.
+ * `SpendViaTransfer(a, b)` encoded as `Constr(0, [Int, Int])`.
+ * `BaseSpendRedeemer { a, b }` encodes as `Constr(0, [Int, Int])`.
+ *
+ * THEY ARE BYTE-IDENTICAL. A stale builder emitting the old transfer variant
+ * produces a perfectly valid new redeemer that DECODES CLEANLY. Only the other
+ * two variants (constructors 1 and 2) fail outright — so the failure is
+ * ASYMMETRIC, and the path that stays silent is the transfer path, i.e. the
+ * common one.
+ *
+ * ⚠ AND `wdrl_idx` CHANGED WHAT IT POINTS AT, not merely where. The chain is
+ * now `PLB -> params[plg_cred] -> PLG -> delegate`: this index selects the
+ * DISPATCHER'S withdrawal, and the validator compares that entry against
+ * `plg_cred` from the params datum. In alpha.2 it selected the DELEGATE'S. A
+ * stale index therefore resolves to the wrong credential and fails an equality
+ * check — reported as a mismatch, never as "your redeemer is from the previous
+ * protocol version".
+ *
+ * ⇒ The variant is gone from this redeemer entirely. It moved to the
+ * dispatcher: see {@link programmableLogicGlobalRedeemer}. Passing one here is
+ * refused loudly rather than silently encoded.
  */
-export function baseSpendRedeemer(
-  via: BaseSpendVariant,
-  paramsIdx: number,
-  wdrlIdx: number
-): Data.Data {
+export function baseSpendRedeemer(paramsIdx: number, wdrlIdx: number): Data.Data {
+  // ⚠ A caller still on the alpha.2 signature passes the variant FIRST, so the
+  // legacy call `baseSpendRedeemer("TRANSFER", 0, 1)` lands its variant in
+  // paramsIdx. Name that specifically: "params_idx must be an integer" is true
+  // but sends the reader looking at their index arithmetic instead of at their
+  // SDK version.
+  if (typeof paramsIdx === "string") {
+    throw new Error(
+      `baseSpendRedeemer no longer takes a dispatch variant. It was ` +
+        `(via, params_idx, wdrl_idx) in 0.5.0-alpha.2 and is (params_idx, wdrl_idx) now: ` +
+        `programmable_logic_base dispatches to the single programmable_logic_global ` +
+        `credential, and the variant moved to that dispatcher's own redeemer — see ` +
+        `programmableLogicGlobalRedeemer("${paramsIdx}"). ⚠ wdrl_idx ALSO changed meaning: ` +
+        `it must now index the DISPATCHER's withdrawal, not the delegate's.`
+    );
+  }
   if (!Number.isInteger(paramsIdx) || paramsIdx < 0) {
     throw new Error(`baseSpendRedeemer: params_idx must be a non-negative integer, got ${paramsIdx}`);
   }
   if (!Number.isInteger(wdrlIdx) || wdrlIdx < 0) {
     throw new Error(`baseSpendRedeemer: wdrl_idx must be a non-negative integer, got ${wdrlIdx}`);
   }
-  return Data.constr(BaseSpendVia[via], [
-    Data.int(BigInt(paramsIdx)),
-    Data.int(BigInt(wdrlIdx)),
-  ]);
+  return Data.constr(0n, [Data.int(BigInt(paramsIdx)), Data.int(BigInt(wdrlIdx))]);
+}
+
+// ---------------------------------------------------------------------------
+// ProgrammableLogicGlobalRedeemer — the dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * Which delegate the DISPATCHER routes to. Field-less constructors; the index
+ * is the whole payload.
+ *
+ * These are the three constructors that used to live on BaseSpendRedeemer. They
+ * did not disappear in alpha.3 — they MOVED one level up.
+ */
+export const PlgAct = {
+  TRANSFER: 0n,
+  THIRD_PARTY: 1n,
+  UNFRACKING: 2n,
+} as const;
+
+export type PlgActVariant = keyof typeof PlgAct;
+
+/**
+ * Build a `ProgrammableLogicGlobalRedeemer`.
+ *
+ * Every programmable-token transaction now carries the dispatcher's withdraw-0
+ * in ADDITION to its delegate's, so every withdrawal index in the transaction
+ * shifts relative to alpha.2 — compute them over the complete set, last.
+ */
+export function programmableLogicGlobalRedeemer(via: PlgActVariant): Data.Data {
+  const idx = PlgAct[via];
+  if (idx === undefined) {
+    throw new Error(
+      `programmableLogicGlobalRedeemer: unknown act ${JSON.stringify(via)}. ` +
+        `Expected one of: ${Object.keys(PlgAct).join(", ")}.`
+    );
+  }
+  return Data.constr(idx, []);
 }
 
 // ---------------------------------------------------------------------------
@@ -205,17 +308,21 @@ export interface RegistryProofRef {
 }
 
 /**
- * `transfer`'s TransferRedeemer { params_idx, proofs }.
+ * `transfer`'s `TransferRedeemer { proofs }`.
  *
- * Single constructor 0, same field order as the old `TransferAct` with
- * `params_idx` prepended — so an old encoder's output is NOT compatible.
+ * ⚠ `params_idx` was DROPPED in alpha.3 — the delegates stop reading the params
+ * datum entirely. A stale two-argument call puts an Int where the proof list
+ * belongs, which is refused below rather than encoded into a malformed list.
  */
-export function transferRedeemer(
-  paramsIdx: number,
-  proofs: readonly RegistryProofRef[]
-): Data.Data {
+export function transferRedeemer(proofs: readonly RegistryProofRef[]): Data.Data {
+  if (!Array.isArray(proofs)) {
+    throw new Error(
+      `transferRedeemer takes only the proof list now — it was (params_idx, proofs) in ` +
+        `0.5.0-alpha.2. The delegates no longer read the protocol-params datum, so ` +
+        `params_idx is gone from all three delegate redeemers. Got ${typeof proofs}.`
+    );
+  }
   return Data.constr(0n, [
-    Data.int(BigInt(paramsIdx)),
     Data.list(
       proofs.map((p) =>
         Data.constr(p.type === "exists" ? 0n : 1n, [Data.int(BigInt(p.nodeIdx))])
@@ -224,27 +331,50 @@ export function transferRedeemer(
   ]);
 }
 
-/** `third_party`'s ThirdPartyRedeemer { params_idx, registry_node_idx, outputs_start_idx }. */
+/**
+ * ⛔ THE ONE THAT WOULD HAVE BEEN SILENT. `thirdPartyRedeemer` and
+ * `unfrackingRedeemer` went from THREE ints to TWO by dropping the FIRST. A
+ * stale three-argument call is not a type error in JavaScript: the first two
+ * arguments land in the two remaining slots and the third is ignored, so
+ * `(params_idx, registry_node_idx, outputs_start_idx)` silently encodes as
+ * `{ registry_node_idx: params_idx, outputs_start_idx: registry_node_idx }` —
+ * a well-formed redeemer with two wrong values and no complaint anywhere.
+ *
+ * Arity is therefore checked explicitly. TypeScript catches this for TS
+ * callers; `arguments.length` catches it for everyone else.
+ */
+function assertTwoArgs(fn: string, got: number): void {
+  if (got > 2) {
+    throw new Error(
+      `${fn} takes (registry_node_idx, outputs_start_idx) — TWO arguments. It took ` +
+        `(params_idx, registry_node_idx, outputs_start_idx) in 0.5.0-alpha.2 and the FIRST ` +
+        `was dropped, so a 3-argument call silently shifts both values one slot left and ` +
+        `encodes cleanly. Got ${got} arguments.`
+    );
+  }
+}
+
+/** `third_party`'s `ThirdPartyRedeemer { registry_node_idx, outputs_start_idx }`. */
 export function thirdPartyRedeemer(
-  paramsIdx: number,
   registryNodeIdx: number,
   outputsStartIdx: number
 ): Data.Data {
+  // eslint-disable-next-line prefer-rest-params
+  assertTwoArgs("thirdPartyRedeemer", arguments.length);
   return Data.constr(0n, [
-    Data.int(BigInt(paramsIdx)),
     Data.int(BigInt(registryNodeIdx)),
     Data.int(BigInt(outputsStartIdx)),
   ]);
 }
 
-/** `unfracking`'s UnfrackingRedeemer { params_idx, registry_node_idx, outputs_start_idx }. */
+/** `unfracking`'s `UnfrackingRedeemer { registry_node_idx, outputs_start_idx }`. */
 export function unfrackingRedeemer(
-  paramsIdx: number,
   registryNodeIdx: number,
   outputsStartIdx: number
 ): Data.Data {
+  // eslint-disable-next-line prefer-rest-params
+  assertTwoArgs("unfrackingRedeemer", arguments.length);
   return Data.constr(0n, [
-    Data.int(BigInt(paramsIdx)),
     Data.int(BigInt(registryNodeIdx)),
     Data.int(BigInt(outputsStartIdx)),
   ]);

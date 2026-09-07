@@ -46,6 +46,8 @@ import {
   thirdPartyRedeemer,
   referenceInputIndexOf,
   withdrawalIndexOf,
+  plbWithdrawalPlan,
+  programmableLogicGlobalRedeemer,
   compareTxInputs,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
@@ -514,8 +516,12 @@ export function dummySubstandard(config: {
         isScript: true,
       };
       const issuerAuthorityKey: WithdrawalKey = { hash: transferScript.hash, isScript: true };
-      const allWithdrawals: WithdrawalKey[] = [thirdPartyKey, issuerAuthorityKey];
-      const thirdPartyWdrlIdx = withdrawalIndexOf(allWithdrawals, thirdPartyKey);
+      // alpha.3: the DISPATCHER withdraws too, and PLB's wdrl_idx points at IT.
+      const plan = plbWithdrawalPlan({
+        plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
+        others: [thirdPartyKey, issuerAuthorityKey],
+      });
+      const allWithdrawals = plan.all;
 
       // ---- Output layout is the contract, and it is NOT the transfer layout --
       //
@@ -537,7 +543,9 @@ export function dummySubstandard(config: {
       // and submits happily and fails at evaluation with an empty trace list.
       const OUTPUTS_START_IDX = 1;
 
-      const spendRdmr = baseSpendRedeemer("THIRD_PARTY", paramsIdx, thirdPartyWdrlIdx);
+      // wdrl_idx targets the dispatcher; the ACT moves to the dispatcher's own
+      // redeemer. In alpha.2 both lived on this one redeemer.
+      const spendRdmr = baseSpendRedeemer(paramsIdx, plan.plgIdx);
 
       let tx = client.newTx();
       tx = tx.collectFrom({ inputs: selected, redeemer: spendRdmr });
@@ -581,10 +589,18 @@ export function dummySubstandard(config: {
         );
       }
 
+      // The dispatcher's own withdraw-0 — new in alpha.3, and required on every
+      // programmable transaction. Its redeemer carries the act that used to be
+      // BaseSpendRedeemer's constructor.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(hexToBytes(ctx.standardScripts.programmableLogicGlobal.hash)),
+        amount: 0n,
+        redeemer: programmableLogicGlobalRedeemer("THIRD_PARTY"),
+      });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(hexToBytes(ctx.standardScripts.thirdParty.hash)),
         amount: 0n,
-        redeemer: thirdPartyRedeemer(paramsIdx, registryIdx, OUTPUTS_START_IDX),
+        redeemer: thirdPartyRedeemer(registryIdx, OUTPUTS_START_IDX),
       });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(hexToBytes(transferScript.hash)),
@@ -655,19 +671,22 @@ export function dummySubstandard(config: {
         hash: ctx.standardScripts.transfer.hash,
         isScript: true,
       };
-      const allWithdrawals: WithdrawalKey[] = [
-        { hash: transferScript.hash, isScript: true },
-        coreTransferKey,
-      ];
-      const transferWdrlIdx = withdrawalIndexOf(allWithdrawals, coreTransferKey);
+      // alpha.3: the DISPATCHER withdraws too, and PLB's wdrl_idx points at IT.
+      const plan = plbWithdrawalPlan({
+        plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
+        others: [{ hash: transferScript.hash, isScript: true }, coreTransferKey],
+      });
+      const allWithdrawals = plan.all;
 
-      const coreTransferRedeemer = transferRedeemer(paramsIdx, [
+      // params_idx is gone from the delegate redeemer — delegates no longer
+      // read the params datum at all.
+      const coreTransferRedeemer = transferRedeemer([
         { type: "exists", nodeIdx: registryIdx },
       ]);
       const dummyTransferRedeemer = Data.int(200n);
-      // programmable_logic_base no longer takes an untyped redeemer: it dispatches
-      // on the constructor, and witnesses WHERE its delegate's withdrawal sits.
-      const spendRdmr = baseSpendRedeemer("TRANSFER", paramsIdx, transferWdrlIdx);
+      // programmable_logic_base witnesses where the DISPATCHER's withdrawal
+      // sits; the dispatch choice itself is the dispatcher's own redeemer.
+      const spendRdmr = baseSpendRedeemer(paramsIdx, plan.plgIdx);
       const tokenDatum = voidData();
 
       // 8. Get sender's staking credential
@@ -688,6 +707,12 @@ export function dummySubstandard(config: {
         redeemer: dummyTransferRedeemer,
       });
 
+      // The dispatcher's own withdraw-0 — new in alpha.3.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))),
+        amount: 0n,
+        redeemer: programmableLogicGlobalRedeemer("TRANSFER"),
+      });
       tx = tx.withdraw({
         stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(ctx.standardScripts.transfer.hash, "hex"))),
         amount: 0n,

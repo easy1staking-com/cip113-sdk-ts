@@ -475,10 +475,11 @@ export {
   compareWithdrawalKeys,
   sortWithdrawalKeys,
   withdrawalIndexOf,
-  BaseSpendVia,
+  PlgAct,
+  programmableLogicGlobalRedeemer,
   baseSpendRedeemer,
   transferRedeemer,
   thirdPartyRedeemer,
   unfrackingRedeemer,
 } from "./core/ledger-order.js";
-export type { WithdrawalKey, BaseSpendVariant, RegistryProofRef } from "./core/ledger-order.js";
+export type { WithdrawalKey, PlgActVariant, RegistryProofRef } from "./core/ledger-order.js";

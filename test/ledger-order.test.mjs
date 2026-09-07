@@ -20,6 +20,20 @@
  * The two disagree exactly when both kinds are present — which is the common
  * case as soon as a wallet adds a reward withdrawal during balancing. The test
  * below pins the direction so a "fix" toward the wire format goes red.
+ *
+ * ⛔ alpha.3 ADDS A SECOND, WORSE TRAP IN THE SAME FILE. BaseSpendRedeemer went
+ * from a three-constructor ENUM to a single-constructor RECORD, and
+ * `SpendViaTransfer(a, b)` encodes IDENTICALLY to `BaseSpendRedeemer{a, b}` —
+ * so a stale builder's bytes decode cleanly and fail only later, on a
+ * credential-equality check, because `wdrl_idx` now indexes the DISPATCHER's
+ * withdrawal rather than the delegate's. The other two variants (constructors 1
+ * and 2) fail loudly, so the silence is asymmetric and lands on the transfer
+ * path — the common one.
+ *
+ * That is demonstrated below rather than asserted: one test encodes both shapes
+ * and shows the bytes are equal. The guards that follow exist because no
+ * decoder can distinguish them, so the only place a stale call can be caught is
+ * the API surface.
  */
 
 import { test } from "node:test";
@@ -35,6 +49,9 @@ import {
   baseSpendRedeemer,
   transferRedeemer,
   thirdPartyRedeemer,
+  unfrackingRedeemer,
+  programmableLogicGlobalRedeemer,
+  plbWithdrawalPlan,
 } from "../dist/core/ledger-order.js";
 import { sortTxInputs } from "../dist/core/registry.js";
 
@@ -192,52 +209,158 @@ test("script and key credentials with the SAME hash are different entries", () =
 // Redeemers
 // ---------------------------------------------------------------------------
 
-test("BaseSpendRedeemer constructor indices are 0 / 1 / 2", () => {
-  assert.equal(baseSpendRedeemer("TRANSFER", 0, 0).index, 0n);
-  assert.equal(baseSpendRedeemer("THIRD_PARTY", 0, 0).index, 1n);
-  assert.equal(baseSpendRedeemer("UNFRACKING", 0, 0).index, 2n);
+// ---------------------------------------------------------------------------
+// ⛔ THE SILENT REDEEMER CHANGE — the most dangerous edge in the alpha.3 migration
+// ---------------------------------------------------------------------------
+
+test("⛔ DEMONSTRATION: a stale SpendViaTransfer is byte-identical to the new record", () => {
+  // This is why the change is dangerous, stated as a measurement rather than a
+  // warning. alpha.2's BaseSpendRedeemer was an ENUM; alpha.3's is a RECORD.
+  //
+  //   SpendViaTransfer(7, 3)      = Constr(0, [Int 7, Int 3])
+  //   BaseSpendRedeemer{7, 3}     = Constr(0, [Int 7, Int 3])
+  //
+  // A stale builder's bytes DECODE CLEANLY as the new type. Nothing rejects
+  // them. The transaction fails later, on a credential-equality check, because
+  // alpha.2's wdrl_idx pointed at the DELEGATE's withdrawal and alpha.3's must
+  // point at the DISPATCHER's.
+  const staleSpendViaTransfer = Data.constr(0n, [Data.int(7n), Data.int(3n)]);
+  const fresh = baseSpendRedeemer(7, 3);
+
+  assert.equal(
+    hex(Data.toCBORBytes(fresh)),
+    hex(Data.toCBORBytes(staleSpendViaTransfer)),
+    "identical bytes — this is the trap, not a bug in the test",
+  );
+
+  // ⚑ And the asymmetry is the reason it is worth a demonstration: the OTHER
+  // two stale variants carry constructors 1 and 2, which the new single-
+  // constructor type cannot represent. They fail loudly. Only the transfer
+  // path — the common one — is silent.
+  const staleThirdParty = Data.constr(1n, [Data.int(7n), Data.int(3n)]);
+  assert.notEqual(staleThirdParty.index, fresh.index, "ctor 1 cannot be mistaken for the record");
 });
 
-test("BaseSpendRedeemer field order is params_idx then wdrl_idx", () => {
-  // Both are integers, so a transposition is invisible to every check except
-  // this one — and on chain it resolves the wrong params UTxO AND the wrong
-  // withdrawal, which can still be a well-formed transaction.
-  const r = baseSpendRedeemer("TRANSFER", 7, 3);
+test("baseSpendRedeemer is a single-constructor record with (params_idx, wdrl_idx)", () => {
+  const r = baseSpendRedeemer(7, 3);
+  assert.equal(r.index, 0n, "one constructor now, not three");
   assert.deepEqual(r.fields, [7n, 3n], "params_idx at 0, wdrl_idx at 1");
 });
 
-test("BaseSpendRedeemer rejects negative and non-integer indices", () => {
+test("baseSpendRedeemer REJECTS a stale variant argument, and says why", () => {
+  // The failing-first case. A caller still on the alpha.2 signature passes the
+  // variant FIRST. Verify it fails for the RIGHT REASON — a stale redeemer
+  // rejected — not merely that it fails: "params_idx must be an integer" would
+  // be true and would send the reader to audit their index arithmetic.
+  assert.throws(
+    () => baseSpendRedeemer("TRANSFER", 0, 1),
+    (err) => {
+      assert.match(err.message, /no longer takes a dispatch variant/);
+      assert.match(err.message, /programmableLogicGlobalRedeemer\("TRANSFER"\)/,
+        "must point at where the variant went");
+      assert.match(err.message, /wdrl_idx ALSO changed meaning/,
+        "must warn that fixing the call is not enough — the index target moved");
+      return true;
+    },
+  );
+});
+
+test("baseSpendRedeemer rejects negative and non-integer indices", () => {
   for (const bad of [-1, 1.5, NaN]) {
-    assert.throws(() => baseSpendRedeemer("TRANSFER", bad, 0), /params_idx/);
-    assert.throws(() => baseSpendRedeemer("TRANSFER", 0, bad), /wdrl_idx/);
+    assert.throws(() => baseSpendRedeemer(bad, 0), /params_idx/);
+    assert.throws(() => baseSpendRedeemer(0, bad), /wdrl_idx/);
   }
 });
 
-test("TransferRedeemer puts params_idx FIRST — old TransferAct bytes are not compatible", () => {
-  const r = transferRedeemer(4, [{ type: "exists", nodeIdx: 2 }]);
+test("the dispatch variants moved to the dispatcher, field-less", () => {
+  for (const [name, idx] of [["TRANSFER", 0n], ["THIRD_PARTY", 1n], ["UNFRACKING", 2n]]) {
+    const r = programmableLogicGlobalRedeemer(name);
+    assert.equal(r.index, idx, `${name} keeps its alpha.2 constructor index`);
+    assert.deepEqual(r.fields, [], "field-less — the index is the whole payload");
+  }
+  assert.throws(() => programmableLogicGlobalRedeemer("NOPE"), /unknown act/);
+});
+
+test("TransferRedeemer is proofs ONLY — params_idx is gone", () => {
+  const r = transferRedeemer([{ type: "exists", nodeIdx: 2 }]);
   assert.equal(r.index, 0n);
-  assert.equal(r.fields[0], 4n, "params_idx was prepended by #109");
-  assert.equal(r.fields[1].length, 1, "proofs follow");
-  assert.equal(r.fields[1][0].index, 0n, "exists = constructor 0");
-  assert.equal(r.fields[1][0].fields[0], 2n);
+  assert.equal(r.fields.length, 1, "one field: the proof list");
+  assert.equal(r.fields[0].length, 1);
+  assert.equal(r.fields[0][0].index, 0n, "exists = constructor 0");
+  assert.equal(r.fields[0][0].fields[0], 2n);
+
+  // A stale two-argument call puts an Int where the list belongs.
+  assert.throws(() => transferRedeemer(4, [{ type: "exists", nodeIdx: 2 }]),
+    /takes only the proof list now/);
 });
 
 test("proof constructors distinguish exists from not-exists", () => {
-  const r = transferRedeemer(0, [
+  const r = transferRedeemer([
     { type: "exists", nodeIdx: 1 },
     { type: "not-exists", nodeIdx: 5 },
   ]);
-  assert.deepEqual(r.fields[1].map((p) => p.index), [0n, 1n]);
+  assert.deepEqual(r.fields[0].map((p) => p.index), [0n, 1n]);
 });
 
-test("ThirdPartyRedeemer field order", () => {
-  const r = thirdPartyRedeemer(1, 2, 3);
-  assert.deepEqual(r.fields, [1n, 2n, 3n], "params_idx, registry_node_idx, outputs_start_idx");
+test("⛔ ThirdParty/Unfracking redeemers REFUSE a stale 3-argument call", () => {
+  // The silent one. alpha.3 dropped the FIRST of three ints, so a stale call
+  // shifts both surviving values one slot left and encodes CLEANLY:
+  //   (params_idx, registry_node_idx, outputs_start_idx)
+  //     -> { registry_node_idx: params_idx, outputs_start_idx: registry_node_idx }
+  // Well-formed, two wrong values, no complaint anywhere. Only arity catches it.
+  for (const fn of [thirdPartyRedeemer, unfrackingRedeemer]) {
+    assert.deepEqual(fn(2, 3).fields, [2n, 3n], "registry_node_idx, outputs_start_idx");
+    assert.throws(() => fn(1, 2, 3), /TWO arguments/, `${fn.name} must refuse the stale arity`);
+  }
 });
 
 test("encoded redeemers differ when indices are transposed", () => {
   assert.notEqual(
-    hex(Data.toCBORBytes(baseSpendRedeemer("TRANSFER", 7, 3))),
-    hex(Data.toCBORBytes(baseSpendRedeemer("TRANSFER", 3, 7)))
+    hex(Data.toCBORBytes(baseSpendRedeemer(7, 3))),
+    hex(Data.toCBORBytes(baseSpendRedeemer(3, 7)))
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The withdrawal plan — the dispatcher must be structurally unforgettable
+// ---------------------------------------------------------------------------
+
+test("plbWithdrawalPlan includes the dispatcher and indexes over the complete set", () => {
+  const PLG = "aa".repeat(28);
+  const DELEGATE = "bb".repeat(28);
+  const OTHER = "00".repeat(28);
+
+  const plan = plbWithdrawalPlan({
+    plgHash: PLG,
+    others: [
+      { hash: DELEGATE, isScript: true },
+      { hash: OTHER, isScript: true },
+    ],
+  });
+
+  assert.equal(plan.all.length, 3, "the dispatcher is part of the set, not beside it");
+
+  // Ledger order is bytewise among script credentials: 00 < aa < bb.
+  assert.equal(plan.indexOf({ hash: OTHER, isScript: true }), 0);
+  assert.equal(plan.plgIdx, 1, "the dispatcher's own slot");
+  assert.equal(plan.indexOf({ hash: DELEGATE, isScript: true }), 2);
+
+  // ⚑ THE POINT: computing the index WITHOUT the dispatcher gives a different
+  // answer, and that answer is silently wrong on chain.
+  assert.notEqual(
+    withdrawalIndexOf(
+      [{ hash: DELEGATE, isScript: true }, { hash: OTHER, isScript: true }],
+      { hash: DELEGATE, isScript: true },
+    ),
+    plan.indexOf({ hash: DELEGATE, isScript: true }),
+    "omitting the dispatcher shifts every later index — the failure this API prevents",
+  );
+});
+
+test("plbWithdrawalPlan refuses a duplicated credential", () => {
+  const H = "cc".repeat(28);
+  assert.throws(
+    () => plbWithdrawalPlan({ plgHash: H, others: [{ hash: H, isScript: true }] }),
+    /duplicate withdrawal credential/,
   );
 });
