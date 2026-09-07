@@ -159,17 +159,49 @@ const protocol = CIP113.init({
 
 On-chain protocol deployment references. Obtained from the bootstrap transaction.
 
+> ⚠ **This block was wrong for two protocol versions.** Until 0.8.0 it described the **0.3.x**
+> shape — `programmableLogicGlobal: { policyId, scriptHash }`, `protocolParams.alwaysFailScriptHash`,
+> a `directoryMint`/`directorySpend` pair — and survived the entire 0.3.x → 0.5.0-alpha.2 migration
+> unnoticed, because nothing tests documentation. It is now pinned by
+> `test/docs-drift.test.mjs`, which fails if these field names stop matching the real type.
+
 ```typescript
 interface DeploymentParams {
   txHash: TxHash;
-  protocolParams: { txInput: TxInput; policyId: PolicyId; alwaysFailScriptHash: ScriptHash };
-  programmableLogicGlobal: { policyId: PolicyId; scriptHash: ScriptHash };
+
+  // ⚑ ONE hash, two roles: policyId is ALSO the params address's payment
+  // credential. protocol_params merged its mint and spend handlers in
+  // alpha.3, so deriving them separately is two chances to disagree.
+  protocolParams: { txInput: TxInput; policyId: PolicyId; utxo: TxInput };
+
   programmableLogicBase: { scriptHash: ScriptHash };
+
+  // The three withdraw-0 delegates.
+  transfer: { scriptHash: ScriptHash };
+  thirdParty: { scriptHash: ScriptHash };
+  unfracking: { scriptHash: ScriptHash };
+
+  // The dispatcher. Every programmable transaction withdraws through it.
+  programmableLogicGlobal: { scriptHash: ScriptHash };
+
+  // A deployment CHOICE, not a derivation — baked into all three delegate
+  // hashes and recoverable from none of them.
+  maxInlineDatumBytes: number;
+
+  upgradeMultisig: { scriptHash: ScriptHash };
+  upgradeAuthority: { type: "key" | "script"; hash: ScriptHash };
+
   issuance: { txInput: TxInput; policyId: PolicyId; alwaysFailScriptHash: ScriptHash };
-  directoryMint: { txInput: TxInput; issuanceScriptHash: ScriptHash; scriptHash: ScriptHash };
-  directorySpend: { policyId: PolicyId; scriptHash: ScriptHash };
+
+  // ⚑ ONE hash, two roles again: scriptHash is the node NFT policy AND the
+  // node address's payment credential.
+  registry: { txInput: TxInput; issuanceScriptHash: ScriptHash; scriptHash: ScriptHash };
+
   programmableBaseRefInput: TxInput;
-  programmableGlobalRefInput: TxInput;
+  programmableLogicGlobalRefInput: TxInput;
+  transferRefInput: TxInput;
+  thirdPartyRefInput: TxInput;
+  unfrackingRefInput: TxInput;
 }
 ```
 
@@ -263,9 +295,13 @@ const blacklistMint = scripts.buildBlacklistMint(txInput, adminPkh);
 ## Third-party transfers: the output layout is the contract
 
 `thirdPartyTransfer` moves a holder's tokens **without the holder's signature**. It takes a
-different on-chain route from `transfer`: `programmable_logic_base` dispatches via
-`SpendViaThirdParty` to the standalone `third_party` validator, so a third-party transaction never
-loads the `transfer` reference script at all. The two paths share no redeemer.
+different on-chain route from `transfer`: `programmable_logic_base` withdraws through the
+`programmable_logic_global` dispatcher, whose own redeemer carries `ThirdPartyAct`, and the
+dispatcher requires the standalone `third_party` validator. A third-party transaction never loads
+the `transfer` reference script at all.
+
+> ⚠ In 0.5.0-alpha.2 the choice lived on `programmable_logic_base`'s own redeemer, as
+> `SpendViaThirdParty`. That constructor no longer exists — see the migration note in the README.
 
 **The rule that is easy to get backwards**, and which fails with **no diagnostic at all** if you do:
 
