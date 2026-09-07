@@ -142,13 +142,40 @@ test("the bootstrap's CIP-171 record recomputes to the deployed script hashes", 
       .filter((v: any) => v.compiledCode)
       .map((v: any) => computeScriptHash(v.compiledCode).toLowerCase())
   ).size;
+  // TEN in 0.5.0-alpha.3, of the blueprint's ELEVEN distinct validators. It was
+  // 11 of 12 in alpha.2: the merges removed four validators (protocol_params_mint,
+  // coordination_spend, registry_mint, registry_spend) and added three
+  // (protocol_params, registry, programmable_logic_global). The EXCLUSION is
+  // unchanged and is the only one — issuance_mint takes a substandard's
+  // minting_logic_cred, which a core deployment does not have.
+  //
+  // ⚠ This number moved because the PROTOCOL changed, which is the deliberate
+  // decision this pin demands. It must not be adjusted to make a run go green.
   assert.equal(
     record.scripts.length,
-    11,
-    `core's record must cover exactly 11 scripts of the blueprint's ${distinctInBlueprint}. ` +
+    10,
+    `core's record must cover exactly 10 scripts of the blueprint's ${distinctInBlueprint}. ` +
       `The one absent is issuance_mint, which takes a substandard's minting_logic_cred and ` +
       `therefore CANNOT be parameterised by a core deployment. If this number moved, decide ` +
       `deliberately whether a script became coverable or one was dropped — do not adjust it.`
+  );
+
+  // ⚑ AND THE ABSENTEE IS NAMED, not merely counted. A bare count cannot tell
+  // "issuance_mint is structurally uncoverable" from "we forgot one" — the
+  // distinction that cost a slice when FES's blacklist_spend went missing. The
+  // mechanical test: every blueprint validator EXCEPT issuance_mint must appear
+  // in the record by unapplied hash.
+  const recordedRaw = new Set(record.scripts.map((x: any) => String(x.rawScriptHash ?? x.scriptHash).toLowerCase()));
+  const missingTitles = (blueprint.validators ?? [])
+    .filter((v: any) => v.compiledCode)
+    .filter((v: any) => !recordedRaw.has(computeScriptHash(v.compiledCode).toLowerCase()))
+    .map((v: any) => v.title.split(".").slice(0, 2).join("."));
+  const uniqueMissing = [...new Set(missingTitles)];
+  assert.deepEqual(
+    uniqueMissing,
+    ["issuance_mint.issuance_mint"],
+    `exactly ONE validator may be absent from core's record, and it must be issuance_mint. ` +
+      `Absent: ${uniqueMissing.join(", ")}`
   );
 
   assert.deepEqual(

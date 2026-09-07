@@ -692,6 +692,12 @@ export function dummySubstandard(config: {
 
       tx = tx.readFrom({ referenceInputs: refUtxos });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
+      // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
+      // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
+      // every programmable transaction, and S-6 wired the withdrawal and the
+      // redeemer but not this. The ledger says "An associated script witness is
+      // missing" on purpose=withdraw, which names the shape but not the script.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(transferScript.compiledCode) });
       tx = tx.attachScript({
         script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode),
@@ -834,6 +840,12 @@ export function dummySubstandard(config: {
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
+      // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
+      // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
+      // every programmable transaction, and S-6 wired the withdrawal and the
+      // redeemer but not this. The ledger says "An associated script witness is
+      // missing" on purpose=withdraw, which names the shape but not the script.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(transferScript.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
 

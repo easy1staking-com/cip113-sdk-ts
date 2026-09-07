@@ -427,14 +427,27 @@ export function assertDeploymentScripts(
       ).hash,
       deployed: registryPolicy,
     },
-    {
-      name: "upgrade_multisig",
-      derived: builders.upgradeMultisig(
-        [deployment.upgradeAuthority.hash],
-        1,
-      ).hash,
-      deployed: deployment.upgradeMultisig.scriptHash,
-    },
+    // ⛔ `upgrade_multisig` IS DELIBERATELY NOT CHECKED, and the reason is a bug
+    // this assertion itself shipped.
+    //
+    // It was checked here, derived as `upgradeMultisig([upgradeAuthority.hash], 1)`.
+    // That is WRONG: `upgrade_multisig` is parameterised by the deployer's
+    // PAYMENT key hash (its signers are matched against `extra_signatories`),
+    // while `upgradeAuthority` is the STAKE credential named in the params
+    // datum (it must appear in the withdrawals map). Two different keys of the
+    // same shape and length; neither derives from the other.
+    //
+    // ⚠ The offline fixture used ONE value for both fields, so the wrong
+    // relationship reproduced perfectly and the check passed vacuously. Only a
+    // real deployment — where the two genuinely differ — exposed it, and it
+    // took a devnet bootstrap to get one.
+    //
+    // It is not checked now because it CANNOT BE: `upgrade_multisig`'s signer
+    // set and threshold are a deployment CHOICE, and DeploymentParams does not
+    // record them — the same category as `maxInlineDatumBytes`, which IS
+    // recorded precisely so it can be asserted. Inventing a derivation from the
+    // nearest same-shaped field is what produced the bug. A guard that cannot
+    // decide should stop, not guess.
   ];
 
   const mismatches = checks.filter((c) => c.derived !== c.deployed);

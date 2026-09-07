@@ -75,7 +75,7 @@ import { makeClient, topupAddress } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 import { buildDeploymentRecord } from "./cip171-record.js";
 import { explainError } from "./explain-error.js";
-import { STANDARD_VALIDATORS } from "../../dist/standard/blueprint.js";
+import { STANDARD_VALIDATORS, TARGET_PROTOCOL_VERSION } from "../../dist/standard/blueprint.js";
 import { rewardAddressFromKeyHash } from "../../dist/index.js";
 import { buildCip171Metadatum, CIP171_METADATA_LABEL } from "../../dist/index.js";
 import type { ParameterizationEvent } from "../../dist/standard/scripts.js";
@@ -133,10 +133,28 @@ function scriptBodyHex(compiledCode: string): string {
   return Bytes.toHex(raw.slice(headerLen));
 }
 
+/**
+ * The bundled blueprint directory for the version the SDK actually TARGETS.
+ *
+ * ⛔ DERIVED, NEVER TYPED. This was hardcoded to `v0.5.0-alpha.2` and stayed
+ * there through the whole alpha.3 migration: S-3 vendored alpha.3, S-4 flipped
+ * TARGET_PROTOCOL_VERSION, and this line kept loading the old artefact. The
+ * offline suite could not see it — those tests load blueprints by explicit
+ * path — so 119/119 stayed green while every devnet bootstrap built against a
+ * blueprint the SDK no longer supports.
+ *
+ * The failure was loud when it finally ran ("Validator
+ * protocol_params.protocol_params.mint not found in ... v0.5.0-alpha.2"), but it
+ * took a live devnet to run at all. A version written in two places is one fact
+ * that can disagree with itself; deriving it from the constant removes the
+ * second place.
+ */
+export function standardBlueprintDir(): string {
+  return resolve(ROOT, `blueprints/standard/v${TARGET_PROTOCOL_VERSION}`);
+}
+
 export function loadStandardBlueprint(): PlutusBlueprint {
-  return JSON.parse(
-    readFileSync(resolve(ROOT, "blueprints/standard/v0.5.0-alpha.2/plutus.json"), "utf-8")
-  );
+  return JSON.parse(readFileSync(resolve(standardBlueprintDir(), "plutus.json"), "utf-8"));
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -529,7 +547,7 @@ export async function bootstrapProtocol(
   // would name a script this deployment does not run.
   const coreEvents = paramEvents.filter((e) => e.title !== STANDARD_VALIDATORS.ISSUANCE_MINT);
   const cip171Chunks = buildCip171Metadatum(
-    buildDeploymentRecord(resolve(ROOT, "blueprints/standard/v0.5.0-alpha.2"), coreEvents) as never
+    buildDeploymentRecord(standardBlueprintDir(), coreEvents) as never
   );
 
   // ---- Tx 1: mints + protocol state --------------------------------------
@@ -653,8 +671,19 @@ export async function bootstrapProtocol(
     await submitAndWait(await delegateTx.build({ changeAddress: addressObj, evaluator }), "tx4-delegate");
   }
 
+  // ⛔ FOUR, NOT THREE — the dispatcher is a withdraw-0 validator too.
+  //
+  // alpha.3 puts programmable_logic_global's withdrawal on EVERY programmable
+  // transaction, and a withdraw-0 cannot appear against an unregistered reward
+  // account. Registering only the three delegates leaves the protocol
+  // inoperable in a way that names nothing useful: the ledger answers code 3141
+  // ("rewards withdrawals must consume rewards in full"), which reads as a
+  // balance problem and is really an unregistered credential.
+  //
+  // MEASURED on devnet — this is not a precaution. Every programmable operation
+  // failed with 3141 until the dispatcher joined this list.
   let regTx = client.newTx();
-  for (const delegate of [transfer, thirdParty, unfracking]) {
+  for (const delegate of [plg, transfer, thirdParty, unfracking]) {
     regTx = regTx.registerStake({
       stakeCredential: Credential.makeScriptHash(Bytes.fromHex(delegate.hash)),
       redeemer: voidData(),

@@ -213,6 +213,11 @@ function spendableWalletUtxos(
   const reserved = new Set(
     [
       deployment.programmableBaseRefInput,
+      // alpha.3: the dispatcher's reference script joined the set the bootstrap
+      // publishes. Naming it here keeps the explicit list complete — the general
+      // scriptRef rule below already covers it, but a named list that silently
+      // omits a live deployment's script invites the next reader to trust it.
+      deployment.programmableLogicGlobalRefInput,
       deployment.transferRefInput,
       deployment.thirdPartyRefInput,
       deployment.unfrackingRefInput,
@@ -890,6 +895,12 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.mintAssets({ assets: burnAssets, redeemer: issuanceRedeemer });
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
+      // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
+      // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
+      // every programmable transaction, and S-6 wired the withdrawal and the
+      // redeemer but not this. The ledger says "An associated script witness is
+      // missing" on purpose=withdraw, which names the shape but not the script.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.thirdParty.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
@@ -1100,6 +1111,12 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.readFrom({ referenceInputs: [...proofUtxos, protocolParamsUtxo, registryUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
+      // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
+      // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
+      // every programmable transaction, and S-6 wired the withdrawal and the
+      // redeemer but not this. The ledger says "An associated script witness is
+      // missing" on purpose=withdraw, which names the shape but not the script.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.transfer.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.transfer.compiledCode) });
 
@@ -1548,6 +1565,12 @@ export function freezeAndSeizeSubstandard(config: {
         );
       }
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
+      // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
+      // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
+      // every programmable transaction, and S-6 wired the withdrawal and the
+      // redeemer but not this. The ledger says "An associated script witness is
+      // missing" on purpose=withdraw, which names the shape but not the script.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicGlobal.compiledCode) });
       // ⚠ `third_party` is NOT attached here. Its withdrawal already carries the
       // script witness, and attaching it again makes the duplicate extraneous —
       // the ledger rejects the whole transaction with code 3104. MEASURED: the

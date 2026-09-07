@@ -53,7 +53,14 @@ const PP_TX = { txHash: "aa".repeat(32), outputIndex: 0 };
 const ISS_TX = { txHash: "cc".repeat(32), outputIndex: 1 };
 const REG_TX = { txHash: "bb".repeat(32), outputIndex: 0 };
 const ALWAYS_FAIL = "dd".repeat(28);
-const SIGNER = "11".repeat(28);
+// ⚠ TWO DIFFERENT KEYS, DELIBERATELY. `upgrade_multisig` is parameterised by
+// the deployer's PAYMENT key hash; `upgradeAuthority` is the STAKE credential
+// in the params datum. This fixture used ONE value for both, which made a check
+// that conflated them reproduce perfectly and pass vacuously — the bug S-11
+// found on a live devnet. Keeping them distinct means any future conflation
+// fails here instead of on chain.
+const PAYMENT_SIGNER = "11".repeat(28);
+const STAKE_AUTHORITY = "22".repeat(28);
 const MAX_INLINE_DATUM_BYTES = 512;
 
 /**
@@ -82,7 +89,7 @@ function deriveDeployment(bp) {
   const unfracking = b.unfracking(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
   // Built LAST: it names the three delegates at compile time.
   const plg = b.programmableLogicGlobal(transfer, thirdParty, unfracking).hash;
-  const upgradeMultisig = b.upgradeMultisig([SIGNER], 1).hash;
+  const upgradeMultisig = b.upgradeMultisig([PAYMENT_SIGNER], 1).hash;
 
   const ref = (i) => ({ txHash: "ee".repeat(32), outputIndex: i });
 
@@ -96,7 +103,7 @@ function deriveDeployment(bp) {
     programmableLogicGlobal: { scriptHash: plg },
     maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
     upgradeMultisig: { scriptHash: upgradeMultisig },
-    upgradeAuthority: { type: "key", hash: SIGNER },
+    upgradeAuthority: { type: "key", hash: STAKE_AUTHORITY },
     issuance: { txInput: ISS_TX, policyId: issuanceCborHex, alwaysFailScriptHash: ALWAYS_FAIL },
     registry: { txInput: REG_TX, issuanceScriptHash: issuanceCborHex, scriptHash: registry },
     programmableBaseRefInput: ref(1),
@@ -111,6 +118,10 @@ const DEPLOYMENT = deriveDeployment(blueprint);
 
 /** Every check the assertion performs, so a silent shrink is caught. */
 const EXPECTED_CHECKS = [
+  // ⚠ upgrade_multisig is deliberately ABSENT — see the block in
+  // assertDeploymentScripts. Its signer set is a deployment choice that
+  // DeploymentParams does not record, so it cannot be derived; it WAS checked,
+  // wrongly, against upgradeAuthority.
   "protocol_params (policy == address)",
   "programmable_logic_base",
   "transfer",
@@ -119,7 +130,6 @@ const EXPECTED_CHECKS = [
   "programmable_logic_global (dispatcher coherence)",
   "issuance_cbor_hex_mint",
   "registry (policy == address)",
-  "upgrade_multisig",
 ];
 
 test("POSITIVE: every derivable 0.5.0-alpha.3 script is checked and reproduces", () => {
@@ -321,4 +331,41 @@ test("registry and protocol_params each expose ONE hash, not a pair", () => {
       `${gone} is a pre-alpha.3 name; its return would re-open the split-derivation bug`,
     );
   }
+});
+
+test("⛔ upgrade_multisig's signer and the upgrade AUTHORITY are different keys", () => {
+  // The regression, stated directly. S-4 added a check deriving upgrade_multisig
+  // from `upgradeAuthority.hash`. That relationship does not exist:
+  //   - upgrade_multisig's signers are matched against `extra_signatories`
+  //     → a PAYMENT key hash
+  //   - upgradeAuthority must appear in the withdrawals map
+  //     → a STAKE credential
+  // Same shape, same length, different keys. The fixture used one value for
+  // both, so the wrong derivation reproduced and the check passed vacuously.
+  // Only a live devnet bootstrap, where they genuinely differ, caught it.
+  assert.notEqual(
+    PAYMENT_SIGNER,
+    STAKE_AUTHORITY,
+    "the fixture must keep these distinct or it cannot catch a conflation",
+  );
+
+  const derivedFromAuthority = scriptsModule
+    .createStandardScripts(blueprint)
+    .upgradeMultisig([DEPLOYMENT.upgradeAuthority.hash], 1).hash;
+
+  assert.notEqual(
+    derivedFromAuthority,
+    DEPLOYMENT.upgradeMultisig.scriptHash,
+    "deriving upgrade_multisig from the upgrade authority must NOT reproduce it — " +
+      "if this ever passes, the two values have been conflated again",
+  );
+
+  // And the assertion must not be quietly re-added: it cannot be derived,
+  // because DeploymentParams does not record the signer set.
+  const names = assertDeploymentScripts(blueprint, DEPLOYMENT).map((c) => c.name);
+  assert.ok(
+    !names.includes("upgrade_multisig"),
+    "upgrade_multisig cannot be asserted from DeploymentParams — record the " +
+      "signers first if you want it checked",
+  );
 });

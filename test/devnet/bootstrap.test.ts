@@ -96,7 +96,15 @@ test("bootstraps a protocol instance on a live devnet", async () => {
   const reloaded = JSON.parse(JSON.stringify(deployment));
   const blueprint = loadStandardBlueprint();
   const checks = assertDeploymentScripts(blueprint, reloaded);
-  assert.equal(checks.length, 9, "all nine derivable scripts must be checked");
+  // EIGHT, not nine. `upgrade_multisig` was the ninth until S-11 showed the
+  // check was deriving it from `upgradeAuthority` — a PAYMENT-vs-STAKE
+  // conflation that only a real deployment could expose, because the offline
+  // fixture used one value for both. Its signer set is a deployment choice
+  // DeploymentParams does not record, so it cannot be derived at all.
+  //
+  // The count stays PINNED: a silent shrink is exactly what this catches, and
+  // it caught this one.
+  assert.equal(checks.length, 8, "all eight derivable scripts must be checked");
   for (const c of checks) assert.equal(c.derived, c.deployed, `${c.name} must reproduce`);
 
   // And prove that is not vacuous: substitute a DIFFERENT validator's program
@@ -109,7 +117,10 @@ test("bootstraps a protocol instance on a live devnet", async () => {
   // nothing. That is what the earlier version of this file did.
   const changed = structuredClone(blueprint);
   const victim = changed.validators.find(
-    (x: { title: string }) => x.title === "registry_spend.registry_spend.spend"
+    // registry_spend no longer exists in alpha.3 (merged into `registry`), so
+    // the victim moved with it. The mechanism under test — a blueprint swapped
+    // under an unchanged deployment — is unchanged.
+    (x: { title: string }) => x.title === "registry.registry.mint"
   );
   const donor = changed.validators.find(
     (x: { title: string }) => x.title === "unfracking.unfracking.withdraw"
