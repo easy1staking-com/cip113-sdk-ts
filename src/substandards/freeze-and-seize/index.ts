@@ -383,14 +383,18 @@ export function freezeAndSeizeSubstandard(config: {
       // ---------------------------------------------------------------------
       //
       // The blanket refusal that D-14 installed is GONE: `register`, `mint`,
-      // `transfer`, `initCompliance`, `freeze` and `unfreeze` are migrated to
-      // CIP-113 0.5.0-alpha.2 and this plugin initialises.
+      // Every operation is migrated to CIP-113 0.5.0-alpha.3.
       //
-      // `seize` and `burn` are migrated too (W-E S-5): both take the
-      // THIRD-PARTY route, which #110 moved off the deleted `ThirdPartyAct` and
-      // onto the standalone `third_party` validator's withdraw-0 with a
-      // ThirdPartyRedeemer, plus BaseSpendRedeemer(SpendViaThirdParty) on every
-      // programmable input.
+      // `seize` and `burn` take the THIRD-PARTY route: the standalone
+      // `third_party` validator's withdraw-0 with a ThirdPartyRedeemer, reached
+      // through the `programmable_logic_global` dispatcher, plus a
+      // BaseSpendRedeemer on every programmable input.
+      //
+      // ⚠ In alpha.2 the dispatch choice lived on that BaseSpendRedeemer as
+      // `SpendViaThirdParty`. alpha.3 made the redeemer a single-constructor
+      // record and moved the choice to the dispatcher's own redeemer. The two
+      // encodings are BYTE-IDENTICAL for the transfer arm, so a stale builder
+      // is not rejected — see the guards in core/ledger-order.ts.
       //
       // ⚠ The seize/burn paths still need re-validating against upstream #79
       // (UTxO contamination), #80 (issuance delegation scope) and #115 (datum
@@ -464,13 +468,14 @@ export function freezeAndSeizeSubstandard(config: {
       const issuanceCborHexUtxo = await findIssuanceCborHexUtxo(client, networkId, ctx.deployment);
 
       // 3. Build datums
-      // UNREACHABLE — this plugin refuses at init (T-D09). Retained, and made to
-      // typecheck against the 7-field layout, so the freeze-and-seize epic gets a
-      // readable diff instead of a rewrite from memory.
-      //
       // The index-based reads that used to be here (2/3/4) were silently wrong
-      // under the 7-field layout. Replaced with decodeRegistryNode, which is
+      // when RegistryNode grew. Replaced with decodeRegistryNode, which is
       // positional-safe and fails loudly on a short record.
+      //
+      // ⚑ RegistryNode is STILL SEVEN FIELDS in alpha.3 — it is the PARAMS datum
+      // that went 7 -> 4, not this one. Two adjacent records, one changed and one
+      // did not, is exactly the pairing that invites a "consistency" edit; the
+      // decoder's arity check is what stops it.
       if (!coveringDatum) {
         throw new Error(
           "register: the covering registry node has no inline datum. The directory " +
@@ -788,8 +793,9 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
       // administrative path is now the standalone `third_party` validator, and
-      // programmable_logic_base dispatches to it via SpendViaThirdParty — so
-      // this transaction never loads the `transfer` reference script at all.
+      // programmable_logic_base withdraws through the dispatcher, whose redeemer
+      // carries ThirdPartyAct — so this transaction never loads the `transfer`
+      // reference script at all.
       //
       // The withdrawal set is BOTH scripts: the framework delegate, and the
       // issuer authority the registry node names in
@@ -862,6 +868,15 @@ export function freezeAndSeizeSubstandard(config: {
         amount: 0n,
         redeemer: plgRedeemer,
       });
+      // ⚑ NO min-UTxO COMPUTATION HERE, AND THAT IS CORRECT — do not "fix" it to
+      // match the other outputs. This is the PAIRED CONTINUATION: `third_party`
+      // requires it to preserve the input's address, datum and reference script
+      // with lovelace only ratcheting UP, so it carries the INPUT'S OWN lovelace
+      // forward. That figure was already min-UTxO-valid when the input was
+      // created, and burning REMOVES tokens — a smaller output has a LOWER
+      // requirement. Carrying it forward is therefore always sufficient, and
+      // recomputing could only produce a smaller number, which the ratchet rule
+      // forbids.
       tx = tx.payToAddress({
         address: utxoToBurn.address,
         assets: outputAssets(utxoLovelace(utxoToBurn), remainingTokens.size > 0 ? remainingTokens : undefined),
@@ -947,6 +962,22 @@ export function freezeAndSeizeSubstandard(config: {
         utxoToTxInput(registryUtxo),
       ];
       const sortedRefInputs = sortTxInputs(allRefInputRefs);
+      // ⛔ A SECOND REASON THE PROTOCOL-PARAMS REFERENCE INPUT MUST STAY, beyond
+      // the custody one recorded at `register`.
+      //
+      // Every index below — the blacklist proof indices, registryIdx, paramsIdx
+      // — is a position in THIS sorted set. FES's own transfer validator reads
+      // its blacklist nodes with `list.at(reference_inputs, node_idx)`, an
+      // INDEX, not a search. Removing the params UTxO from the set therefore
+      // shifts every proof index that sorts after it, and the failure is a
+      // blacklist proof resolving to the WRONG NODE — a well-formed proof about
+      // something else.
+      //
+      // So "the registry no longer needs this input" (#117) is true and still
+      // does not license dropping it: two unrelated consumers in this same
+      // transaction depend on it, one for custody semantics and one for index
+      // arithmetic. Requirements belong to the TRANSACTION, not to the
+      // component being edited.
 
       const proofIndices: number[] = selected.map(() =>
         findRefInputIndex(sortedRefInputs, utxoToTxInput(proofUtxos[0]))
@@ -1399,8 +1430,9 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
       // administrative path is now the standalone `third_party` validator, and
-      // programmable_logic_base dispatches to it via SpendViaThirdParty — so
-      // this transaction never loads the `transfer` reference script at all.
+      // programmable_logic_base withdraws through the dispatcher, whose redeemer
+      // carries ThirdPartyAct — so this transaction never loads the `transfer`
+      // reference script at all.
       //
       // The withdrawal set is BOTH scripts: the framework delegate, and the
       // issuer authority the registry node names in
