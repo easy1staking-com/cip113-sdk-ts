@@ -107,6 +107,52 @@ test("a valid target blueprint still passes untouched", () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// The real alpha.3 artifact — the case that exposed the defect
+// ---------------------------------------------------------------------------
+
+test("the VENDORED alpha.3 blueprint is refused as LATER, not as stale", () => {
+  // The synthetic pair above isolates the variable; this one is the artifact
+  // that actually broke the old guard. Both matter: the synthetic proves the
+  // MECHANISM, this proves it against real bytes with real titles.
+  const alpha3 = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
+  assert.equal(alpha3.preamble.version, "0.5.0-alpha.3");
+
+  const msg = messageOf(alpha3);
+  assert.ok(msg, "alpha.3 is not yet supported and must be refused");
+  assert.match(msg, /LATER CIP-113 protocol version/);
+  assert.match(msg, /not a stale or corrupt file/);
+  assert.doesNotMatch(msg, /EARLIER/, "the original defect: newer reported as older");
+
+  // It must also name what is missing, so the refusal is actionable.
+  assert.match(msg, /PROTOCOL_PARAMS_MINT|REGISTRY_MINT|REGISTRY_SPEND|COORDINATION_SPEND/);
+});
+
+test("alpha.3 declares the four validators this SDK has not migrated to", () => {
+  // Pins the shape of the work S-4 must do. If upstream changes this set, the
+  // migration's scope changed and someone must look.
+  const titles = load("blueprints/standard/v0.5.0-alpha.3/plutus.json").validators.map(
+    (v) => v.title,
+  );
+  for (const t of [
+    "protocol_params.protocol_params.mint",
+    "protocol_params.protocol_params.spend",
+    "registry.registry.mint",
+    "registry.registry.spend",
+    "programmable_logic_global.programmable_logic_global.withdraw",
+  ]) {
+    assert.ok(titles.includes(t), `alpha.3 should declare ${t}`);
+  }
+  for (const gone of [
+    "protocol_params_mint.protocol_params_mint.mint",
+    "registry_mint.registry_mint.mint",
+    "registry_spend.registry_spend.spend",
+    "coordination_spend.coordination_spend.spend",
+  ]) {
+    assert.ok(!titles.includes(gone), `alpha.3 should no longer declare ${gone}`);
+  }
+});
+
 test("comparator: ordering, including the traps", () => {
   const lt = (a, b) => assert.ok(compareProtocolVersions(a, b) < 0, `${a} should sort below ${b}`);
 
