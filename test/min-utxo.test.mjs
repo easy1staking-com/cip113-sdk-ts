@@ -185,3 +185,43 @@ test("ceilToWholeAda rounds up and leaves whole ADA alone", () => {
   assert.equal(ceilToWholeAda(4_000_000n), 4_000_000n);
   assert.equal(ceilToWholeAda(0n), 0n);
 });
+
+// ---------------------------------------------------------------------------
+// dummy — the SAME defect, found second, in a second place
+// ---------------------------------------------------------------------------
+
+test("dummy's token outputs: the measured figures, pinned", () => {
+  // ⚠ These numbers live in a comment above `dummySubstandard`. Pinning them
+  // here keeps the comment honest: a prose table drifts silently, an assertion
+  // does not. The shape is identical to FES's token outputs — PLB address, one
+  // token, voidData — which is exactly why the figures match and why this was
+  // ONE defect in two places rather than two defects.
+  const DUMMY_POLICY = "864e759c0e1e6d315b6b48a08ad2f5b8b5eb7564bedb73cc83d9fd0b";
+  const need = (nameHex, qty) =>
+    minUtxoForOutput({
+      address: PLB_ADDR,
+      assets: outputAssets(0n, new Map([[DUMMY_POLICY + nameHex, qty]])),
+      datum: voidData(),
+      coinsPerUtxoByte: CPB,
+    });
+
+  // The live preview deployment's own asset name — comfortably inside the floor.
+  assert.equal(need("44554d35954f", 1000n), 1_202_490n);
+  assert.ok(1_300_000n - need("44554d35954f", 1000n) === 97_510n, "97,510 headroom");
+
+  // …and the two cases that are genuinely short.
+  assert.equal(need("ff".repeat(32), 1000n), 1_318_860n, "SHORT by 18,860");
+  assert.equal(need("ff".repeat(32), (2n ** 63n) - 1n), 1_344_720n, "SHORT by 44,720");
+
+  // The identity that made this a pattern rather than a one-off.
+  assert.equal(
+    need("ff".repeat(32), 1000n),
+    minUtxoForOutput({
+      address: PLB_ADDR,
+      assets: outputAssets(0n, new Map([[POLICY + "ff".repeat(32), 1000n]])),
+      datum: voidData(),
+      coinsPerUtxoByte: CPB,
+    }),
+    "same output shape ⇒ same requirement, whichever substandard builds it",
+  );
+});

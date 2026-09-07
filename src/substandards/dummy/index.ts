@@ -69,6 +69,7 @@ import {
   getInlineDatum,
   utxoUnitQty,
   outputAssets,
+  minUtxoAtLeast,
   Credential,
   KeyHash,
   InlineDatum,
@@ -80,15 +81,14 @@ const DUMMY_VALIDATORS = {
 } as const;
 
 /**
- * ⚠ MEASURED, NOT FIXED: the five `1_300_000n` token outputs below are SHORT at
- * a maximal asset name, and the fix is blocked on another branch.
- *
- * All five have the same shape — a programmable-logic-base address, one token,
- * and a `voidData()` datum — so the datum is fixed and they LOOK like constants
- * are safe. They are not: min-UTxO scales with SERIALISED OUTPUT SIZE, and two
- * of the three things that scale it are supplied by the caller. The ASSET NAME
- * is raw hex at every API boundary here and CIP-67-labelled names run to 32
- * bytes; the QUANTITY is a CBOR integer that widens with magnitude.
+ * The flat amount this plugin used to hardcode, kept as a FLOOR rather than an
+ * answer — see `minUtxoAtLeast`. All five token outputs share one shape (a
+ * programmable-logic-base address, one token, a `voidData()` datum), so the
+ * DATUM is fixed and they look like a constant is safe. It is not: min-UTxO
+ * scales with SERIALISED OUTPUT SIZE, and two of the three things that scale it
+ * come from the caller — the ASSET NAME (raw hex at every boundary here, 32
+ * bytes when CIP-67-labelled) and the QUANTITY (a CBOR integer that widens with
+ * magnitude).
  *
  * MEASURED against preview's live `coinsPerUtxoByte` of 4310 (2026-09-07):
  *
@@ -98,18 +98,16 @@ const DUMMY_VALIDATORS = {
  *   max CIP-67 name (32B), qty 1000      1,318,860   SHORT by 18,860
  *   max name (32B), qty 2^63-1           1,344,720   SHORT by 44,720
  *
- * Identical figures to `freeze-and-seize`, which is expected: the output shape
- * is the same, so this is one defect appearing in two places rather than two
- * defects. FES was fixed on branch `fix/min-utxo-computed` (283dad7) by
- * computing the requirement from live protocol parameters.
+ * ⚠ IDENTICAL figures to `freeze-and-seize`, and that is the point: same output
+ * shape means this was ONE defect appearing in two places, not two defects. It
+ * was found in FES first and only then looked for here — the second sighting is
+ * what made it a pattern rather than a one-off.
  *
- * ⛔ THAT FIX IS NOT APPLIED HERE, DELIBERATELY. It needs `minUtxoForOutput`,
- * which lives only on that branch, and that branch is behind a push gate that
- * is not this migration's to lift. Pulling the helper across would let gated
- * work arrive by the side door. The numbers above are recorded instead so the
- * next reader inherits the measurement rather than rediscovering it — this is
- * already the SECOND place this defect has been found.
+ * The floor keeps the change MONOTONE: ordinary names emit exactly what they
+ * always did, and only the cases that were genuinely short move.
  */
+const TOKEN_OUTPUT_FLOOR = 1_300_000n;
+
 export function dummySubstandard(config: {
   blueprint: PlutusBlueprint;
 }): SubstandardPlugin {
@@ -296,6 +294,9 @@ export function dummySubstandard(config: {
       const { feePayerAddress, assetName, quantity } = params;
       const recipient = params.recipientAddress ?? feePayerAddress;
       const client = ctx.client;
+      // min-UTxO is sized from live protocol parameters, not guessed — the asset
+      // name and the quantity are both caller-supplied and both widen the output.
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
 
       // The token policy IS issuance_mint parameterised by our minting logic.
       const issuanceMint = ctx.standardScripts.buildIssuanceMint(issueScript.hash);
@@ -390,8 +391,15 @@ export function dummySubstandard(config: {
 
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
-        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: voidData(),
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),datum: new InlineDatum.InlineDatum({ data: voidData() }),
       });
       // ⚠ min-UTxO, not a round number pulled from the old code.
       //
@@ -458,6 +466,9 @@ export function dummySubstandard(config: {
       const { feePayerAddress, tokenPolicyId, assetName, quantity } = params;
       const recipient = params.recipientAddress ?? feePayerAddress;
       const client = ctx.client;
+      // min-UTxO is sized from live protocol parameters, not guessed — the asset
+      // name and the quantity are both caller-supplied and both widen the output.
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       const unit = tokenPolicyId + assetName;
 
       const issuanceMint = ctx.standardScripts.buildIssuanceMint(issueScript.hash);
@@ -492,8 +503,15 @@ export function dummySubstandard(config: {
       });
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
-        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: voidData(),
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),datum: new InlineDatum.InlineDatum({ data: voidData() }),
       });
       tx = tx.readFrom({ referenceInputs: refs });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
@@ -537,6 +555,9 @@ export function dummySubstandard(config: {
         params;
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
+      // min-UTxO is sized from live protocol parameters, not guessed — the asset
+      // name and the quantity are both caller-supplied and both widen the output.
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
 
       const holderPlbAddr = baseAddress(networkId, plbHash, holderAddress);
@@ -607,8 +628,15 @@ export function dummySubstandard(config: {
       // Destination first.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
-        datum: new InlineDatum.InlineDatum({ data: voidData() }),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: voidData(),
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),datum: new InlineDatum.InlineDatum({ data: voidData() }),
       });
 
       // Then one continuation per input, in LEDGER ORDER — the validator walks
@@ -678,6 +706,9 @@ export function dummySubstandard(config: {
       const { senderAddress, recipientAddress, tokenPolicyId, assetName, quantity } = params;
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
+      // min-UTxO is sized from live protocol parameters, not guessed — the asset
+      // name and the quantity are both caller-supplied and both widen the output.
+      const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
 
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
 
@@ -776,15 +807,29 @@ export function dummySubstandard(config: {
       if (returningAmount > 0n) {
         tx = tx.payToAddress({
           address: EvoAddress.fromBech32(senderPlbAddr),
-          assets: outputAssets(1_300_000n, new Map([[unit, returningAmount]])),
-          datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
+          assets: outputAssets(
+            minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+              address: senderPlbAddr,
+              assets: outputAssets(0n, new Map([[unit, returningAmount]])),
+              datum: voidData(),
+              coinsPerUtxoByte,
+            }),
+            new Map([[unit, returningAmount]]),
+          ),datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
         });
       }
 
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
-        assets: outputAssets(1_300_000n, new Map([[unit, quantity]])),
-        datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
+        assets: outputAssets(
+          minUtxoAtLeast(TOKEN_OUTPUT_FLOOR, {
+            address: recipientPlbAddr,
+            assets: outputAssets(0n, new Map([[unit, quantity]])),
+            datum: voidData(),
+            coinsPerUtxoByte,
+          }),
+          new Map([[unit, quantity]]),
+        ),datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
