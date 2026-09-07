@@ -271,9 +271,14 @@ export function dummySubstandard(config: {
       const tokenPolicyId = issuanceMint.hash;
       const unit = tokenPolicyId + assetName;
 
-      const registryMintPolicyId = ctx.standardScripts.registry.hash;
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
-      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const registryPolicyId = ctx.standardScripts.registry.hash;
+      // ⚑ ONE HASH, TWO ROLES. registry_mint and registry_spend merged (#117), so
+      // the node NFT policy id and the node address's payment credential are the
+      // same value — the minting policy naming itself. The old names
+      // (registrySpendAddr / registryMintPolicyId) asserted a distinction that no
+      // longer exists and would tell a reader to look for two hashes.
+      const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
 
       const covering = findCoveringNode(registryUtxos, tokenPolicyId);
       if (!covering) {
@@ -314,8 +319,8 @@ export function dummySubstandard(config: {
       });
       const updatedCoveringDatum = registryNodeDatum({ ...coveringNode, next: tokenPolicyId });
 
-      const registryNftUnit = registryMintPolicyId + tokenPolicyId;
-      const coveringNftUnit = registryMintPolicyId + coveringNode.key;
+      const registryNftUnit = registryPolicyId + tokenPolicyId;
+      const coveringNftUnit = registryPolicyId + coveringNode.key;
 
       // Output order is the contract: the MintingRegistryProof below names our
       // registry node by OUTPUT INDEX, so moving these outputs silently changes
@@ -368,18 +373,36 @@ export function dummySubstandard(config: {
       // serialised size and with a protocol parameter that can rise.
       const REGISTRY_NODE_ADA = REGISTRY_NODE_MIN_ADA;
       tx = tx.payToAddress({
-        address: EvoAddress.fromBech32(registrySpendAddr),
+        address: EvoAddress.fromBech32(registryAddr),
         assets: outputAssets(REGISTRY_NODE_ADA, new Map([[registryNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: newNodeDatum }),
       });
       tx = tx.payToAddress({
-        address: EvoAddress.fromBech32(registrySpendAddr),
+        address: EvoAddress.fromBech32(registryAddr),
         assets: outputAssets(REGISTRY_NODE_ADA, new Map([[coveringNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
       const paramsUtxo = await findParamsUtxo();
       const issuanceCborUtxo = await findIssuanceCborUtxo();
+      // ⛔ THE PROTOCOL-PARAMS REFERENCE INPUT STAYS, AND NOT BY OVERSIGHT.
+      //
+      // alpha.3's registry no longer reads it: the merged validator derives the
+      // node policy from its OWN input's payment credential, so a registry-node
+      // spend has no reference-input requirement of its own any more (#117).
+      // That made "drop it from registry spends" look like free fee savings.
+      //
+      // It is not free HERE, because a second script in this same transaction
+      // reads it. `issuance_mint` locates the params UTxO among the reference
+      // inputs and pulls the LIVE delegate credentials out of its datum — and
+      // that locate is DELIBERATELY NON-FAILING: absent params UTxO means "no
+      // delegation", falling back to local `no_escape` custody. So removing it
+      // does not raise an error, it SILENTLY SELECTS A DIFFERENT CUSTODY PATH.
+      //
+      // Whether the two paths agree for this transaction is a question about
+      // ledger behaviour, and this repo cannot answer it offline. Left attached
+      // until a devnet run can measure it (S-11). A reference input costs bytes;
+      // a silently different custody model costs more.
       tx = tx.readFrom({ referenceInputs: [paramsUtxo, issuanceCborUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
@@ -414,8 +437,8 @@ export function dummySubstandard(config: {
         );
       }
 
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
-      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const node = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!node) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
 
@@ -496,8 +519,8 @@ export function dummySubstandard(config: {
       const { selected, totalTokenAmount } = selectUtxosForAmount(tokenUtxos, unit, quantity);
       const returningAmount = totalTokenAmount - quantity;
 
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
-      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
 
@@ -644,8 +667,8 @@ export function dummySubstandard(config: {
       const returningAmount = totalTokenAmount - quantity;
 
       // 4. Find registry node reference input
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
-      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
+      const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
+      const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) {
         throw new Error(`Registry node not found for policy ${tokenPolicyId}`);

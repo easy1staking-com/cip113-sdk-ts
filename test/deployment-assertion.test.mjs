@@ -284,3 +284,41 @@ test("VALUABLE on load: a stale deployment against a changed blueprint is caught
     "a deployment paired with a different blueprint MUST be rejected"
   );
 });
+
+// ---------------------------------------------------------------------------
+// ⚑ The two dual-hash collapses — one value, two roles
+// ---------------------------------------------------------------------------
+
+test("registry and protocol_params each expose ONE hash, not a pair", () => {
+  // alpha.3 merged registry_mint+registry_spend and protocol_params_mint+
+  // protocol_params_spend. In each the NFT policy id and the address's payment
+  // credential became the same value — the minting policy naming itself.
+  //
+  // ⛔ WHY THIS IS PINNED. The SDK used to derive those two independently and
+  // BOTH derivations were correct. Re-introducing a second field is not a
+  // rounding error: two derivations of one fact is two chances to disagree, and
+  // the disagreement presents as a valid-looking address that holds nothing —
+  // no error, no mismatch, just a UTxO nobody can find.
+  const resolved = scriptsModule.buildDeploymentScripts(blueprint, DEPLOYMENT);
+
+  assert.equal(
+    resolved.registry.hash,
+    DEPLOYMENT.registry.scriptHash,
+    "the registry script's hash IS the recorded node policy",
+  );
+  assert.equal(
+    resolved.protocolParams.hash,
+    DEPLOYMENT.protocolParams.policyId,
+    "the protocol_params script's hash IS the recorded params policy",
+  );
+
+  // And the resolved surface must not offer a second, separately-derived hash
+  // for either — the shape of the old bug.
+  for (const gone of ["registryMint", "registrySpend", "protocolParamsMint", "coordinationSpend"]) {
+    assert.equal(
+      resolved[gone],
+      undefined,
+      `${gone} is a pre-alpha.3 name; its return would re-open the split-derivation bug`,
+    );
+  }
+});
