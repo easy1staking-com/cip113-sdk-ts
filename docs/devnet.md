@@ -26,6 +26,41 @@ Ports are not configurable — `cluster-info.json` is regenerated on every `up`.
 
 ## Traps
 
+**⛔ A PORT CONFLICT KILLS THE DEVNET SILENTLY — no error, no exit, nothing in any log.**
+MEASURED 2026-09-07. `up` printed nothing, kept running, and started NOTHING: `~/.yaci-cli/pids/`
+stayed empty, no node/ogmios/store process ever appeared, and `~/.yaci-cli/components/store/logs/`
+was untouched (its newest entry was a week old). From the outside this is indistinguishable from a
+slow boot, and waiting longer never resolves it.
+
+The cause was `cardano-node` failing to bind **port 3001**, which the devkit hardcodes in
+`node/node.sh` (`--port 3001`) and in `cluster-info.json`. On this machine 3001 was held by an
+unrelated **Next.js dev server**. Because nothing in the devkit surfaces that, the failure looks
+like the devnet is merely taking its time.
+
+**Two misleading signals will confirm the wrong theory if you let them.** `:10000` answered (the
+admin API is up, it just serves 404 on unknown routes — see "A green admin API proves nothing"
+below), and `:3001` answered 200 — but that was the *foreign* process, not the node. A responding
+port is evidence a port is BOUND, never evidence the right service bound it.
+
+⇒ **How to get the real error in one command** — run the node script directly, FROM ITS OWN
+DIRECTORY, since it uses relative paths and fails with a misleading
+`YamlException: configuration.yaml not found` from anywhere else:
+
+```bash
+cd ~/.yaci-cli/local-clusters/default/node && timeout 25 bash node.sh 2>&1 | tail -5
+# cardano-node: DiffusionError Network.Socket.bind: resource busy (Address in use)
+```
+
+Check the port before starting, since the check costs nothing and the diagnosis costs ten minutes:
+
+```bash
+ss -ltnp | grep -E ":(3001|8080|1337|1442|10000|8090)\b"
+```
+
+⚠ And whatever holds the port may not be yours. Here it was another project's dev server, running
+for days. **Do not kill a process to free a devnet port without checking what it is** — the devnet
+is disposable and the thing in its way may not be.
+
 **Some documentation has 10000 and 8080 swapped.** Verified on this machine: `yaci-cli` serves
 the admin API on **10000**, `yaci-store` is on **8080**.
 
