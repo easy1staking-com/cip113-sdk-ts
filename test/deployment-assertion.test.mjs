@@ -182,7 +182,10 @@ test("a 0.3.x blueprint is diagnosed by protocol version, not as a corrupt file"
   assert.throws(
     () => validateStandardBlueprint(old),
     (err) => {
-      assert.match(err.message, /earlier CIP-113 protocol version/);
+      // Casing changed when the verdict moved from symbol-presence to the
+      // preamble version (see blueprint-version-guard.test.mjs); the assertion
+      // itself is unchanged — an older blueprint must still be named as older.
+      assert.match(err.message, /EARLIER CIP-113 protocol version/);
       assert.match(err.message, /programmable_logic_global/, "must name what it found");
       assert.match(err.message, /transfer\.transfer\.withdraw/, "must name the successor");
       assert.match(err.message, /v0\.5\.0-alpha\.2/, "must name where to go");
