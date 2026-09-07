@@ -79,6 +79,37 @@ const DUMMY_VALIDATORS = {
   TRANSFER: "transfer.transfer.withdraw",
 } as const;
 
+/**
+ * ⚠ MEASURED, NOT FIXED: the five `1_300_000n` token outputs below are SHORT at
+ * a maximal asset name, and the fix is blocked on another branch.
+ *
+ * All five have the same shape — a programmable-logic-base address, one token,
+ * and a `voidData()` datum — so the datum is fixed and they LOOK like constants
+ * are safe. They are not: min-UTxO scales with SERIALISED OUTPUT SIZE, and two
+ * of the three things that scale it are supplied by the caller. The ASSET NAME
+ * is raw hex at every API boundary here and CIP-67-labelled names run to 32
+ * bytes; the QUANTITY is a CBOR integer that widens with magnitude.
+ *
+ * MEASURED against preview's live `coinsPerUtxoByte` of 4310 (2026-09-07):
+ *
+ *   live "DUM"+suffix (6B), qty 1000     1,202,490   OK, 97,510 headroom
+ *   live name (6B), qty 2^63-1           1,228,350   OK, 71,650 headroom
+ *   CIP-67 labelled 12B, qty 1000        1,215,420   OK, 84,580 headroom
+ *   max CIP-67 name (32B), qty 1000      1,318,860   SHORT by 18,860
+ *   max name (32B), qty 2^63-1           1,344,720   SHORT by 44,720
+ *
+ * Identical figures to `freeze-and-seize`, which is expected: the output shape
+ * is the same, so this is one defect appearing in two places rather than two
+ * defects. FES was fixed on branch `fix/min-utxo-computed` (283dad7) by
+ * computing the requirement from live protocol parameters.
+ *
+ * ⛔ THAT FIX IS NOT APPLIED HERE, DELIBERATELY. It needs `minUtxoForOutput`,
+ * which lives only on that branch, and that branch is behind a push gate that
+ * is not this migration's to lift. Pulling the helper across would let gated
+ * work arrive by the side door. The numbers above are recorded instead so the
+ * next reader inherits the measurement rather than rediscovering it — this is
+ * already the SECOND place this defect has been found.
+ */
 export function dummySubstandard(config: {
   blueprint: PlutusBlueprint;
 }): SubstandardPlugin {
