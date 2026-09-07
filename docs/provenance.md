@@ -49,8 +49,8 @@ to nothing.
 **1. `compilerVersion` comes from the artefact, never from your machine.** Read
 `blueprint.preamble.compiler.version`. Aiken is typically installed machine-globally, and the
 blueprints in this repo were built by **four different versions** — `v1.1.23+8949565` (standard
-v0.5.0-alpha.2), `v1.1.21+42babe5` (freeze-and-seize, dummy v0.2.0, standard v0.3.0),
-`v1.1.19+e525483` (dummy v0.1.0). A record naming your local toolchain is a false provenance
+v0.5.0-alpha.3 and v0.5.0-alpha.2), `v1.1.21+42babe5` (freeze-and-seize, dummy v0.2.0, standard
+v0.3.0), `v1.1.19+e525483` (dummy v0.1.0). A record naming your local toolchain is a false provenance
 claim, and it fails *worse* than an absent one: the verifier rebuilds with the wrong compiler and
 reports the resulting hash mismatch as **your** defect.
 
@@ -166,7 +166,8 @@ compiler required to reproduce it, and a `provenance` field:
 
 | blueprint | provenance |
 |---|---|
-| `standard/v0.5.0-alpha.2` | **VERIFIED** |
+| `standard/v0.5.0-alpha.3` | **VERIFIED** (2026-09-07) — the version this SDK TARGETS. Rebuilt from `f14b3594e1d6d3ae9e8511b99d39f17dfd4a3b65` with Aiken v1.1.23+8949565 in a throwaway clone, upstream's own copy deleted first so it could not be mistaken for the output; sha256 byte-identical. ⚠ Its reproducibility claim is SCOPED: `aiken.toml` pins `aiken-lang/fuzz` to the mutable branch `main`, which cannot reach the blueprint because fuzz is imported only by `.test.ak` modules and test modules are not emitted — that is *why* byte-identity holds despite the mutable pin |
+| `standard/v0.5.0-alpha.2` | **VERIFIED** — retained, NOT superseded: a live preview instance runs it (`deployments/preview/alpha2.json`). Deleting it would orphan a running deployment |
 | `substandards/freeze-and-seize/v0.1.0` | **VERIFIED** |
 | `standard/v0.3.0` | `UNVERIFIED` — **not recoverable by pushing**: its pin names *no commit at all*, because the artefact matches no commit in upstream's history. A legacy blueprint; `src/` does not load it |
 | `substandards/dummy/v0.2.0` | **VERIFIED** (2026-08-27) — rebuilt from `e63fa0a` with Aiken v1.1.21; sha256 byte-identical |

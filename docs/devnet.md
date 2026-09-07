@@ -191,11 +191,20 @@ always. Check `:1442` after any reset and restart it with
 
 ## What the devnet suite actually proves
 
-`npm run test:devnet` — 11 tests — covers, on chain: a protocol bootstrap in three transactions
-(one no longer fits the 16 kB limit); the deployed state read BACK and checked field by field; a
-`dummy` token registered, minted and transferred with the balance delta asserted on **both** sides;
-an in-place upgrade proven as a before/after delta; and three upgrade rails proven to be refused by
-`coordination_spend` itself (Ogmios 3010) rather than by client-side validation.
+`npm run test:devnet` — **16 tests** — covers, on chain: a protocol bootstrap in five transactions
+(one no longer fits the 16 kB limit, and alpha.3 added the dispatcher's reference script and stake
+registration); the deployed state read BACK and checked field by field; a `dummy` token registered,
+minted and transferred with the balance delta asserted on **both** sides; the full freeze-and-seize
+lifecycle including seize and burn; an in-place upgrade proven as a before/after delta; two upgrade
+rails proven to be refused by `protocol_params` itself (Ogmios 3010) rather than by client-side
+validation; and CIP-171 records recomputed to deployed hashes on two transactions.
+
+⛔ **This suite is the only thing that has ever proven the alpha.3 migration works.** It found three
+defects that survived every offline slice with `npm test` green: the harness loading the *wrong
+blueprint version* for the whole migration, an `assertDeploymentScripts` check asserting a
+payment-vs-stake relationship that does not exist (hidden by a fixture that used one value for both
+fields), and the dispatcher's withdrawal being wired with neither its script witness nor its
+registered stake credential. **None of the three was visible without a chain.**
 
 It does **not** prove anything about mainnet or preprod parameters, and it is deliberately not run
 in CI — there is no devnet there.
