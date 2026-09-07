@@ -276,8 +276,9 @@ async function findProtocolParamsUtxo(
 ): Promise<EvoUTxO.UTxO> {
   const ppUnit = deployment.protocolParams.policyId + stringToHex("ProtocolParams");
   const addr = EvoAddress.fromBech32(
-    // 0.5.x: params NFT lives at coordination_spend, not always_fail.
-    scriptAddress(networkId, deployment.coordination.scriptHash)
+    // alpha.3: protocol_params is one validator whose hash is BOTH the NFT
+    // policy and the address holding it — the minting policy naming itself.
+    scriptAddress(networkId, deployment.protocolParams.policyId)
   );
   const utxos = await client.getUtxosWithUnit(addr, ppUnit);
   if (utxos.length > 0) return utxos[0];
@@ -442,7 +443,7 @@ export function freezeAndSeizeSubstandard(config: {
       const refUnit = refAssetNameHex ? scripts.tokenPolicyId + refAssetNameHex : null;
 
       // 1. Find covering registry node
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const coveringNodeUtxo = findCoveringNode(registryUtxos, scripts.tokenPolicyId);
       if (!coveringNodeUtxo) throw new Error("Could not find covering registry node for insertion");
@@ -504,7 +505,7 @@ export function freezeAndSeizeSubstandard(config: {
       // 6. Build addresses
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
       const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
-      const registryMintPolicyId = ctx.standardScripts.registryMint.hash;
+      const registryMintPolicyId = ctx.standardScripts.registry.hash;
 
       // 7. Build asset maps — include CIP-68 ref token in the same mint (same policy + redeemer)
       const mintEntries = new Map<string, bigint>([[unit, quantity]]);
@@ -614,10 +615,14 @@ export function freezeAndSeizeSubstandard(config: {
       tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, issuanceCborHexUtxo] });
 
       // Attach scripts
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registrySpend.compiledCode) });
+      // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
+      // single validator (#117): this transaction both MINTS a node NFT and
+      // SPENDS the covering node, which in alpha.2 needed two scripts. It is
+      // now one script serving both purposes — attaching it twice would put a
+      // duplicate witness in the transaction.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registry.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registryMint.compiledCode) });
 
       // Required signer
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
@@ -658,7 +663,7 @@ export function freezeAndSeizeSubstandard(config: {
       }
 
       // 1. Find registry node as RefInput proof
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
@@ -742,7 +747,7 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 2. Find reference inputs
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
@@ -876,7 +881,7 @@ export function freezeAndSeizeSubstandard(config: {
       const returningAmount = totalTokenAmount - quantity;
 
       // 4. Find registry node reference input
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
@@ -1305,7 +1310,7 @@ export function freezeAndSeizeSubstandard(config: {
 
       // 2. Find reference inputs
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);

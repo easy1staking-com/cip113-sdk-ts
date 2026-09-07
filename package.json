@@ -18,6 +18,7 @@
     "test": "npm run build && node --test test/*.test.mjs",
     "test:devnet": "npm run build && node --import tsx --test --test-concurrency=1 test/devnet/*.test.mjs test/devnet/*.test.ts",
     "typecheck": "tsc --noEmit",
+    "typecheck:harness": "tsc --noEmit --module es2022 --target es2022 --moduleResolution bundler --strict --skipLibCheck test/harness/*.ts test/devnet/*.ts",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "peerDependencies": {

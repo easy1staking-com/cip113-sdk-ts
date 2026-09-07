@@ -33,21 +33,39 @@ import type { PlutusBlueprint, BlueprintValidator, HexString } from "../types.js
  */
 export const STANDARD_VALIDATORS = {
   ALWAYS_FAIL: "always_fail.always_fail.spend",
-  PROTOCOL_PARAMS_MINT: "protocol_params_mint.protocol_params_mint.mint",
+
+  /**
+   * ⚑ ONE HASH FOR POLICY *AND* ADDRESS. `protocol_params_mint` and
+   * `protocol_params_spend` merged into one multi-purpose validator (#118), so
+   * the params-NFT policy id and the params address's payment credential are
+   * now THE SAME VALUE. Two derivations that used to be independently correct
+   * are one; deriving them separately yields a valid-looking address that holds
+   * nothing.
+   */
+  PROTOCOL_PARAMS: "protocol_params.protocol_params.mint",
+
   PROGRAMMABLE_LOGIC_BASE: "programmable_logic_base.programmable_logic_base.spend",
   ISSUANCE_CBOR_HEX_MINT: "issuance_cbor_hex_mint.issuance_cbor_hex_mint.mint",
   ISSUANCE_MINT: "issuance_mint.issuance_mint.mint",
-  REGISTRY_MINT: "registry_mint.registry_mint.mint",
-  REGISTRY_SPEND: "registry_spend.registry_spend.spend",
 
-  /** PLG's transfer arm, renamed by #110. Withdraw-0. */
+  /** ⚑ ONE HASH FOR POLICY *AND* ADDRESS — same merge as PROTOCOL_PARAMS (#117). */
+  REGISTRY: "registry.registry.mint",
+
+  /**
+   * The dispatcher, REINTRODUCED by #117 after #110 dissolved it.
+   *
+   * ⚠ Its title is identical to the one 0.3.x used, and its ROLE is not: it
+   * carries the three delegate hashes as compile-time parameters and every
+   * programmable transaction now withdraws through it. Do not read its presence
+   * as evidence of any protocol version — see RETIRED_VALIDATORS.
+   */
+  PROGRAMMABLE_LOGIC_GLOBAL: "programmable_logic_global.programmable_logic_global.withdraw",
+
+  /** Withdraw-0 delegates. Arity 1 -> 3 in alpha.3; the titles did not change. */
   TRANSFER: "transfer.transfer.withdraw",
-  /** Seize / clawback, split out of PLG by #110. Withdraw-0. */
   THIRD_PARTY: "third_party.third_party.withdraw",
-  /** Now dispatched to directly by PLB, with no PLG hop. Withdraw-0. */
   UNFRACKING: "unfracking.unfracking.withdraw",
-  /** Holds the coordination UTxO — the live protocol wiring. Spend. */
-  COORDINATION_SPEND: "coordination_spend.coordination_spend.spend",
+
   /** Reference upgrade authority; the initial `upgrade_cred` target. Withdraw-0. */
   UPGRADE_MULTISIG: "upgrade_multisig.upgrade_multisig.withdraw",
 } as const;
@@ -58,10 +76,10 @@ export const STANDARD_VALIDATORS = {
  * ⚠ SINGLE SOURCE OF TRUTH for the version verdict. A migration flips this one
  * constant; nothing else should encode a target version.
  */
-export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.2";
+export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.3";
 
 /** Upstream commit the target version's blueprint was built from. */
-export const TARGET_PROTOCOL_COMMIT = "9db7e06";
+export const TARGET_PROTOCOL_COMMIT = "f14b359";
 
 /**
  * Validator titles that existed in an ADJACENT CIP-113 release and are absent
@@ -81,11 +99,19 @@ export const TARGET_PROTOCOL_COMMIT = "9db7e06";
  * once the direction is already known.
  */
 export const RETIRED_VALIDATORS: Record<string, string> = {
-  "programmable_logic_global.programmable_logic_global.withdraw":
-    "dissolved by upstream #110 — its transfer arm became `transfer.transfer.withdraw`, " +
-    "seize/clawback `third_party.third_party.withdraw`, and unfracking is reached " +
-    "directly by programmable_logic_base. ⚠ REINTRODUCED by #117 as the PLG dispatcher, " +
-    "so its presence alone does NOT date a blueprint in either direction",
+  "protocol_params_mint.protocol_params_mint.mint":
+    "merged with protocol_params_spend into `protocol_params` by upstream #118 — one validator, " +
+    "one hash serving as BOTH the params-NFT policy id and the params address's payment credential",
+  "protocol_params_spend.protocol_params_spend.spend":
+    "merged into `protocol_params` by upstream #118 (it was itself the #117 rename of " +
+    "`coordination_spend`)",
+  "coordination_spend.coordination_spend.spend":
+    "renamed `protocol_params_spend` by upstream #117, then merged into `protocol_params` by #118",
+  "registry_mint.registry_mint.mint":
+    "merged with registry_spend into `registry` by upstream #117 — one validator, one hash serving " +
+    "as BOTH the registry-node policy id and the node address's payment credential",
+  "registry_spend.registry_spend.spend":
+    "merged into `registry` by upstream #117",
 };
 
 /**

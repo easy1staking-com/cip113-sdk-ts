@@ -28,6 +28,8 @@ import {
   validateStandardBlueprint,
   compareProtocolVersions,
   TARGET_PROTOCOL_VERSION,
+  STANDARD_VALIDATORS,
+  RETIRED_VALIDATORS,
 } from "../dist/standard/blueprint.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -39,10 +41,17 @@ const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
  */
 const OLD = load("blueprints/standard/v0.3.0/plutus.json");
 
-/** The same validator set, relabelled as a version NEWER than the target. */
+/**
+ * The same validator set, relabelled as a version NEWER than the target.
+ *
+ * ⚠ The label must stay AHEAD of TARGET_PROTOCOL_VERSION as the target moves.
+ * It was "0.5.0-alpha.3" until S-4 made that the target; a fixture whose whole
+ * job is to be newer silently stops being newer the moment the SDK catches up,
+ * and the test would then pass for the wrong reason.
+ */
 const NEWER_WITH_SAME_SYMBOL = {
   ...OLD,
-  preamble: { ...OLD.preamble, version: "0.5.0-alpha.3" },
+  preamble: { ...OLD.preamble, version: "0.9.9" },
 };
 
 const messageOf = (bp) => {
@@ -75,11 +84,34 @@ test("THE DISCRIMINATING PAIR: same retired symbol, opposite verdicts", () => {
   assert.match(newer, /not a stale or corrupt file/);
 });
 
-test("both verdicts still carry the retired-symbol hint as colour", () => {
-  // The hint is useful; it just must not DECIDE the direction.
+test("both verdicts still carry a retired-symbol hint as colour", () => {
+  // The hint is useful; it just must not DECIDE the direction. v0.3.0 declares
+  // registry_mint / registry_spend, both retired by the alpha.3 merges.
   for (const bp of [OLD, NEWER_WITH_SAME_SYMBOL]) {
-    assert.match(messageOf(bp), /programmable_logic_global/);
+    assert.match(messageOf(bp), /registry_mint|registry_spend|protocol_params_mint/);
   }
+});
+
+test("⛔ programmable_logic_global is REQUIRED now, not retired — the crux", () => {
+  // The original defect was reading this symbol's presence as evidence of an
+  // OLD blueprint. #117 brought it back as the dispatcher, so in alpha.3 it is
+  // a REQUIRED validator. If it ever reappears in RETIRED_VALIDATORS while also
+  // being required, the guard is contradicting itself and the old bug is back.
+  assert.ok(
+    Object.values(STANDARD_VALIDATORS).includes(
+      "programmable_logic_global.programmable_logic_global.withdraw",
+    ),
+    "alpha.3 requires the dispatcher",
+  );
+  assert.ok(
+    !Object.keys(RETIRED_VALIDATORS).some((t) => t.startsWith("programmable_logic_global")),
+    "a required validator must never also be listed as retired",
+  );
+
+  // And the same symbol must not be BOTH required and retired for any title.
+  const required = new Set(Object.values(STANDARD_VALIDATORS));
+  const clash = Object.keys(RETIRED_VALIDATORS).filter((t) => required.has(t));
+  assert.deepEqual(clash, [], `titles listed as both required and retired: ${clash.join(", ")}`);
 });
 
 test("an unparseable version says so rather than guessing a direction", () => {
@@ -100,37 +132,44 @@ test("the target version itself, missing validators, is neither older nor newer"
   assert.doesNotMatch(msg, /EARLIER|LATER/);
 });
 
-test("a valid target blueprint still passes untouched", () => {
+test("the TARGET blueprint passes untouched", () => {
   assert.equal(
-    validateStandardBlueprint(load("blueprints/standard/v0.5.0-alpha.2/plutus.json")),
+    validateStandardBlueprint(load(`blueprints/standard/v${TARGET_PROTOCOL_VERSION}/plutus.json`)),
     undefined,
+    "the shipped blueprint for the target version must validate",
   );
+});
+
+test("alpha.2 is now diagnosed as EARLIER — a real artifact, not a fixture", () => {
+  // The SDK moved past it in S-4. It is still shipped, because a live preview
+  // instance runs it, so this is the message a caller pointed at the old
+  // blueprint will actually see.
+  const msg = messageOf(load("blueprints/standard/v0.5.0-alpha.2/plutus.json"));
+  assert.ok(msg, "alpha.2 is no longer the target and must be refused");
+  assert.match(msg, /EARLIER CIP-113 protocol version/);
+  assert.doesNotMatch(msg, /LATER/);
 });
 
 // ---------------------------------------------------------------------------
 // The real alpha.3 artifact — the case that exposed the defect
 // ---------------------------------------------------------------------------
 
-test("the VENDORED alpha.3 blueprint is refused as LATER, not as stale", () => {
-  // The synthetic pair above isolates the variable; this one is the artifact
-  // that actually broke the old guard. Both matter: the synthetic proves the
-  // MECHANISM, this proves it against real bytes with real titles.
+test("the VENDORED alpha.3 blueprint is now ACCEPTED — S-4's whole point", () => {
+  // In S-3 this asserted a LATER refusal. S-4 migrated the SDK to alpha.3, so
+  // the assertion INVERTS: the artifact that used to be refused must now
+  // validate. Kept as one test rather than deleted-and-rewritten so the flip is
+  // visible in the diff.
   const alpha3 = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
   assert.equal(alpha3.preamble.version, "0.5.0-alpha.3");
-
-  const msg = messageOf(alpha3);
-  assert.ok(msg, "alpha.3 is not yet supported and must be refused");
-  assert.match(msg, /LATER CIP-113 protocol version/);
-  assert.match(msg, /not a stale or corrupt file/);
-  assert.doesNotMatch(msg, /EARLIER/, "the original defect: newer reported as older");
-
-  // It must also name what is missing, so the refusal is actionable.
-  assert.match(msg, /PROTOCOL_PARAMS_MINT|REGISTRY_MINT|REGISTRY_SPEND|COORDINATION_SPEND/);
+  assert.equal(alpha3.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.3 IS the target now");
+  assert.equal(validateStandardBlueprint(alpha3), undefined);
 });
 
-test("alpha.3 declares the four validators this SDK has not migrated to", () => {
-  // Pins the shape of the work S-4 must do. If upstream changes this set, the
-  // migration's scope changed and someone must look.
+test("alpha.3 declares the merged validators, and not their predecessors", () => {
+  // Pinned the shape of S-4's work while it was pending; now pins that the
+  // artifact the SDK targets is still the one S-4 was written against. If
+  // upstream changes this set, the migration's ground moved and someone must
+  // look.
   const titles = load("blueprints/standard/v0.5.0-alpha.3/plutus.json").validators.map(
     (v) => v.title,
   );

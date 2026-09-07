@@ -108,73 +108,81 @@ export interface DeploymentParams {
   /** Bootstrap transaction hash */
   txHash: TxHash;
 
+  /**
+   * `protocol_params` — the merged mint+spend validator (#118).
+   *
+   * ⚑ `policyId` IS ALSO THE ADDRESS. The NFT policy id and the params
+   * address's payment credential are the same 28 bytes: the mint handler locks
+   * the NFT at `Script(own_policy)`, the minting policy naming itself. There is
+   * deliberately no second field for the address — a second field is a second
+   * chance to disagree.
+   *
+   * ⚠ No nonce and no lock-target hash. `protocol_params_mint` took
+   * `(utxo_ref, coordination_hash)`, `coordination_spend` took `(nonce)`; both
+   * validators are gone and the ordering cycle between them with them.
+   */
   protocolParams: {
+    /** The one-shot UTxO `protocol_params` is parameterised by. Already spent. */
     txInput: TxInput;
-    /**
-     * `protocol_params_mint`'s policy id — i.e. its script hash. This is the
-     * `params_policy` that now parameterises programmable_logic_base, transfer,
-     * third_party, unfracking and issuance_mint.
-     */
+    /** Policy id AND address payment credential. One value, one derivation. */
     policyId: PolicyId;
-    /**
-     * The lock target baked into `protocol_params_mint`'s 2nd parameter.
-     *
-     * ⚠ In 0.5.x this is `coordination_spend`'s hash. It was `always_fail`'s in
-     * 0.3.x, and upstream kept the parameter's ARITY AND TYPE identical across
-     * that change — so nothing in TypeScript, and nothing at build time, can
-     * tell you if you supply the wrong one. `assertDeploymentScripts` is the
-     * only thing that catches it. See PLAN.md D-04.
-     */
-    coordinationScriptHash: ScriptHash;
-  };
-
-  /**
-   * The coordination UTxO — the live protocol wiring, introduced by upstream's
-   * in-place upgradability work. It holds the protocol-params NFT and the
-   * 7-field ProgrammableLogicGlobalParams datum, and every programmable_logic_base
-   * spend reads it as a reference input.
-   */
-  /**
-   * The nonce `coordination_spend` was parameterised with. Carried so the lock
-   * target can be RE-DERIVED and asserted rather than trusted — without it,
-   * protocol_params_mint's 2nd parameter is unverifiable and the silent
-   * always_fail -> coordination_spend swap has nothing checking it.
-   */
-  coordinationNonce: HexString;
-
-  coordination: {
-    /** `coordination_spend`, parameterised by `coordinationNonce`. */
-    scriptHash: ScriptHash;
-    /** The UTxO itself, carried so callers can supply it as a reference input. */
+    /** The params UTxO itself, so callers can supply it as a reference input. */
     utxo: TxInput;
   };
 
   /**
-   * The three withdraw-0 delegates that replaced programmable_logic_global.
+   * The three withdraw-0 delegates.
    *
-   * PLB no longer routes through a coordinator: it dispatches straight to one
-   * of these, chosen by the BaseSpendRedeemer constructor. Their credentials
-   * live in the coordination datum (fields 2, 3, 4) and are swappable in place.
+   * ⚠ In alpha.3 they are parameterised `(prog_logic_cred, registry_node_cs,
+   * max_inline_datum_bytes)` — arity 1 -> 3 — while keeping their titles. They
+   * no longer read the params datum at all; PLB dispatches to the dispatcher,
+   * which names them at compile time.
    */
   transfer: { scriptHash: ScriptHash };
   thirdParty: { scriptHash: ScriptHash };
   unfracking: { scriptHash: ScriptHash };
 
   /**
+   * `programmable_logic_global` — the dispatcher, reintroduced by #117.
+   *
+   * Every programmable transaction now carries ONE MORE withdraw-0 (this one)
+   * on top of its delegate's, so every withdrawal index shifts relative to
+   * alpha.2.
+   *
+   * ⛔ UPGRADE-COHERENCE HAZARD, NOT ENFORCEABLE ON CHAIN. A script cannot read
+   * another script's parameters, so nothing verifies that the three hashes
+   * baked into this dispatcher agree with the `transfer_cred` /
+   * `third_party_cred` the params datum carries for `issuance_mint`. They must
+   * be written together. `assertDeploymentScripts` checks this off-chain
+   * precisely because the ledger cannot.
+   */
+  programmableLogicGlobal: { scriptHash: ScriptHash };
+
+  /**
+   * `max_inline_datum_bytes` — a deployment CHOICE, not a derivation.
+   *
+   * ⚠ It is a compile-time parameter of all three delegates, so it is baked
+   * into their hashes: two deployments differing only here are different
+   * protocols. Recorded because it cannot be recovered from any hash.
+   */
+  maxInlineDatumBytes: number;
+
+  /**
    * `upgrade_multisig` as deployed — upstream's REFERENCE upgrade authority.
    *
    * ⚠ Deployed and hash-asserted, but NOT necessarily the ACTIVE authority. See
-   * `upgradeAuthority`, which records what the coordination datum actually says.
+   * `upgradeAuthority`, which records what the params datum actually says.
    */
   upgradeMultisig: { scriptHash: ScriptHash };
 
   /**
-   * The credential in coordination datum field 5 — the authority that must
-   * produce a withdraw-0 for ANY upgrade, including a change of authority.
+   * The credential in the params datum's `upgrade_cred` field — the authority
+   * that must produce a withdraw-0 for ANY upgrade, including a change of
+   * authority.
    *
-   * `coordination_spend` only requires this credential to appear in
-   * `tx.withdrawals`; it "never inspects that authority's internals", so a
-   * verification-key credential is as valid as a script one.
+   * The validator only requires this credential to appear in `tx.withdrawals`;
+   * it never inspects the authority's internals, so a verification-key
+   * credential is as valid as a script one.
    *
    * ⚠ AN UNSATISFIABLE VALUE HERE IS A ONE-WAY BRICK, in upstream's own words:
    * it makes the authority check "permanently unsatisfiable, with no repair
@@ -194,19 +202,27 @@ export interface DeploymentParams {
     alwaysFailScriptHash: ScriptHash;
   };
 
-  directoryMint: {
+  /**
+   * `registry` — the merged mint+spend validator (#117).
+   *
+   * ⚑ `scriptHash` IS ALSO THE ADDRESS, same collapse as `protocolParams`: the
+   * registry-node NFT policy id and the node address's payment credential are
+   * one value. This replaces the old `directoryMint` / `directorySpend` PAIR,
+   * whose two hashes were independently correct and are now one.
+   */
+  registry: {
+    /** The one-shot UTxO `registry` is parameterised by. Already spent. */
     txInput: TxInput;
+    /** `issuance_cbor_hex_mint`'s policy — the registry's 2nd parameter. */
     issuanceScriptHash: ScriptHash;
-    scriptHash: ScriptHash;
-  };
-
-  directorySpend: {
-    policyId: PolicyId;
+    /** Node NFT policy id AND node address payment credential. */
     scriptHash: ScriptHash;
   };
 
   /** Reference inputs carrying the deployed scripts. */
   programmableBaseRefInput: TxInput;
+  /** The dispatcher's reference script — new in alpha.3, needed on every programmable tx. */
+  programmableLogicGlobalRefInput: TxInput;
   transferRefInput: TxInput;
   thirdPartyRefInput: TxInput;
   unfrackingRefInput: TxInput;

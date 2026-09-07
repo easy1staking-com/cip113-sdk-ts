@@ -3,15 +3,24 @@
  *
  * assertDeploymentScripts derives every parameterizable standard script hash
  * from the blueprint and checks it against DeploymentParams. It exists because
- * upstream changed protocol_params_mint's second parameter from
- * `always_fail_hash` to `coordination_addr_hash` — same arity, same ByteArray
- * type, different meaning. TypeScript cannot see that. Neither can `tsc`.
+ * a parameter can change MEANING without changing arity or type — upstream once
+ * changed protocol_params_mint's second parameter from `always_fail_hash` to
+ * `coordination_addr_hash`, same ByteArray either way. TypeScript cannot see
+ * that. Neither can `tsc`.
  *
- * The negative case below is the proof the check has teeth: it feeds a wrong
- * value of the correct type and requires the assertion to go red. Without it,
- * a passing positive case proves only that nothing was checked.
+ * alpha.3 supplies a sharper instance: `max_inline_datum_bytes` is an Int the
+ * DEPLOYER CHOOSES, baked into all three delegates and recoverable from no
+ * hash. The negative cases below are the proof the check has teeth — a wrong
+ * value of the correct type, and two same-signature delegates swapped. Without
+ * them a passing positive case proves only that nothing was checked.
  *
- * TARGET: CIP-113 0.5.0-alpha.2 (upstream 9db7e06).
+ * ⛔ AND ONE CHECK EXISTS BECAUSE THE LEDGER CANNOT DO IT. `programmable_logic_global`
+ * is compiled against the three delegate hashes, and no script can read another
+ * script's parameters — so nothing on chain verifies the dispatcher was built
+ * for the delegates actually deployed. A stale dispatcher fails at withdrawal
+ * time with an index error that names neither cause.
+ *
+ * TARGET: CIP-113 0.5.0-alpha.3 (upstream f14b359).
  *
  * The preprod deployment this repo used to assert against was a 0.3.x protocol
  * instance and is no longer REPRESENTABLE — programmable_logic_global does not
@@ -37,63 +46,64 @@ import { validateStandardBlueprint } from "../dist/standard/blueprint.js";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
 
-const blueprint = load("blueprints/standard/v0.5.0-alpha.2/plutus.json");
+const blueprint = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
 
 /** Arbitrary but fixed inputs — nothing here needs to be a real deployment. */
 const PP_TX = { txHash: "aa".repeat(32), outputIndex: 0 };
 const ISS_TX = { txHash: "cc".repeat(32), outputIndex: 1 };
-const NONCE = "9f".repeat(16);
+const REG_TX = { txHash: "bb".repeat(32), outputIndex: 0 };
 const ALWAYS_FAIL = "dd".repeat(28);
 const SIGNER = "11".repeat(28);
+const MAX_INLINE_DATUM_BYTES = 512;
 
 /**
- * A self-consistent 0.5.0-alpha.2 deployment, derived from the blueprint.
+ * A self-consistent 0.5.0-alpha.3 deployment, derived from the blueprint.
  *
  * DERIVED, not observed: no protocol instance with these hashes has ever been
  * deployed. It is sufficient for these tests, which are about whether the
- * assertion mechanism works — not about any particular chain state.
+ * assertion MECHANISM works — not about any particular chain state.
+ *
+ * ⚑ Note what is NOT here any more: no nonce, and no separate registry-spend or
+ * params-address hash. alpha.3 merged each pair into one validator whose single
+ * hash is both the policy id and the address's payment credential.
  */
 function deriveDeployment(bp) {
   const b = scriptsModule.createStandardScripts(bp);
 
-  const coordination = b.coordinationSpend(NONCE).hash;
-  const paramsPolicy = b.protocolParamsMint(PP_TX, coordination).hash;
+  const paramsPolicy = b.protocolParams(PP_TX).hash;
   const plb = b.programmableLogicBase(paramsPolicy).hash;
-  const transfer = b.transfer(paramsPolicy).hash;
-  const thirdParty = b.thirdParty(paramsPolicy).hash;
-  const unfracking = b.unfracking(paramsPolicy).hash;
-  const registrySpend = b.registrySpend(paramsPolicy).hash;
   const issuanceCborHex = b.issuanceCborHexMint(ISS_TX, ALWAYS_FAIL).hash;
-  const registryMint = b.registryMint(PP_TX, issuanceCborHex, registrySpend).hash;
+  // The registry no longer depends on the params chain at all — it can be built
+  // straight after issuance_cbor_hex_mint.
+  const registry = b.registry(REG_TX, issuanceCborHex).hash;
+
+  const transfer = b.transfer(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
+  const thirdParty = b.thirdParty(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
+  const unfracking = b.unfracking(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
+  // Built LAST: it names the three delegates at compile time.
+  const plg = b.programmableLogicGlobal(transfer, thirdParty, unfracking).hash;
   const upgradeMultisig = b.upgradeMultisig([SIGNER], 1).hash;
 
   const ref = (i) => ({ txHash: "ee".repeat(32), outputIndex: i });
 
   return {
     txHash: "ee".repeat(32),
-    coordinationNonce: NONCE,
-    coordination: { scriptHash: coordination, utxo: ref(0) },
-    protocolParams: {
-      txInput: PP_TX,
-      policyId: paramsPolicy,
-      coordinationScriptHash: coordination,
-    },
+    protocolParams: { txInput: PP_TX, policyId: paramsPolicy, utxo: ref(0) },
     programmableLogicBase: { scriptHash: plb },
     transfer: { scriptHash: transfer },
     thirdParty: { scriptHash: thirdParty },
     unfracking: { scriptHash: unfracking },
+    programmableLogicGlobal: { scriptHash: plg },
+    maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
     upgradeMultisig: { scriptHash: upgradeMultisig },
-    issuance: {
-      txInput: ISS_TX,
-      policyId: issuanceCborHex,
-      alwaysFailScriptHash: ALWAYS_FAIL,
-    },
-    directoryMint: { txInput: PP_TX, issuanceScriptHash: issuanceCborHex, scriptHash: registryMint },
-    directorySpend: { policyId: paramsPolicy, scriptHash: registrySpend },
+    upgradeAuthority: { type: "key", hash: SIGNER },
+    issuance: { txInput: ISS_TX, policyId: issuanceCborHex, alwaysFailScriptHash: ALWAYS_FAIL },
+    registry: { txInput: REG_TX, issuanceScriptHash: issuanceCborHex, scriptHash: registry },
     programmableBaseRefInput: ref(1),
-    transferRefInput: ref(2),
-    thirdPartyRefInput: ref(3),
-    unfrackingRefInput: ref(4),
+    programmableLogicGlobalRefInput: ref(2),
+    transferRefInput: ref(3),
+    thirdPartyRefInput: ref(4),
+    unfrackingRefInput: ref(5),
   };
 }
 
@@ -101,18 +111,18 @@ const DEPLOYMENT = deriveDeployment(blueprint);
 
 /** Every check the assertion performs, so a silent shrink is caught. */
 const EXPECTED_CHECKS = [
-  "coordination_spend",
-  "protocol_params_mint",
+  "protocol_params (policy == address)",
   "programmable_logic_base",
   "transfer",
   "third_party",
   "unfracking",
+  "programmable_logic_global (dispatcher coherence)",
   "issuance_cbor_hex_mint",
-  "registry_spend",
-  "registry_mint",
+  "registry (policy == address)",
+  "upgrade_multisig",
 ];
 
-test("POSITIVE: every derivable 0.5.0-alpha.2 script is checked and reproduces", () => {
+test("POSITIVE: every derivable 0.5.0-alpha.3 script is checked and reproduces", () => {
   const checks = assertDeploymentScripts(blueprint, DEPLOYMENT);
   assert.deepEqual(
     checks.map((c) => c.name).sort(),
@@ -123,20 +133,24 @@ test("POSITIVE: every derivable 0.5.0-alpha.2 script is checked and reproduces",
 });
 
 test("NEGATIVE (fail-first): a wrong value of the CORRECT type is caught", () => {
-  // The exact 0.5.x hazard: protocol_params_mint's 2nd parameter keeps its
-  // arity and ByteArray type but now means coordination_spend's hash. Feed it
-  // the always_fail hash it USED to take — the mistake a 0.3.x-era deployment
-  // record, or a stale doc, would produce.
+  // alpha.3's version of the hazard, and it is sharper than alpha.2's.
+  // `max_inline_datum_bytes` is an Int the DEPLOYER CHOOSES — it cannot be
+  // derived from anything, cannot be recovered from any hash, and is baked into
+  // all THREE delegates. A wrong value is a perfectly well-typed number that
+  // silently produces three different scripts, and then a fourth: the
+  // dispatcher named them.
   const wrong = structuredClone(DEPLOYMENT);
-  wrong.protocolParams.coordinationScriptHash = ALWAYS_FAIL;
+  wrong.maxInlineDatumBytes = MAX_INLINE_DATUM_BYTES + 1;
 
   assert.throws(
     () => assertDeploymentScripts(blueprint, wrong),
     (err) => {
       assert.ok(err instanceof DeploymentMismatchError, "should be a DeploymentMismatchError");
-      assert.ok(
-        err.mismatches.some((m) => m.name === "protocol_params_mint"),
-        `expected protocol_params_mint to mismatch, got: ${err.mismatches.map((m) => m.name).join(", ")}`
+      const names = err.mismatches.map((m) => m.name).sort();
+      assert.deepEqual(
+        names,
+        ["third_party", "transfer", "unfracking"],
+        `off-by-one on a chosen Int must break all three delegates, got: ${names.join(", ")}`
       );
       return true;
     },
@@ -157,7 +171,15 @@ test("NEGATIVE (fail-first): the three delegates are distinguished from each oth
     () => assertDeploymentScripts(blueprint, swapped),
     (err) => {
       const names = err.mismatches.map((m) => m.name).sort();
-      assert.deepEqual(names, ["third_party", "transfer"], `got: ${names.join(", ")}`);
+      // ⚑ THREE, not two. The dispatcher is derived FROM the delegate hashes,
+      // so swapping two delegates also makes the deployment's recorded
+      // dispatcher unreproducible. That third mismatch is the coherence check
+      // upstream cannot enforce on chain doing its job.
+      assert.deepEqual(
+        names,
+        ["programmable_logic_global (dispatcher coherence)", "third_party", "transfer"],
+        `got: ${names.join(", ")}`
+      );
       return true;
     },
     "swapping two same-signature delegates MUST be caught"
@@ -186,16 +208,21 @@ test("a 0.3.x blueprint is diagnosed by protocol version, not as a corrupt file"
       // preamble version (see blueprint-version-guard.test.mjs); the assertion
       // itself is unchanged — an older blueprint must still be named as older.
       assert.match(err.message, /EARLIER CIP-113 protocol version/);
-      assert.match(err.message, /programmable_logic_global/, "must name what it found");
-      assert.match(err.message, /transfer\.transfer\.withdraw/, "must name the successor");
-      assert.match(err.message, /v0\.5\.0-alpha\.2/, "must name where to go");
+      // ⚠ The named symbol MOVED with the target. Until S-4 this asserted
+      // `programmable_logic_global`; alpha.3 REQUIRES that validator, so it is
+      // no longer a retired-symbol hint. v0.3.0's retired symbols are now the
+      // pre-merge registry and params pair.
+      assert.match(err.message, /registry_mint|registry_spend|protocol_params_mint/,
+        "must name what it found");
+      assert.match(err.message, /merged/, "must say what replaced it");
+      assert.match(err.message, /v0\.5\.0-alpha\.3/, "must name where to go");
       return true;
     },
     "loading old contracts must explain the version gap, not report a missing validator"
   );
 });
 
-test("the shipped 0.5.0-alpha.2 blueprint validates", () => {
+test("the shipped 0.5.0-alpha.3 blueprint validates", () => {
   validateStandardBlueprint(blueprint);
 });
 
@@ -222,9 +249,11 @@ test("VALUABLE on load: a stale deployment against a changed blueprint is caught
   // deployment stays put. This repo shipped exactly that — same v0.3.0
   // directory name, 4 of 8 validator hashes moved.
   const changed = structuredClone(blueprint);
-  const v = changed.validators.find((x) => x.title === "registry_spend.registry_spend.spend");
+  // registry_spend is gone in alpha.3 (merged into `registry`), so the donor
+  // pair moved with it. The mechanism under test is unchanged.
+  const v = changed.validators.find((x) => x.title === "registry.registry.mint");
   const donor = changed.validators.find((x) => x.title === "unfracking.unfracking.withdraw");
-  assert.ok(v && donor, "fixture must contain registry_spend and unfracking");
+  assert.ok(v && donor, "fixture must contain registry and unfracking");
 
   // Substitute a DIFFERENT validator's program — the real-world defect being
   // modelled (a blueprint replaced in place under an unchanged directory name).
@@ -233,7 +262,7 @@ test("VALUABLE on load: a stale deployment against a changed blueprint is caught
   // test's original mutation and it is UNSOUND: UPLC is flat-encoded and
   // padded to a byte boundary, so the trailing bits are often padding that the
   // decode -> apply-params -> re-encode round trip simply regenerates.
-  // MEASURED on this artifact: flipping registry_spend's final byte
+  // MEASURED on the alpha.2 artifact: flipping registry_spend's final byte
   // (…400801 -> …400800) leaves the parameterised hash BIT-IDENTICAL at
   // 95c6f275…1147c7, so the assertion had nothing to catch and the test passed
   // by throwing nothing. It only ever worked because v0.3.0's tail happened to
@@ -247,8 +276,8 @@ test("VALUABLE on load: a stale deployment against a changed blueprint is caught
     (err) => {
       assert.ok(err instanceof DeploymentMismatchError);
       assert.ok(
-        err.mismatches.some((m) => m.name === "registry_spend"),
-        `expected registry_spend to mismatch, got: ${err.mismatches.map((m) => m.name).join(", ")}`
+        err.mismatches.some((m) => m.name === "registry (policy == address)"),
+        `expected registry to mismatch, got: ${err.mismatches.map((m) => m.name).join(", ")}`
       );
       return true;
     },

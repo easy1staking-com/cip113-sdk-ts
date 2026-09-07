@@ -55,27 +55,80 @@ import {
 
 export interface StandardScripts {
   alwaysFail(nonce: HexString): PlutusScript;
-  /** NEW in 0.5.x — the coordination UTxO's spender; nonce is arbitrary, per deployment. */
-  coordinationSpend(nonce: HexString): PlutusScript;
-  /** 2nd param is coordination_spend's hash in 0.5.x, always_fail's in 0.3.x. */
-  protocolParamsMint(utxoRef: TxInput, coordinationHash: ScriptHash): PlutusScript;
-  /** Takes the params-NFT POLICY now, not PLG's credential. */
+
+  /**
+   * `protocol_params` — mint AND spend in one validator (#118).
+   *
+   * ⚑ ITS HASH IS BOTH THE PARAMS-NFT POLICY ID AND THE PARAMS ADDRESS'S
+   * PAYMENT CREDENTIAL. The mint handler locks the NFT at `Script(own_policy)`
+   * — the minting policy naming itself. Callers that used to derive the policy
+   * from `protocol_params_mint` and the address from `protocol_params_spend`
+   * must collapse to this one derivation.
+   *
+   * ⚠ NO NONCE, and no lock-target parameter. `protocol_params_mint` took
+   * `(utxo_ref, coordination_hash)` and `coordination_spend` took `(nonce)`;
+   * both are gone. The ordering cycle they created is dissolved with them.
+   */
+  protocolParams(utxoRef: TxInput): PlutusScript;
+
+  /** Takes the params-NFT POLICY — which is now also the params address. */
   programmableLogicBase(paramsPolicy: PolicyId): PlutusScript;
-  /** PLG's transfer arm, renamed by #110. */
-  transfer(paramsPolicy: PolicyId): PlutusScript;
-  /** Seize / clawback, split out of PLG by #110. */
-  thirdParty(paramsPolicy: PolicyId): PlutusScript;
-  unfracking(paramsPolicy: PolicyId): PlutusScript;
+
+  /**
+   * The three withdraw-0 delegates. Arity 1 -> 3 in alpha.3, SAME TITLES.
+   *
+   * ⚠ `progLogicCred` is programmable_logic_base's hash, NOT the dispatcher's.
+   * The dispatcher is parameterised BY these three, so pointing them at it
+   * would be a parameter cycle: a value derived from your own script hash can
+   * never be your own parameter.
+   */
+  transfer(
+    progLogicCred: ScriptHash,
+    registryPolicy: PolicyId,
+    maxInlineDatumBytes: number | bigint,
+  ): PlutusScript;
+  thirdParty(
+    progLogicCred: ScriptHash,
+    registryPolicy: PolicyId,
+    maxInlineDatumBytes: number | bigint,
+  ): PlutusScript;
+  unfracking(
+    progLogicCred: ScriptHash,
+    registryPolicy: PolicyId,
+    maxInlineDatumBytes: number | bigint,
+  ): PlutusScript;
+
+  /**
+   * `programmable_logic_global` — the dispatcher, reintroduced by #117.
+   *
+   * Carries the three delegate hashes as compile-time parameters, so replacing
+   * ONE delegate requires deploying a new dispatcher too. Must be built AFTER
+   * all three delegates.
+   *
+   * ⚠ Its parameters are bare ScriptHashes, not Credentials — unlike
+   * `issuance_mint`'s, which wrap the same 28 bytes in a Credential
+   * constructor. Same bytes, different encoding, no type to tell them apart.
+   */
+  programmableLogicGlobal(
+    transferHash: ScriptHash,
+    thirdPartyHash: ScriptHash,
+    unfrackingHash: ScriptHash,
+  ): PlutusScript;
+
   upgradeMultisig(signers: HexString[], threshold: number | bigint): PlutusScript;
   issuanceCborHexMint(utxoRef: TxInput, alwaysFailHash: ScriptHash): PlutusScript;
-  /** Arity 2 -> 3: gained registry_spend's credential. */
-  registryMint(
-    utxoRef: TxInput,
-    issuanceCborHexPolicy: PolicyId,
-    registrySpendHash: ScriptHash,
-  ): PlutusScript;
-  registrySpend(paramsPolicy: PolicyId): PlutusScript;
-  /** Arity 3 -> 4: gained params_policy. */
+
+  /**
+   * `registry` — mint AND spend in one validator (#117).
+   *
+   * ⚑ ONE HASH FOR POLICY AND ADDRESS, exactly as `protocolParams`. Arity
+   * dropped 3 -> 2: `registry_spend_cred` is gone, and so is the params-policy
+   * parameter the old spend side took — the registry no longer depends on the
+   * protocol-params chain at all and can be built immediately after
+   * `issuanceCborHexMint`.
+   */
+  registry(utxoRef: TxInput, issuanceCborHexPolicy: PolicyId): PlutusScript;
+
   issuanceMint(
     plbHash: ScriptHash,
     registryNodePolicy: PolicyId,
@@ -156,15 +209,8 @@ export function createStandardScripts(
       return parameterize(STANDARD_VALIDATORS.ALWAYS_FAIL, [Data.bytearray(nonce)]);
     },
 
-    coordinationSpend(nonce) {
-      return parameterize(STANDARD_VALIDATORS.COORDINATION_SPEND, [Data.bytearray(nonce)]);
-    },
-
-    protocolParamsMint(utxoRef, coordinationHash) {
-      return parameterize(STANDARD_VALIDATORS.PROTOCOL_PARAMS_MINT, [
-        outputReference(utxoRef),
-        Data.bytearray(coordinationHash),
-      ]);
+    protocolParams(utxoRef) {
+      return parameterize(STANDARD_VALIDATORS.PROTOCOL_PARAMS, [outputReference(utxoRef)]);
     },
 
     programmableLogicBase(paramsPolicy) {
@@ -174,16 +220,28 @@ export function createStandardScripts(
       ]);
     },
 
-    transfer(paramsPolicy) {
-      return parameterize(STANDARD_VALIDATORS.TRANSFER, [Data.bytearray(paramsPolicy)]);
+    transfer(progLogicCred, registryPolicy, maxInlineDatumBytes) {
+      return parameterize(STANDARD_VALIDATORS.TRANSFER, [
+        scriptCredential(progLogicCred),
+        Data.bytearray(registryPolicy),
+        Data.int(BigInt(maxInlineDatumBytes)),
+      ]);
     },
 
-    thirdParty(paramsPolicy) {
-      return parameterize(STANDARD_VALIDATORS.THIRD_PARTY, [Data.bytearray(paramsPolicy)]);
+    thirdParty(progLogicCred, registryPolicy, maxInlineDatumBytes) {
+      return parameterize(STANDARD_VALIDATORS.THIRD_PARTY, [
+        scriptCredential(progLogicCred),
+        Data.bytearray(registryPolicy),
+        Data.int(BigInt(maxInlineDatumBytes)),
+      ]);
     },
 
-    unfracking(paramsPolicy) {
-      return parameterize(STANDARD_VALIDATORS.UNFRACKING, [Data.bytearray(paramsPolicy)]);
+    unfracking(progLogicCred, registryPolicy, maxInlineDatumBytes) {
+      return parameterize(STANDARD_VALIDATORS.UNFRACKING, [
+        scriptCredential(progLogicCred),
+        Data.bytearray(registryPolicy),
+        Data.int(BigInt(maxInlineDatumBytes)),
+      ]);
     },
 
     upgradeMultisig(signers, threshold) {
@@ -200,17 +258,22 @@ export function createStandardScripts(
       ]);
     },
 
-    registryMint(utxoRef, issuanceCborHexPolicy, registrySpendHash) {
-      return parameterize(STANDARD_VALIDATORS.REGISTRY_MINT, [
+    registry(utxoRef, issuanceCborHexPolicy) {
+      return parameterize(STANDARD_VALIDATORS.REGISTRY, [
         outputReference(utxoRef),
         Data.bytearray(issuanceCborHexPolicy),
-        scriptCredential(registrySpendHash),
       ]);
     },
 
-    registrySpend(paramsPolicy) {
-      return parameterize(STANDARD_VALIDATORS.REGISTRY_SPEND, [
-        Data.bytearray(paramsPolicy),
+    programmableLogicGlobal(transferHash, thirdPartyHash, unfrackingHash) {
+      // Bare ScriptHashes — NOT scriptCredential(). The blueprint declares
+      // `aiken/crypto/ScriptHash` here, while issuance_mint declares
+      // `cardano/address/Credential` for the same 28 bytes. Wrapping these
+      // would produce a different script that still hashes and still deploys.
+      return parameterize(STANDARD_VALIDATORS.PROGRAMMABLE_LOGIC_GLOBAL, [
+        Data.bytearray(transferHash),
+        Data.bytearray(thirdPartyHash),
+        Data.bytearray(unfrackingHash),
       ]);
     },
 
@@ -297,39 +360,54 @@ export function assertDeploymentScripts(
 ): ScriptHashCheck[] {
   const builders = createStandardScripts(blueprint);
 
+  const plb = deployment.programmableLogicBase.scriptHash;
+  const registryPolicy = deployment.registry.scriptHash;
+  const mid = deployment.maxInlineDatumBytes;
+
   const checks: ScriptHashCheck[] = [
     {
-      name: "coordination_spend",
-      derived: builders.coordinationSpend(deployment.coordinationNonce).hash,
-      deployed: deployment.coordination.scriptHash,
-    },
-    {
-      name: "protocol_params_mint",
-      derived: builders.protocolParamsMint(
-        deployment.protocolParams.txInput,
-        deployment.protocolParams.coordinationScriptHash
-      ).hash,
+      // ⚑ ONE derivation for what used to be two. The params NFT policy and the
+      // params address's payment credential are the same value in alpha.3, so
+      // deriving them separately is not "belt and braces" — it is two chances
+      // to disagree about one fact.
+      name: "protocol_params (policy == address)",
+      derived: builders.protocolParams(deployment.protocolParams.txInput).hash,
       deployed: deployment.protocolParams.policyId,
     },
     {
       name: "programmable_logic_base",
       derived: builders.programmableLogicBase(deployment.protocolParams.policyId).hash,
-      deployed: deployment.programmableLogicBase.scriptHash,
+      deployed: plb,
     },
     {
       name: "transfer",
-      derived: builders.transfer(deployment.protocolParams.policyId).hash,
+      derived: builders.transfer(plb, registryPolicy, mid).hash,
       deployed: deployment.transfer.scriptHash,
     },
     {
       name: "third_party",
-      derived: builders.thirdParty(deployment.protocolParams.policyId).hash,
+      derived: builders.thirdParty(plb, registryPolicy, mid).hash,
       deployed: deployment.thirdParty.scriptHash,
     },
     {
       name: "unfracking",
-      derived: builders.unfracking(deployment.protocolParams.policyId).hash,
+      derived: builders.unfracking(plb, registryPolicy, mid).hash,
       deployed: deployment.unfracking.scriptHash,
+    },
+    {
+      // ⛔ THE COHERENCE CHECK THE LEDGER CANNOT DO. A script cannot read
+      // another script's parameters, so nothing on chain verifies that the
+      // dispatcher was compiled against THESE three delegates. Deriving it from
+      // the deployment's own delegate hashes is the only place that mismatch
+      // can be caught — and a dispatcher naming stale delegates fails at
+      // withdrawal time with an index error, never with "wrong dispatcher".
+      name: "programmable_logic_global (dispatcher coherence)",
+      derived: builders.programmableLogicGlobal(
+        deployment.transfer.scriptHash,
+        deployment.thirdParty.scriptHash,
+        deployment.unfracking.scriptHash,
+      ).hash,
+      deployed: deployment.programmableLogicGlobal.scriptHash,
     },
     {
       name: "issuance_cbor_hex_mint",
@@ -340,18 +418,22 @@ export function assertDeploymentScripts(
       deployed: deployment.issuance.policyId,
     },
     {
-      name: "registry_spend",
-      derived: builders.registrySpend(deployment.protocolParams.policyId).hash,
-      deployed: deployment.directorySpend.scriptHash,
+      // ⚑ Also one derivation for what used to be two (registry_mint's policy
+      // and registry_spend's address).
+      name: "registry (policy == address)",
+      derived: builders.registry(
+        deployment.registry.txInput,
+        deployment.registry.issuanceScriptHash,
+      ).hash,
+      deployed: registryPolicy,
     },
     {
-      name: "registry_mint",
-      derived: builders.registryMint(
-        deployment.directoryMint.txInput,
-        deployment.issuance.policyId,
-        deployment.directorySpend.scriptHash
+      name: "upgrade_multisig",
+      derived: builders.upgradeMultisig(
+        [deployment.upgradeAuthority.hash],
+        1,
       ).hash,
-      deployed: deployment.directoryMint.scriptHash,
+      deployed: deployment.upgradeMultisig.scriptHash,
     },
   ];
 
@@ -379,49 +461,49 @@ export function buildDeploymentScripts(
   const builders = createStandardScripts(blueprint);
   const paramsPolicy = deployment.protocolParams.policyId;
 
+  const plb = deployment.programmableLogicBase.scriptHash;
+  const registryPolicy = deployment.registry.scriptHash;
+  const mid = deployment.maxInlineDatumBytes;
+
   return {
-    coordinationSpend: builders.coordinationSpend(deployment.coordinationNonce),
-    protocolParamsMint: builders.protocolParamsMint(
-      deployment.protocolParams.txInput,
-      deployment.protocolParams.coordinationScriptHash
-    ),
+    protocolParams: builders.protocolParams(deployment.protocolParams.txInput),
     programmableLogicBase: builders.programmableLogicBase(paramsPolicy),
-    transfer: builders.transfer(paramsPolicy),
-    thirdParty: builders.thirdParty(paramsPolicy),
-    unfracking: builders.unfracking(paramsPolicy),
+    transfer: builders.transfer(plb, registryPolicy, mid),
+    thirdParty: builders.thirdParty(plb, registryPolicy, mid),
+    unfracking: builders.unfracking(plb, registryPolicy, mid),
+    programmableLogicGlobal: builders.programmableLogicGlobal(
+      deployment.transfer.scriptHash,
+      deployment.thirdParty.scriptHash,
+      deployment.unfracking.scriptHash,
+    ),
     issuanceCborHexMint: builders.issuanceCborHexMint(
       deployment.issuance.txInput,
       deployment.issuance.alwaysFailScriptHash
     ),
-    registryMint: builders.registryMint(
-      deployment.directoryMint.txInput,
-      deployment.issuance.policyId,
-      deployment.directorySpend.scriptHash
+    registry: builders.registry(
+      deployment.registry.txInput,
+      deployment.registry.issuanceScriptHash,
     ),
-    registrySpend: builders.registrySpend(paramsPolicy),
     buildIssuanceMint(mintingLogicHash: ScriptHash) {
-      return builders.issuanceMint(
-        deployment.programmableLogicBase.scriptHash,
-        deployment.directoryMint.scriptHash,
-        mintingLogicHash,
-        paramsPolicy
-      );
+      return builders.issuanceMint(plb, registryPolicy, mintingLogicHash, paramsPolicy);
     },
   };
 }
 
 export interface ResolvedStandardScripts {
-  coordinationSpend: PlutusScript;
-  protocolParamsMint: PlutusScript;
+  /** Mint AND spend in one script; its hash is both policy and address. */
+  protocolParams: PlutusScript;
   programmableLogicBase: PlutusScript;
-  /** PLG's transfer arm, renamed by #110. */
+  /** Withdraw-0 delegates. Parameterised (plb, registryPolicy, maxInlineDatumBytes). */
   transfer: PlutusScript;
   /** Seize / clawback. */
   thirdParty: PlutusScript;
   unfracking: PlutusScript;
+  /** The dispatcher every programmable transaction withdraws through. */
+  programmableLogicGlobal: PlutusScript;
   issuanceCborHexMint: PlutusScript;
-  registryMint: PlutusScript;
-  registrySpend: PlutusScript;
+  /** Mint AND spend in one script; its hash is both policy and address. */
+  registry: PlutusScript;
   /** Build issuance_mint for a specific minting logic — NOT cached */
   buildIssuanceMint(mintingLogicHash: ScriptHash): PlutusScript;
 }

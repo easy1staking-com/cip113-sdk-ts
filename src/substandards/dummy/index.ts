@@ -154,7 +154,7 @@ export function dummySubstandard(config: {
   async function findParamsUtxo(): Promise<EvoUTxO.UTxO> {
     const unit = ctx.deployment.protocolParams.policyId + stringToHex("ProtocolParams");
     const addr = EvoAddress.fromBech32(
-      scriptAddress(networkId, ctx.deployment.coordination.scriptHash)
+      scriptAddress(networkId, ctx.deployment.protocolParams.policyId)
     );
     const utxos = await ctx.client.getUtxosWithUnit(addr, unit);
     if (utxos.length === 0) {
@@ -269,8 +269,8 @@ export function dummySubstandard(config: {
       const tokenPolicyId = issuanceMint.hash;
       const unit = tokenPolicyId + assetName;
 
-      const registryMintPolicyId = ctx.standardScripts.registryMint.hash;
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registryMintPolicyId = ctx.standardScripts.registry.hash;
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
 
       const covering = findCoveringNode(registryUtxos, tokenPolicyId);
@@ -380,8 +380,12 @@ export function dummySubstandard(config: {
       const issuanceCborUtxo = await findIssuanceCborUtxo();
       tx = tx.readFrom({ referenceInputs: [paramsUtxo, issuanceCborUtxo] });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registryMint.compiledCode) });
-      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registrySpend.compiledCode) });
+      // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
+      // single validator (#117): this transaction both MINTS a node NFT and
+      // SPENDS the covering node, which in alpha.2 needed two scripts. It is
+      // now one script serving both purposes — attaching it twice would put a
+      // duplicate witness in the transaction.
+      tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registry.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
       return finish(tx, feePayerAddress, { tokenPolicyId, unit, outputIndices: { OUT_TOKEN, OUT_NEW_NODE, OUT_COVERING } });
@@ -408,7 +412,7 @@ export function dummySubstandard(config: {
         );
       }
 
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const node = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!node) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
@@ -490,7 +494,7 @@ export function dummySubstandard(config: {
       const { selected, totalTokenAmount } = selectUtxosForAmount(tokenUtxos, unit, quantity);
       const returningAmount = totalTokenAmount - quantity;
 
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
@@ -624,7 +628,7 @@ export function dummySubstandard(config: {
       const returningAmount = totalTokenAmount - quantity;
 
       // 4. Find registry node reference input
-      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registrySpend.hash);
+      const registrySpendAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registrySpendAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) {
