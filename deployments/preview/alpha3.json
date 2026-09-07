@@ -1,0 +1,73 @@
+{
+  "txHash": "2108b0a1cfda79dc535a4252ddb6222d6bb4ef75504adae7395b6f70c8042ac8",
+  "protocolParams": {
+    "txInput": {
+      "txHash": "7879c98c38243f542c5ec57b37166e392b160b5e9eb1bbbc701d2e261ec35f88",
+      "outputIndex": 0
+    },
+    "policyId": "50304904ff8700ac831ec7d8ee1c3275c4216f530dbe0ef45409c5e9",
+    "utxo": {
+      "txHash": "2108b0a1cfda79dc535a4252ddb6222d6bb4ef75504adae7395b6f70c8042ac8",
+      "outputIndex": 0
+    }
+  },
+  "programmableLogicBase": {
+    "scriptHash": "3da5c1d3ba942c0c61aa5ed34e0fc1ba71915cb1f3eeb9735176a987"
+  },
+  "transfer": {
+    "scriptHash": "c18967774b1d8b4076fb37bc29c011c1ab91aa65e344e7a7d3c08f17"
+  },
+  "thirdParty": {
+    "scriptHash": "34a770ec446c53bea94835a712036cfc4737e654746f39aa7fc230da"
+  },
+  "unfracking": {
+    "scriptHash": "eb2131575dce4bfeee8054be6a58d1dcd06a12befbfbd5f6224a79a4"
+  },
+  "programmableLogicGlobal": {
+    "scriptHash": "c5acc598421583483fd17c505bb469b7f68c090c161e244b1b28542f"
+  },
+  "maxInlineDatumBytes": 1024,
+  "upgradeMultisig": {
+    "scriptHash": "c7cb1ac472208bc8ff1a006903dcb6773faed8b2efe24712861668f6"
+  },
+  "upgradeAuthority": {
+    "type": "key",
+    "hash": "219ad1301592c6e16b74c49b1b1f8ffdf7e87e22a85c8e63bbed49cf"
+  },
+  "issuance": {
+    "txInput": {
+      "txHash": "7879c98c38243f542c5ec57b37166e392b160b5e9eb1bbbc701d2e261ec35f88",
+      "outputIndex": 1
+    },
+    "policyId": "d502a00a8e046fcde0c8bb2750711fcec6c5f512d7d33a3003e48fe6",
+    "alwaysFailScriptHash": "5ff3439ab5b059889fbaf360195275d8471de9ad939e1bb6c3a7b74c"
+  },
+  "registry": {
+    "txInput": {
+      "txHash": "7879c98c38243f542c5ec57b37166e392b160b5e9eb1bbbc701d2e261ec35f88",
+      "outputIndex": 0
+    },
+    "issuanceScriptHash": "d502a00a8e046fcde0c8bb2750711fcec6c5f512d7d33a3003e48fe6",
+    "scriptHash": "39f7f993847c6e741b4ebb6193706ab875b5013b0fcbb2618ad4fad5"
+  },
+  "programmableBaseRefInput": {
+    "txHash": "144d6f64f551a2f95e291f475fecdd851b5147b075f4bf0c3217eba75dcd3719",
+    "outputIndex": 0
+  },
+  "programmableLogicGlobalRefInput": {
+    "txHash": "144d6f64f551a2f95e291f475fecdd851b5147b075f4bf0c3217eba75dcd3719",
+    "outputIndex": 1
+  },
+  "transferRefInput": {
+    "txHash": "144d6f64f551a2f95e291f475fecdd851b5147b075f4bf0c3217eba75dcd3719",
+    "outputIndex": 2
+  },
+  "thirdPartyRefInput": {
+    "txHash": "144d6f64f551a2f95e291f475fecdd851b5147b075f4bf0c3217eba75dcd3719",
+    "outputIndex": 3
+  },
+  "unfrackingRefInput": {
+    "txHash": "144d6f64f551a2f95e291f475fecdd851b5147b075f4bf0c3217eba75dcd3719",
+    "outputIndex": 4
+  }
+}
