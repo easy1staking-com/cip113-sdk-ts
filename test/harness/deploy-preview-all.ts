@@ -6,7 +6,7 @@
  * Run by hand; it writes permanent state to a shared chain.
  *   npx tsx test/harness/deploy-preview-all.ts
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   previewChain, evoClient, EvoAddress, EvoAssets, CIP113, stringToHex, computeScriptHash,
 } from "../../dist/index.js";
@@ -18,6 +18,7 @@ import { registerSubstandardCredentials } from "./substandard-setup.js";
 import { buildDeploymentRecord, buildUnparameterisedRecord } from "./cip171-record.js";
 import { fesBlueprintDir, dummyBlueprintDir, dummyBlueprintPath } from "./paths.js";
 import { explainError } from "./explain-error.js";
+import { saveInstance, requireInstanceName } from "./instances.mjs";
 
 const BF = "https://cardano-preview.blockfrost.io/api/v0";
 
@@ -30,6 +31,11 @@ function loadEnv(path: string): Record<string, string> {
 }
 
 async function main() {
+  // Resolved FIRST: a missing or malformed instance name must fail before the
+  // bootstrap spends its one-shot seed UTxOs, and before any of the three
+  // registrations writes to a shared chain.
+  const instanceName = requireInstanceName("preview");
+
   const env = loadEnv(new URL("../../.env.preview", import.meta.url).pathname);
   const client: any = evoClient(previewChain)
     .withBlockfrost({ projectId: env.BLOCKFROST_KEY, baseUrl: BF })
@@ -92,10 +98,8 @@ async function main() {
   console.log("[1/3] core bootstrap (record attached to the bootstrap tx)...");
   const deployment: any = await bootstrapProtocol({ client, isStakeRegistered, awaitTx });
   console.log(`      bootstrap tx: ${deployment.txHash}`);
-  writeFileSync(
-    new URL("../../deployment-preview.json", import.meta.url).pathname,
-    JSON.stringify(deployment, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2)
-  );
+  console.log(`      recorded as preview instance "${instanceName}" -> ` +
+    saveInstance("preview", instanceName, deployment));
 
   const plb = deployment.programmableLogicBase.scriptHash;
   const suffix = deployment.txHash.slice(0, 6);

@@ -15,9 +15,10 @@
  *
  * Usage: npx tsx test/harness/deploy-preview.ts
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { previewChain, evoClient, EvoAddress, EvoAssets } from "../../dist/index.js";
 import { bootstrapProtocol } from "./bootstrap.js";
+import { saveInstance, requireInstanceName } from "./instances.mjs";
 
 function loadEnv(path: string): Record<string, string> {
   return Object.fromEntries(
@@ -32,6 +33,10 @@ function loadEnv(path: string): Record<string, string> {
 }
 
 async function main() {
+  // Resolved FIRST, deliberately: a missing or malformed instance name must
+  // fail before the bootstrap spends anything. The seed UTxOs are one-shot.
+  const instanceName = requireInstanceName("preview");
+
   const env = loadEnv(new URL("../../.env.preview", import.meta.url).pathname);
   for (const k of ["WALLET_MNEMONIC", "BLOCKFROST_KEY"]) {
     if (!env[k]) throw new Error(`.env.preview is missing ${k}`);
@@ -74,8 +79,7 @@ async function main() {
 
   const deployment = await bootstrapProtocol({ client, isStakeRegistered });
 
-  const out = new URL("../../deployment-preview.json", import.meta.url).pathname;
-  writeFileSync(out, JSON.stringify(deployment, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2));
+  const out = saveInstance("preview", instanceName, deployment);
   console.log(`\nDeploymentParams written to ${out}`);
   console.log(`bootstrap tx: ${deployment.txHash}`);
 }
