@@ -32,6 +32,7 @@ import {
 import { Address as EvoAddress } from "@evolution-sdk/evolution";
 import { requireDevnet, makeClient } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
+import { createStandardScripts } from "../../dist/standard/scripts.js";
 
 before(async () => {
   await requireDevnet();
@@ -44,8 +45,7 @@ test("bootstraps a protocol instance on a live devnet", async () => {
 
   for (const [name, hash] of [
     ["protocolParams.policyId", deployment.protocolParams.policyId],
-    ["protocolParams.coordinationScriptHash", deployment.protocolParams.coordinationScriptHash],
-    ["coordination.scriptHash", deployment.coordination.scriptHash],
+    ["programmableLogicGlobal.scriptHash", deployment.programmableLogicGlobal.scriptHash],
     ["programmableLogicBase.scriptHash", deployment.programmableLogicBase.scriptHash],
     ["transfer.scriptHash", deployment.transfer.scriptHash],
     ["thirdParty.scriptHash", deployment.thirdParty.scriptHash],
@@ -53,8 +53,7 @@ test("bootstraps a protocol instance on a live devnet", async () => {
     ["upgradeMultisig.scriptHash", deployment.upgradeMultisig.scriptHash],
     ["upgradeAuthority.hash", deployment.upgradeAuthority.hash],
     ["issuance.policyId", deployment.issuance.policyId],
-    ["directoryMint.scriptHash", deployment.directoryMint.scriptHash],
-    ["directorySpend.scriptHash", deployment.directorySpend.scriptHash],
+    ["registry.scriptHash", deployment.registry.scriptHash],
   ] as const) {
     assert.match(hash, /^[0-9a-f]{56}$/, `${name} should be a 28-byte script hash`);
   }
@@ -70,11 +69,17 @@ test("bootstraps a protocol instance on a live devnet", async () => {
   ];
   assert.equal(new Set(delegates).size, 3, "transfer / third_party / unfracking must be distinct");
 
-  // The params NFT must NOT be locked at always_fail any more.
+  // The params NFT is locked at protocol_params own address, never always_fail.
   assert.notEqual(
-    deployment.protocolParams.coordinationScriptHash,
+    deployment.protocolParams.policyId,
     deployment.issuance.alwaysFailScriptHash,
-    "the lock target moved to coordination_spend; always_fail now guards only issuance"
+    "the params NFT lives at protocol_params; always_fail now guards only issuance"
+  );
+
+  // The dispatcher must be distinct from every delegate it names.
+  assert.ok(
+    !delegates.includes(deployment.programmableLogicGlobal.scriptHash),
+    "the dispatcher must not collide with a delegate"
   );
 
   // Distinct one-shot seeds, or the parameterised policies collide and the
@@ -128,7 +133,7 @@ test("the deployed protocol state is what the bootstrap intended — read back f
 
   // --- the params NFT must be at coordination_spend, NOT always_fail --------
   const paramsUnit = deployment.protocolParams.policyId + stringToHex("ProtocolParams");
-  const coordAddr = scriptAddress(networkId, deployment.coordination.scriptHash);
+  const coordAddr = scriptAddress(networkId, deployment.protocolParams.policyId);
   const coordUtxos = await client.getUtxosWithUnit(EvoAddress.fromBech32(coordAddr), paramsUnit);
 
   assert.equal(
@@ -139,18 +144,18 @@ test("the deployed protocol state is what the bootstrap intended — read back f
       "where the 0.3.x fixture put it, and that mistake is invisible to every offline check)"
   );
 
-  // --- its datum must be the SEVEN-field layout, wired to the real delegates -
+  // --- its datum must be the FOUR-field layout, wired to the real delegates --
   const datum = getInlineDatum(coordUtxos[0]);
   assert.ok(datum, "the coordination UTxO must carry an inline datum");
   const params = decodeProtocolParams(datum);
 
-  assert.equal(params.transferCred.hash, deployment.transfer.scriptHash, "field 2 = transfer");
-  assert.equal(params.thirdPartyCred.hash, deployment.thirdParty.scriptHash, "field 3 = third_party");
-  assert.equal(params.unfrackingCred.hash, deployment.unfracking.scriptHash, "field 4 = unfracking");
-  assert.equal(params.upgradeCred.hash, deployment.upgradeAuthority.hash, "field 5 = upgrade_cred");
+  assert.equal(params.plgCred.hash, deployment.programmableLogicGlobal.scriptHash, "field 0 = plg_cred");
+  assert.equal(params.transferCred.hash, deployment.transfer.scriptHash, "field 1 = transfer");
+  assert.equal(params.thirdPartyCred.hash, deployment.thirdParty.scriptHash, "field 2 = third_party");
+  assert.equal(params.upgradeCred.hash, deployment.upgradeAuthority.hash, "field 3 = upgrade_cred");
   assert.equal(params.upgradeCred.type, deployment.upgradeAuthority.type, "upgrade_cred kind");
 
-  // ⚠ THE BRICK CHECK. coordination_spend requires upgrade_cred to appear in
+  // ⚠ THE BRICK CHECK. protocol_params requires upgrade_cred to appear in
   // tx.withdrawals, and upstream states an unsatisfiable value here makes the
   // authority check "permanently unsatisfiable, with no repair path". A
   // credential that cannot be REGISTERED can never appear in a withdrawals map,
@@ -165,27 +170,42 @@ test("the deployed protocol state is what the bootstrap intended — read back f
     "the installed upgrade authority must be a credential this toolchain can register — " +
       "a script authority without a publish handler is a one-way brick"
   );
-  assert.equal(params.progLogicCred.hash, deployment.programmableLogicBase.scriptHash, "field 1 = PLB");
-  assert.equal(params.registryNodeCs, deployment.directoryMint.scriptHash, "field 0 = registry policy");
-  assert.equal(params.maxInlineDatumBytes, 1024n, "field 6 = max_inline_datum_bytes (devnet fixture)");
+  // ⛔ THE COHERENCE CHECK THE LEDGER CANNOT MAKE. The datum names a dispatcher;
+  // the dispatcher was compiled against three delegate hashes. Nothing on chain
+  // compares them — a script cannot read another script parameters — so a stale
+  // pair deploys cleanly and fails later at withdrawal time with an index error
+  // naming neither cause. Re-derive it here, on the live artefact.
+  {
+    const bp = loadStandardBlueprint();
+    const rederived = createStandardScripts(bp).programmableLogicGlobal(
+      deployment.transfer.scriptHash,
+      deployment.thirdParty.scriptHash,
+      deployment.unfracking.scriptHash,
+    ).hash;
+    assert.equal(
+      params.plgCred.hash,
+      rederived,
+      "the dispatcher in the datum must be the one compiled against these delegates"
+    );
+  }
 
   // Each credential must be a SCRIPT credential. A key credential here has the
   // same shape and the same hash length; only the constructor index differs,
   // and programmable_logic_base would never resolve the delegate.
   for (const [name, c] of [
-    ["progLogic", params.progLogicCred],
+    ["plg", params.plgCred],
     ["transfer", params.transferCred],
     ["thirdParty", params.thirdPartyCred],
-    ["unfracking", params.unfrackingCred],
   ] as const) {
     assert.equal(c.type, "script", `${name} must be a SCRIPT credential, not a key credential`);
   }
 
   // --- the registry origin node must be the SEVEN-field layout --------------
-  const registryAddr = scriptAddress(networkId, deployment.directorySpend.scriptHash);
+  // policy == address: one hash serves as both.
+  const registryAddr = scriptAddress(networkId, deployment.registry.scriptHash);
   const registryUtxos = await client.getUtxosWithUnit(
     EvoAddress.fromBech32(registryAddr),
-    deployment.directoryMint.scriptHash
+    deployment.registry.scriptHash
   );
   assert.equal(registryUtxos.length, 1, "exactly one registry origin node");
   const originDatum = getInlineDatum(registryUtxos[0]);

@@ -311,23 +311,32 @@ export async function bootstrapProtocol(
 
   const alwaysFailB = builders.alwaysFail(ALWAYS_FAIL_NONCE_B);
 
-  // coordination_spend is the lock target for the params NFT. It must be built
-  // BEFORE protocol_params_mint, which takes its hash.
-  const coordination = builders.coordinationSpend(COORDINATION_NONCE);
-  const protocolParamsMint = builders.protocolParamsMint(utxo1Ref, coordination.hash);
+  // NO NONCE, AND NO ORDERING EDGE. protocol_params takes only its one-shot
+  // utxo_ref now: the mint side no longer depends on a spend-side address, so
+  // the cycle that forced coordination_spend to be built first is dissolved and
+  // there is no nonce to choose. Its hash is BOTH the NFT policy id and the
+  // address payment credential -- the minting policy naming itself.
+  const protocolParams = builders.protocolParams(utxo1Ref);
+  const paramsPolicy = protocolParams.hash;
 
-  // Everything below hangs off the params-NFT POLICY, in parallel. This is no
-  // longer a chain: PLB used to be parameterised by PLG's credential, so the
-  // order was forced; it now takes params_policy like the delegates do.
-  const paramsPolicy = protocolParamsMint.hash;
   const plb = builders.programmableLogicBase(paramsPolicy);
-  const transfer = builders.transfer(paramsPolicy);
-  const thirdParty = builders.thirdParty(paramsPolicy);
-  const unfracking = builders.unfracking(paramsPolicy);
-  const registrySpend = builders.registrySpend(paramsPolicy);
 
+  // The registry no longer touches the params chain at all -- it reads its own
+  // policy off its own input payment credential -- so it can be built as soon
+  // as issuance_cbor_hex_mint exists. Its hash is also BOTH policy and address.
   const issuanceCborHexMint = builders.issuanceCborHexMint(utxo2Ref, alwaysFailB.hash);
-  const registryMint = builders.registryMint(utxo1Ref, issuanceCborHexMint.hash, registrySpend.hash);
+  const registry = builders.registry(utxo1Ref, issuanceCborHexMint.hash);
+
+  // Delegates: (prog_logic_cred, registry_node_cs, max_inline_datum_bytes).
+  // prog_logic_cred is PLB, NOT the dispatcher -- the dispatcher is
+  // parameterised BY these three, so the reverse would be a parameter cycle.
+  const transfer = builders.transfer(plb.hash, registry.hash, MAX_INLINE_DATUM_BYTES);
+  const thirdParty = builders.thirdParty(plb.hash, registry.hash, MAX_INLINE_DATUM_BYTES);
+  const unfracking = builders.unfracking(plb.hash, registry.hash, MAX_INLINE_DATUM_BYTES);
+
+  // Built LAST: it names all three delegates at compile time. Replacing ONE
+  // delegate therefore requires deploying a new dispatcher too.
+  const plg = builders.programmableLogicGlobal(transfer.hash, thirdParty.hash, unfracking.hash);
 
   // upstream's reference upgrade authority. Deployed and hash-asserted, but see
   // the block below: it is NOT the authority this fixture installs.
@@ -368,7 +377,7 @@ export async function bootstrapProtocol(
   // a token is registered. Build it once against a placeholder and store the
   // CBOR either side of that placeholder, so registration can splice in the
   // real hash without re-deriving the whole script.
-  const issuanceDummy = builders.issuanceMint(plb.hash, registryMint.hash, DUMMY_POLICY_ID, paramsPolicy);
+  const issuanceDummy = builders.issuanceMint(plb.hash, registry.hash, DUMMY_POLICY_ID, paramsPolicy);
   const dummyBody = scriptBodyHex(issuanceDummy.compiledCode);
   const splitParts = dummyBody.split(DUMMY_POLICY_ID);
   if (splitParts.length !== 2) {
@@ -382,18 +391,25 @@ export async function bootstrapProtocol(
   // The params NFT lives at coordination_spend now — always_fail no longer
   // guards it. This single line is the whole of the lock-target change, and
   // nothing in the type system can tell it from the old one.
-  const coordinationAddr = scriptAddress(networkId, coordination.hash);
+  // policy == address: the params UTxO lives at protocol_params own address.
+  const paramsAddr = scriptAddress(networkId, paramsPolicy);
   const issuanceAlwaysFailAddr = scriptAddress(networkId, alwaysFailB.hash);
-  const registrySpendAddr = scriptAddress(networkId, registrySpend.hash);
+  const registryAddr = scriptAddress(networkId, registry.hash);
 
+  // FOUR fields in alpha.3. registry_node_cs, prog_logic_cred, unfracking_cred
+  // and max_inline_datum_bytes are all gone from the datum -- the first two
+  // because their readers derive them elsewhere, unfracking because the
+  // dispatcher names it at compile time, and max_inline_datum_bytes because it
+  // became a script PARAMETER, so re-tuning it is a redeployment now rather
+  // than a datum rewrite.
+  //
+  // plgCred and the two delegate creds must be written TOGETHER with the
+  // dispatcher that was compiled against them. Nothing on chain checks it.
   const paramsDatum = buildProtocolParamsDatum({
-    registryNodeCs: registryMint.hash,
-    progLogicCred: { type: "script", hash: plb.hash },
+    plgCred: { type: "script", hash: plg.hash },
     transferCred: { type: "script", hash: transfer.hash },
     thirdPartyCred: { type: "script", hash: thirdParty.hash },
-    unfrackingCred: { type: "script", hash: unfracking.hash },
     upgradeCred: { type: "key", hash: upgradeStakeKeyHash },
-    maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
   });
 
   // Sentinel head of the registry linked list: key "", next 0xff*30, and every
@@ -413,8 +429,8 @@ export async function bootstrapProtocol(
   const issuanceDatum = Data.constr(0n, [Data.bytearray(cborPre), Data.bytearray(cborPost)]);
 
   // ---- Step 4: asset units ------------------------------------------------
-  const protocolParamNftUnit = protocolParamsMint.hash + stringToHex("ProtocolParams");
-  const directoryNftUnit = registryMint.hash; // empty asset name
+  const protocolParamNftUnit = paramsPolicy + stringToHex("ProtocolParams");
+  const directoryNftUnit = registry.hash; // empty asset name
   const issuanceNftUnit = issuanceCborHexMint.hash + stringToHex("IssuanceCborHex");
 
   // ---- Step 5: assemble and submit ---------------------------------------
@@ -535,7 +551,7 @@ export async function bootstrapProtocol(
   });
 
   tx = tx.payToAddress({
-    address: EvoAddress.fromBech32(coordinationAddr),
+    address: EvoAddress.fromBech32(paramsAddr),
     assets: outputAssets(2_000_000n, new Map([[protocolParamNftUnit, 1n]])),
     datum: new InlineDatum.InlineDatum({ data: paramsDatum }),
   });
@@ -543,7 +559,7 @@ export async function bootstrapProtocol(
   // scales with serialised output size. MEASURED at 2,038,630 for a node of
   // this shape — the inherited 2,000,000 was sized for the five-field datum.
   tx = tx.payToAddress({
-    address: EvoAddress.fromBech32(registrySpendAddr),
+    address: EvoAddress.fromBech32(registryAddr),
     assets: outputAssets(REGISTRY_NODE_MIN_ADA, new Map([[directoryNftUnit, 1n]])),
     datum: new InlineDatum.InlineDatum({ data: directoryDatum }),
   });
@@ -555,8 +571,8 @@ export async function bootstrapProtocol(
     datum: new InlineDatum.InlineDatum({ data: issuanceDatum }),
   });
 
-  tx = tx.attachScript({ script: buildEvoScript(registryMint.compiledCode) });
-  tx = tx.attachScript({ script: buildEvoScript(protocolParamsMint.compiledCode) });
+  tx = tx.attachScript({ script: buildEvoScript(registry.compiledCode) });
+  tx = tx.attachScript({ script: buildEvoScript(protocolParams.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(issuanceCborHexMint.compiledCode) });
 
   const bootstrapTxHash = await submitAndWait(
@@ -564,8 +580,14 @@ export async function bootstrapProtocol(
   );
 
   // ---- Tx 2: publish reference scripts ------------------------------------
+  // FIVE scripts now, not four: the dispatcher's reference script joins them.
+  // Every programmable transaction withdraws through it, so it needs the same
+  // on-chain availability the delegates have.
+  // ⚠ Order is load-bearing: it defines the reference-input indices recorded in
+  // DeploymentParams (see REF_SCRIPT_ORDER below, which must list the same
+  // names in the same order).
   let refTx = client.newTx();
-  for (const script of [plb, transfer, thirdParty, unfracking]) {
+  for (const script of [plb, plg, transfer, thirdParty, unfracking]) {
     refTx = refTx.payToAddress({
       address: addressObj,
       assets: outputAssets(20_000_000n),
@@ -650,32 +672,41 @@ export async function bootstrapProtocol(
 
   // ---- Step 6: assemble DeploymentParams ---------------------------------
   //
-  // Output indices must match the payToAddress order above exactly. They are
+  // Output indices must match the payToAddress order above EXACTLY. They are
   // positional and nothing checks them but the devnet test that follows.
-  // Tx 1 outputs: 0 coordination (params NFT), 1 registry origin, 2 issuance CBOR NFT.
-  // Tx 2 outputs: 0 PLB, 1 transfer, 2 third_party, 3 unfracking (publish order above).
+  //
+  // Tx 1 outputs: 0 params NFT, 1 registry origin, 2 issuance CBOR NFT.
+  // Tx 2 outputs: the ref-script loop, in ITS order.
+  //
+  // ⚠ THE LOOP ORDER AND THESE CONSTANTS ARE ONE FACT WRITTEN TWICE. alpha.3
+  // inserted the dispatcher at index 1, shifting all three delegates down — a
+  // mismatch here does not fail loudly, it hands out a reference input carrying
+  // the WRONG script and the transaction dies at evaluation naming neither.
+  // Derived from the array below rather than counted by hand.
+  const REF_SCRIPT_ORDER = ["plb", "plg", "transfer", "thirdParty", "unfracking"] as const;
+  const refIdx = (name: (typeof REF_SCRIPT_ORDER)[number]) => REF_SCRIPT_ORDER.indexOf(name);
+
   const OUT_COORDINATION = 0;
-  const REF_PLB = 0;
-  const REF_TRANSFER = 1;
-  const REF_THIRD_PARTY = 2;
-  const REF_UNFRACKING = 3;
+  const REF_PLB = refIdx("plb");
+  const REF_PLG = refIdx("plg");
+  const REF_TRANSFER = refIdx("transfer");
+  const REF_THIRD_PARTY = refIdx("thirdParty");
+  const REF_UNFRACKING = refIdx("unfracking");
 
   return {
     txHash: bootstrapTxHash,
-    coordinationNonce: COORDINATION_NONCE,
-    coordination: {
-      scriptHash: coordination.hash,
-      utxo: { txHash: bootstrapTxHash, outputIndex: OUT_COORDINATION },
-    },
     protocolParams: {
       txInput: utxo1Ref,
-      policyId: protocolParamsMint.hash,
-      coordinationScriptHash: coordination.hash,
+      // ONE value: policy id AND address payment credential.
+      policyId: paramsPolicy,
+      utxo: { txHash: bootstrapTxHash, outputIndex: OUT_COORDINATION },
     },
     programmableLogicBase: { scriptHash: plb.hash },
     transfer: { scriptHash: transfer.hash },
     thirdParty: { scriptHash: thirdParty.hash },
     unfracking: { scriptHash: unfracking.hash },
+    programmableLogicGlobal: { scriptHash: plg.hash },
+    maxInlineDatumBytes: Number(MAX_INLINE_DATUM_BYTES),
     upgradeMultisig: { scriptHash: upgradeMultisig.hash },
     upgradeAuthority: { type: "key", hash: upgradeStakeKeyHash },
     issuance: {
@@ -683,13 +714,14 @@ export async function bootstrapProtocol(
       policyId: issuanceCborHexMint.hash,
       alwaysFailScriptHash: alwaysFailB.hash,
     },
-    directoryMint: {
+    registry: {
       txInput: utxo1Ref,
       issuanceScriptHash: issuanceCborHexMint.hash,
-      scriptHash: registryMint.hash,
+      // ONE value again: node NFT policy AND node address payment credential.
+      scriptHash: registry.hash,
     },
-    directorySpend: { policyId: protocolParamsMint.hash, scriptHash: registrySpend.hash },
     programmableBaseRefInput: { txHash: refTxHash, outputIndex: REF_PLB },
+    programmableLogicGlobalRefInput: { txHash: refTxHash, outputIndex: REF_PLG },
     transferRefInput: { txHash: refTxHash, outputIndex: REF_TRANSFER },
     thirdPartyRefInput: { txHash: refTxHash, outputIndex: REF_THIRD_PARTY },
     unfrackingRefInput: { txHash: refTxHash, outputIndex: REF_UNFRACKING },

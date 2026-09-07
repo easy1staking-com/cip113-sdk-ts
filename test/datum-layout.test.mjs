@@ -19,10 +19,21 @@
  *                   not. Two fields were inserted MID-RECORD (index 2 by #52,
  *                   index 5 by unfracking v2), shifting everything after them.
  *
- *   ProgrammableLogicGlobalParams — SEVEN fields. Upstream's
- *                   CONTRACT_SURFACE_CHANGES.md says six in three places and in
- *                   a fourth phrases it as an instruction to build six. Six is
- *                   malformed for every programmable_logic_base spend.
+ *   ProgrammableLogicGlobalParams — FOUR fields in 0.5.0-alpha.3, down from
+ *                   SEVEN in alpha.2, and this is a REWRITE rather than a
+ *                   truncation: three fields left, one arrived, every survivor
+ *                   moved. ⛔ Old index 1 was `prog_logic_cred`; new index 1 is
+ *                   `transfer_cred`. BOTH ARE CREDENTIALS — so an arity-blind
+ *                   positional read returns a well-formed value with the wrong
+ *                   meaning, and the transaction fails much later against the
+ *                   wrong delegate. The strict length check is the only thing
+ *                   between those two outcomes, and there is a test below that
+ *                   demonstrates the misread rather than merely asserting it.
+ *
+ *                   (Upstream's CONTRACT_SURFACE_CHANGES.md documented a SIX-
+ *                   field intermediate on the same branch that was superseded
+ *                   before merge. Do not build to it. Fields here come from the
+ *                   blueprint's own definitions at f14b359.)
  */
 
 import { test } from "node:test";
@@ -54,15 +65,30 @@ const NODE = {
   globalStateCs: "cc".repeat(28),
 };
 
+/** 0.5.0-alpha.3: FOUR fields, ordered by read frequency. */
 const PARAMS = {
-  registryNodeCs: "de".repeat(28),
-  progLogicCred: S("a1".repeat(28)),
+  plgCred: S("a1".repeat(28)),
   transferCred: S("a2".repeat(28)),
   thirdPartyCred: S("a3".repeat(28)),
-  unfrackingCred: S("a4".repeat(28)),
   upgradeCred: K("a5".repeat(28)),
-  maxInlineDatumBytes: 1024n,
 };
+
+/**
+ * The 7-field (0.5.0-alpha.2) datum, kept as a NEGATIVE fixture.
+ *
+ * ⚠ Note index 1 in each: `prog_logic_cred` there, `transfer_cred` here. Both
+ * Credentials, both well-formed — which is exactly why a positional read of the
+ * wrong layout returns a plausible value instead of failing.
+ */
+const LEGACY_SEVEN_FIELD = Data.constr(0n, [
+  Data.bytearray("de".repeat(28)),
+  Data.constr(1n, [Data.bytearray("a1".repeat(28))]),
+  Data.constr(1n, [Data.bytearray("a2".repeat(28))]),
+  Data.constr(1n, [Data.bytearray("a3".repeat(28))]),
+  Data.constr(1n, [Data.bytearray("a4".repeat(28))]),
+  Data.constr(0n, [Data.bytearray("a5".repeat(28))]),
+  Data.int(1024n),
+]);
 
 // ---------------------------------------------------------------------------
 // RegistryNode — 7 fields
@@ -113,59 +139,70 @@ test("RegistryNode: the retired 5- and 6-field layouts are REFUSED, not partiall
 });
 
 // ---------------------------------------------------------------------------
-// ProgrammableLogicGlobalParams — 7 fields, the coordination datum
+// ProgrammableLogicGlobalParams — 4 fields, the protocol-params datum
 // ---------------------------------------------------------------------------
 
-test("ProtocolParams: exactly 7 fields, in read-frequency order", () => {
+test("ProtocolParams: exactly 4 fields, in read-frequency order", () => {
   const d = protocolParamsDatum(PARAMS);
-  assert.equal(d.fields.length, 7, "seven — max_inline_datum_bytes is field 6 (#115)");
+  assert.equal(d.fields.length, 4, "four in alpha.3 — down from seven");
 
-  assert.equal(at(d, 0), PARAMS.registryNodeCs, "index 0 = registry_node_cs (frozen)");
-  assert.equal(credAt(d, 1), PARAMS.progLogicCred.hash, "index 1 = prog_logic_cred (frozen)");
-  assert.equal(credAt(d, 2), PARAMS.transferCred.hash, "index 2 = transfer_cred");
-  assert.equal(credAt(d, 3), PARAMS.thirdPartyCred.hash, "index 3 = third_party_cred");
-  assert.equal(credAt(d, 4), PARAMS.unfrackingCred.hash, "index 4 = unfracking_cred");
-  assert.equal(credAt(d, 5), PARAMS.upgradeCred.hash, "index 5 = upgrade_cred");
-  assert.equal(d.fields[6], PARAMS.maxInlineDatumBytes, "index 6 = max_inline_datum_bytes");
+  assert.equal(credAt(d, 0), PARAMS.plgCred.hash, "index 0 = plg_cred (the dispatcher)");
+  assert.equal(credAt(d, 1), PARAMS.transferCred.hash, "index 1 = transfer_cred");
+  assert.equal(credAt(d, 2), PARAMS.thirdPartyCred.hash, "index 2 = third_party_cred");
+  assert.equal(credAt(d, 3), PARAMS.upgradeCred.hash, "index 3 = upgrade_cred");
 });
 
-test("ProtocolParams: the three delegate credentials are NOT interchangeable", () => {
-  // transfer/third_party/unfracking sit at 2/3/4 and are structurally identical.
-  // programmable_logic_base dispatches on them by position, so a swap wires the
-  // protocol to the wrong validator with no encoding error anywhere.
+test("ProtocolParams: the delegate credentials are NOT interchangeable", () => {
+  // transfer and third_party sit at 1 and 2 and are structurally identical, so
+  // a swap wires the protocol to the wrong validator with no encoding error.
   const swapped = { ...PARAMS, transferCred: PARAMS.thirdPartyCred, thirdPartyCred: PARAMS.transferCred };
-  const a = protocolParamsDatum(PARAMS);
-  const b = protocolParamsDatum(swapped);
   assert.notEqual(
-    hex(Data.toCBORBytes(a)),
-    hex(Data.toCBORBytes(b)),
+    hex(Data.toCBORBytes(protocolParamsDatum(PARAMS))),
+    hex(Data.toCBORBytes(protocolParamsDatum(swapped))),
     "swapping transfer and third_party MUST change the encoded datum"
   );
-  assert.equal(decodeProtocolParams(b).transferCred.hash, PARAMS.thirdPartyCred.hash);
+  assert.equal(decodeProtocolParams(protocolParamsDatum(swapped)).transferCred.hash, PARAMS.thirdPartyCred.hash);
 });
 
-test("ProtocolParams: round-trips, max_inline_datum_bytes included", () => {
+test("ProtocolParams: round-trips", () => {
   assert.deepEqual(decodeProtocolParams(protocolParamsDatum(PARAMS)), PARAMS);
 });
 
-test("ProtocolParams: a 6-field datum is REFUSED with a message naming the cause", () => {
-  // The exact shape upstream's CONTRACT_SURFACE_CHANGES.md instructs a builder
-  // to produce. It must not decode as a valid-but-short record.
-  const six = Data.constr(0n, protocolParamsDatum(PARAMS).fields.slice(0, 6));
+test("⛔ ProtocolParams: the 7-field alpha.2 datum is REFUSED, not read positionally", () => {
+  // THE POINT OF THE STRICT ARITY CHECK. Without it, field 1 decodes cleanly as
+  // a Credential — it just means prog_logic_cred instead of transfer_cred. The
+  // caller would receive a well-formed record naming the wrong authority and
+  // discover it at withdrawal time, against the wrong delegate.
+  assert.equal(LEGACY_SEVEN_FIELD.fields.length, 7, "fixture precondition");
+
   assert.throws(
-    () => decodeProtocolParams(six),
+    () => decodeProtocolParams(LEGACY_SEVEN_FIELD),
     (err) => {
-      assert.match(err.message, /expected exactly 7 fields, got 6/);
-      assert.match(err.message, /max_inline_datum_bytes/, "must name the missing field");
+      assert.match(err.message, /expected exactly 4 fields, got 7/);
+      assert.match(err.message, /NOT forward-compatible/, "must say why it cannot be read");
+      assert.match(err.message, /prog_logic_cred/, "must name the field that shifted");
       return true;
-    }
+    },
+    "a 7-field datum belongs to an alpha.2 instance and must be refused outright"
   );
 });
 
-test("ProtocolParams: max_inline_datum_bytes must be an integer, not a bytestring", () => {
-  const bad = Data.constr(0n, [
-    ...protocolParamsDatum(PARAMS).fields.slice(0, 6),
-    Data.bytearray("0400"),
-  ]);
-  assert.throws(() => decodeProtocolParams(bad), /expected an integer/);
+test("⛔ ProtocolParams: proof the silent misread is real, not theoretical", () => {
+  // Read the legacy datum's index 1 the way an arity-blind parser would. It is
+  // a VALID Credential — so nothing downstream could tell it was wrong.
+  const shifted = LEGACY_SEVEN_FIELD.fields[1];
+  assert.ok(shifted instanceof Data.Constr, "index 1 of the old layout is a well-formed Credential");
+  assert.equal(
+    hex(shifted.fields[0]),
+    "a1".repeat(28),
+    "it holds prog_logic_cred — which the new layout expects to be transfer_cred",
+  );
+  // And it is NOT the value the new layout would put there, so a shifted read
+  // returns a different authority while looking entirely healthy.
+  assert.notEqual(hex(shifted.fields[0]), PARAMS.transferCred.hash);
+});
+
+test("ProtocolParams: a short datum is refused too", () => {
+  const three = Data.constr(0n, protocolParamsDatum(PARAMS).fields.slice(0, 3));
+  assert.throws(() => decodeProtocolParams(three), /expected exactly 4 fields, got 3/);
 });

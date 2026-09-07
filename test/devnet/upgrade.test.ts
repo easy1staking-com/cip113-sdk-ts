@@ -5,10 +5,10 @@
  * observable proves nothing: the transaction would succeed, the datum would be
  * rewritten with identical content, and every assertion about "the datum is
  * well-formed" would pass without the upgrade path having been exercised at
- * all. So every test here reads the coordination datum BEFORE and AFTER and
+ * all. So every test here reads the protocol-params datum BEFORE and AFTER and
  * asserts on the difference.
  *
- * The negatives matter more than the positive. coordination_spend's whole job
+ * The negatives matter more than the positive. protocol_params' whole job
  * is refusing bad upgrades — a positive-only suite would confirm that it lets
  * things through, which is the half that cannot brick a protocol.
  */
@@ -23,7 +23,7 @@ import { readCoordination, upgradeProtocol } from "../harness/upgrade.js";
 /**
  * A negative test that passes because the CLIENT refused proves nothing about
  * the on-chain rail — it proves Evolution has an opinion. These rails live in
- * coordination_spend, so the rejection must come from script evaluation.
+ * protocol_params, so the rejection must come from script evaluation.
  *
  * OBSERVED: all three rejections below arrive as Ogmios code 3010, "Some
  * scripts of the transactions terminated with error(s)".
@@ -72,15 +72,12 @@ test("an upgrade rewrites the live wiring in place — proven as a before/after 
   // Everything else must be untouched. An upgrade that quietly rewrites a
   // neighbouring field is indistinguishable from a correct one if you only
   // assert the field you meant to change.
+  assert.equal(after.plgCred.hash, before.plgCred.hash, "dispatcher untouched");
   assert.equal(after.thirdPartyCred.hash, before.thirdPartyCred.hash, "third_party untouched");
-  assert.equal(after.unfrackingCred.hash, before.unfrackingCred.hash, "unfracking untouched");
   assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "upgrade authority untouched");
-  assert.equal(after.maxInlineDatumBytes, before.maxInlineDatumBytes, "datum bound untouched");
 
-  // The frozen fields are frozen by the validator, but assert them anyway: the
-  // rail existing is not evidence the rail ran.
-  assert.equal(after.progLogicCred.hash, before.progLogicCred.hash, "prog_logic_cred FROZEN");
-  assert.equal(after.registryNodeCs, before.registryNodeCs, "registry_node_cs FROZEN");
+  // ⚠ unfracking_cred and max_inline_datum_bytes are NOT asserted here because
+  // they are no longer datum fields — see the designed-out block below.
 });
 
 test("REFUSED: an upgrade without the authority's withdraw-0", async () => {
@@ -105,27 +102,30 @@ test("REFUSED: an upgrade without the authority's withdraw-0", async () => {
   assert.equal(after.transferCred.hash, before.transferCred.hash, "state must not have moved");
 });
 
-test("REFUSED: an upgrade that rewrites a FROZEN field", async () => {
-  const blueprint = loadStandardBlueprint();
-  const deployment = await bootstrapProtocol();
-  const client: any = await makeClient();
-  const before = (await readCoordination(client, deployment)).params;
+/**
+ * ⛔ DESIGNED OUT BY THE alpha.3 PARAMS REDUCTION — not deleted for convenience.
+ *
+ * This slot held "REFUSED: rewriting prog_logic_cred is rejected even WITH
+ * valid authority". The code path it covered no longer exists: `prog_logic_cred`
+ * and `registry_node_cs` are not datum fields any more, so there is nothing for
+ * a freeze rail to refuse. Upstream says so in the validator's own header —
+ * "There are no frozen-field rails left to enforce".
+ *
+ * ⚠ AND THE THREAT IT COVERED DID NOT VANISH WITH THE RAIL — it moved one hop,
+ * which is worth writing down so nobody reads this removal as a hardening.
+ * The FIELDS are unrepresentable, so no upgrade can edit them in place. The
+ * VALUES are still reachable: an upgrade that rewrites `plg_cred` installs a
+ * dispatcher naming delegates of the authority's choosing, and those delegates
+ * carry whatever `prog_logic_cred` and `registry_node_cs` they were compiled
+ * with. That is the same authority acting in the same transaction — the
+ * pre-existing upgrade threat model, unchanged, not a new escape.
+ *
+ * What still guards the datum is the wellformedness rail (every credential a
+ * 28-byte hash), enforced by BOTH handlers so the state the spend refuses to
+ * move to is also a state the mint refuses to create. The brick test below
+ * exercises it.
+ */
 
-  // prog_logic_cred anchors every programmable token address. coordination_spend
-  // freezes it permanently and no authority can override that — which is the
-  // difference between a wiring change and a protocol substitution.
-  await assert.rejects(
-    () =>
-      upgradeProtocol(blueprint, deployment, {
-        change: (p) => ({ ...p, progLogicCred: { type: "script", hash: "cd".repeat(28) } }),
-      }),
-    assertRejectedByTheValidator,
-    "rewriting prog_logic_cred must be rejected even WITH valid authority"
-  );
-
-  const after = (await readCoordination(client, deployment)).params;
-  assert.equal(after.progLogicCred.hash, before.progLogicCred.hash, "prog_logic_cred still frozen");
-});
 
 test("REFUSED: a mutable credential that is not 28 bytes — the one-way brick", async () => {
   // Upstream: "Writing one here is a ONE-WAY BRICK: an unsatisfiable

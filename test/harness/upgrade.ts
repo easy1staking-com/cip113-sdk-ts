@@ -59,16 +59,18 @@ export async function readCoordination(
   const unit =
     deployment.protocolParams.policyId +
     Buffer.from("ProtocolParams", "utf-8").toString("hex");
-  const addr = scriptAddress(networkId, deployment.coordination.scriptHash);
+  // policy == address in alpha.3: the params NFT sits at protocol_params own
+  // address, and coordination_spend no longer exists as a separate validator.
+  const addr = scriptAddress(networkId, deployment.protocolParams.policyId);
   const utxos = await client.getUtxosWithUnit(EvoAddress.fromBech32(addr), unit);
   if (utxos.length !== 1) {
     throw new Error(
-      `Expected exactly one coordination UTxO holding ${unit}, found ${utxos.length}. ` +
+      `Expected exactly one protocol-params UTxO holding ${unit}, found ${utxos.length}. ` +
         `The params NFT is one-shot; zero means it is locked at a different address.`
     );
   }
   const datum = getInlineDatum(utxos[0]);
-  if (!datum) throw new Error("The coordination UTxO carries no inline datum");
+  if (!datum) throw new Error("The protocol-params UTxO carries no inline datum");
   return { utxo: utxos[0], params: decodeProtocolParams(datum) };
 }
 
@@ -99,13 +101,16 @@ export async function upgradeProtocol(
   const next = opts.change(params);
 
   const builders = createStandardScripts(blueprint);
-  const coordinationScript = builders.coordinationSpend(deployment.coordinationNonce);
+  // The SPEND handler of the merged protocol_params validator. One script now
+  // carries both the mint and the spend arm, so the upgrade path attaches the
+  // same artefact the genesis mint used -- and there is no nonce to supply.
+  const paramsScript = builders.protocolParams(deployment.protocolParams.txInput);
 
   let tx = client.newTx();
-  // coordination_spend's redeemer is untyped — it ignores the value entirely —
-  // but a script-locked input still REQUIRES one to be present.
+  // The redeemer is untyped -- the validator ignores the value entirely -- but a
+  // script-locked input still REQUIRES one to be present.
   tx = tx.collectFrom({ inputs: [utxo], redeemer: voidData() });
-  tx = tx.attachScript({ script: buildEvoScript(coordinationScript.compiledCode) });
+  tx = tx.attachScript({ script: buildEvoScript(paramsScript.compiledCode) });
 
   // Continuing output: same address, and the INPUT'S OWN value carried through
   // rather than reconstructed. The validator requires non-ADA assets to be

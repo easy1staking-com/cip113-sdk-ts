@@ -460,85 +460,100 @@ export function minUtxoAtLeast(
 // ---------------------------------------------------------------------------
 
 /**
- * `ProgrammableLogicGlobalParams` — the datum on the coordination UTxO.
+ * `ProgrammableLogicGlobalParams` — the datum on the protocol-params UTxO.
  *
- * SEVEN fields, ordered by upstream BY READ FREQUENCY (a deliberate cost
- * choice: programmable_logic_base reads 2-4 on every dispatch, and the field
- * is read once per delegate invocation rather than once per input).
+ * FOUR fields in 0.5.0-alpha.3, ordered by upstream BY READ FREQUENCY:
  *
- * Fields 2-5 are MUTABLE — an in-place upgrade rewrites them in this datum
- * rather than redeploying programmable_logic_base, whose hash anchors every
- * programmable token address. `coordination_spend` 28-byte-guards each one and
- * freezes fields 0 and 1 permanently.
+ *   0  plg_cred          <- programmable_logic_base, once per programmable INPUT
+ *   1  transfer_cred     <- issuance_mint (precise delegation, audit finding 04)
+ *   2  third_party_cred
+ *   3  upgrade_cred
  *
- * ⚠ It is SEVEN, not six. Upstream's CONTRACT_SURFACE_CHANGES.md says six in
- * three places, and in a fourth phrases it as an instruction — "6-field
- * ProgrammableLogicGlobalParams parser / builder (order above)". Building that
- * shape yields a malformed datum on EVERY programmable_logic_base spend, not
- * merely at deploy, with no type error anywhere. `max_inline_datum_bytes`
- * (index 6) arrives with #115 and is absent from that document.
+ * ⛔ THIS IS A REWRITE OF THE 7-FIELD SHAPE, NOT AN INDEX PATCH, AND THE
+ * DIFFERENCE IS WHY IT GETS THIS BLOCK. The old layout was
+ * `(registry_node_cs, prog_logic_cred, transfer_cred, third_party_cred,
+ * unfracking_cred, upgrade_cred, max_inline_datum_bytes)`. Three fields left
+ * (registry_node_cs, unfracking_cred, max_inline_datum_bytes), one arrived
+ * (plg_cred), and every survivor MOVED.
+ *
+ * ⚠ AND THE MISREAD IS SILENT WHERE IT MATTERS MOST. Old index 1 was
+ * `prog_logic_cred`; new index 1 is `transfer_cred`. BOTH ARE CREDENTIALS. A
+ * parser that trusts positions without checking arity reads a well-formed
+ * Credential out of the right slot and hands back the wrong authority — no
+ * decode error, no type error, and a transaction that fails much later against
+ * the wrong delegate. Indices 2 and 3 shift the same way. That is why
+ * {@link decodeProtocolParams} is STRICT on arity: the length check is not
+ * defensive tidiness, it is the only thing standing between a shifted field and
+ * a silently wrong protocol.
+ *
+ * ⚠ `max_inline_datum_bytes` DID NOT DISAPPEAR — IT CHANGED KIND. It is now a
+ * COMPILE-TIME PARAMETER of transfer / third_party / unfracking rather than a
+ * datum field. It was mutable (an in-place upgrade could re-tune it) and is now
+ * baked into three script hashes: changing it means a redeployment, not a datum
+ * rewrite. See DeploymentParams.maxInlineDatumBytes.
+ *
+ * ⚠ `unfracking_cred` is gone from the datum because the DISPATCHER names
+ * unfracking at compile time now. `registry_node_cs` is gone because the
+ * registry reads its own policy off its own input's payment credential (#117).
+ *
+ * ⛔ Do not take upstream's CONTRACT_SURFACE_CHANGES.md as the source for this
+ * shape. Its SDK impact map is dated 2026-06-11 and describes the PREVIOUS
+ * migration; an intermediate section on the same branch documents a SIX-field
+ * shape that was superseded later on that same branch. Every field here comes
+ * from the blueprint's own definitions at f14b359.
  */
 export interface ProtocolParamsData {
-  registryNodeCs: HexString;
-  progLogicCred: Cip113Credential;
-  /** index 2 — mutable. PLG's transfer arm, renamed by #110. */
-  transferCred: Cip113Credential;
-  /** index 3 — mutable. Seize / clawback. */
-  thirdPartyCred: Cip113Credential;
-  /** index 4 — mutable. */
-  unfrackingCred: Cip113Credential;
-  /** index 5 — mutable. The upgrade authority this datum trampolines to. */
-  upgradeCred: Cip113Credential;
   /**
-   * index 6 — the #106-vector-3 bound. A seizure must reproduce a seized
-   * output's inline datum byte-for-byte, so an unbounded datum pushes the
-   * seizure past maxTxSize and yields an output nobody can seize.
+   * index 0 — the dispatcher's credential. Read by programmable_logic_base once
+   * per programmable input, which is why upstream put it first.
    *
-   * ⚠ This is a SECURITY PARAMETER with no upstream guidance. Upstream's test
-   * fixtures use 1024; that is a fixture value, not a recommendation. See
-   * PLAN.md D-17 — 1024 is sanctioned for the DEVNET fixture only.
+   * ⛔ COHERENCE HAZARD, unenforceable on chain: nothing verifies that the
+   * dispatcher named here was compiled against the delegates whose credentials
+   * sit in fields 1 and 2. They must be written together.
    */
-  maxInlineDatumBytes: bigint;
+  plgCred: Cip113Credential;
+  /** index 1 — read by issuance_mint for precise delegation. */
+  transferCred: Cip113Credential;
+  /** index 2 — seize / clawback. */
+  thirdPartyCred: Cip113Credential;
+  /** index 3 — the upgrade authority this datum trampolines to. */
+  upgradeCred: Cip113Credential;
 }
 
-/** Build the coordination datum. Field order is the on-chain contract. */
+/** Build the protocol-params datum. Field order is the on-chain contract. */
 export function protocolParamsDatum(p: ProtocolParamsData): Data.Data {
   return Data.constr(0n, [
-    Data.bytearray(p.registryNodeCs),
-    credToData(p.progLogicCred),
+    credToData(p.plgCred),
     credToData(p.transferCred),
     credToData(p.thirdPartyCred),
-    credToData(p.unfrackingCred),
     credToData(p.upgradeCred),
-    Data.int(p.maxInlineDatumBytes),
   ]);
 }
 
-/** Parse the coordination datum. */
+/**
+ * Parse the protocol-params datum. STRICT on arity — see the block above for
+ * why that strictness is load-bearing rather than defensive.
+ */
 export function decodeProtocolParams(d: Data.Data): ProtocolParamsData {
   if (!(d instanceof Data.Constr) || d.index !== 0n) {
     throw new Error("ProgrammableLogicGlobalParams: expected Constr(0, ...)");
   }
-  if (d.fields.length !== 7) {
+  if (d.fields.length !== 4) {
     throw new Error(
-      `ProgrammableLogicGlobalParams: expected exactly 7 fields, got ${d.fields.length}. ` +
-        `If you read 6 somewhere, that source predates #115 — max_inline_datum_bytes ` +
-        `is field 6. A 6-field datum is malformed for every programmable_logic_base spend.`
+      `ProgrammableLogicGlobalParams: expected exactly 4 fields, got ${d.fields.length}. ` +
+        `The 7-field (pre-alpha.3) layout is NOT forward-compatible and CANNOT be read ` +
+        `positionally: old index 1 was prog_logic_cred, new index 1 is transfer_cred, and both ` +
+        `are Credentials — so a shifted read returns a well-formed value with the wrong ` +
+        `meaning. A 7-field datum belongs to a 0.5.0-alpha.2 protocol instance; point at that ` +
+        `instance's SDK, do not relax this check.`
     );
   }
   const f = d.fields;
-  const n = f[6]!;
-  if (typeof n !== "bigint") {
-    throw new Error("ProgrammableLogicGlobalParams.maxInlineDatumBytes: expected an integer");
-  }
   return {
-    registryNodeCs: expectBytes(f[0]!, "ProtocolParams.registryNodeCs"),
-    progLogicCred: dataToCred(f[1]!, "ProtocolParams.progLogicCred"),
-    transferCred: dataToCred(f[2]!, "ProtocolParams.transferCred"),
-    thirdPartyCred: dataToCred(f[3]!, "ProtocolParams.thirdPartyCred"),
-    unfrackingCred: dataToCred(f[4]!, "ProtocolParams.unfrackingCred"),
-    upgradeCred: dataToCred(f[5]!, "ProtocolParams.upgradeCred"),
-    maxInlineDatumBytes: n,
+    plgCred: dataToCred(f[0]!, "ProtocolParams.plgCred"),
+    transferCred: dataToCred(f[1]!, "ProtocolParams.transferCred"),
+    thirdPartyCred: dataToCred(f[2]!, "ProtocolParams.thirdPartyCred"),
+    upgradeCred: dataToCred(f[3]!, "ProtocolParams.upgradeCred"),
   };
 }
 
