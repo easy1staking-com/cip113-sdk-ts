@@ -27,7 +27,7 @@ import {
 } from "@evolution-sdk/evolution";
 import * as Label from "@evolution-sdk/evolution/Label";
 
-import type { HexString, PlutusScript, ScriptHash, TxInput } from "../types.js";
+import type { HexString, PlutusScript, PolicyId, ScriptHash, TxInput } from "../types.js";
 
 const PlutusV3 = Script.Script.members[3] as { new (opts: { bytes: Uint8Array }): Script.Script };
 
@@ -462,45 +462,52 @@ export function minUtxoAtLeast(
 /**
  * `ProgrammableLogicGlobalParams` — the datum on the protocol-params UTxO.
  *
- * FOUR fields in 0.5.0-alpha.3, ordered by upstream BY READ FREQUENCY:
+ * SIX fields in 0.5.0-alpha.4, ordered by upstream BY READ FREQUENCY:
  *
- *   0  plg_cred          <- programmable_logic_base, once per programmable INPUT
- *   1  transfer_cred     <- issuance_mint (precise delegation, audit finding 04)
- *   2  third_party_cred
- *   3  upgrade_cred
+ *   0  plg_cred              <- programmable_logic_base, once per programmable INPUT
+ *   1  issuance_logic_cred   <- issuance_mint, once per issuance tx (mint AND burn)
+ *   2  transfer_cred         <- issuance_logic, precise delegation (audit finding 04)
+ *   3  third_party_cred      <- issuance_logic, same reason
+ *   4  upgrade_cred          <- protocol_params spend, the upgrade authority
+ *   5  pending_upgrade_cred  <- protocol_params spend, Option<Credential>
  *
- * ⛔ THIS IS A REWRITE OF THE 7-FIELD SHAPE, NOT AN INDEX PATCH, AND THE
- * DIFFERENCE IS WHY IT GETS THIS BLOCK. The old layout was
- * `(registry_node_cs, prog_logic_cred, transfer_cred, third_party_cred,
- * unfracking_cred, upgrade_cred, max_inline_datum_bytes)`. Three fields left
- * (registry_node_cs, unfracking_cred, max_inline_datum_bytes), one arrived
- * (plg_cred), and every survivor MOVED.
+ * ⛔ INDEX 1 IS THE TRAP, AND IT IS SILENT BY CONSTRUCTION. alpha.3 had FOUR
+ * fields with `transfer_cred` at index 1. alpha.4 INSERTS `issuance_logic_cred`
+ * at index 1 — it was not appended — so `transfer_cred` moved to 2 and every
+ * later field shifted. BOTH ARE CREDENTIALS. A six-field datum written in
+ * alpha.3's order with two fields appended is six fields long, passes the arity
+ * check below, decodes without a single error, and hands `issuance_mint` the
+ * TRANSFER credential where it expects ISSUANCE_LOGIC.
  *
- * ⚠ AND THE MISREAD IS SILENT WHERE IT MATTERS MOST. Old index 1 was
- * `prog_logic_cred`; new index 1 is `transfer_cred`. BOTH ARE CREDENTIALS. A
- * parser that trusts positions without checking arity reads a well-formed
- * Credential out of the right slot and hands back the wrong authority — no
- * decode error, no type error, and a transaction that fails much later against
- * the wrong delegate. Indices 2 and 3 shift the same way. That is why
- * {@link decodeProtocolParams} is STRICT on arity: the length check is not
- * defensive tidiness, it is the only thing standing between a shifted field and
- * a silently wrong protocol.
+ * ⇒ No decoder can catch that, here or anywhere. What prevents PRODUCING it is
+ * that {@link protocolParamsDatum} takes a KEYED record and offers no positional
+ * form. What catches a datum already written that way is a read-back comparison
+ * against the deployment record — the devnet bootstrap, which compares every
+ * decoded field against what it deployed. See the demonstration test in
+ * `test/datum-layout.test.mjs`.
  *
- * ⚠ `max_inline_datum_bytes` DID NOT DISAPPEAR — IT CHANGED KIND. It is now a
- * COMPILE-TIME PARAMETER of transfer / third_party / unfracking rather than a
- * datum field. It was mutable (an in-place upgrade could re-tune it) and is now
- * baked into three script hashes: changing it means a redeployment, not a datum
- * rewrite. See DeploymentParams.maxInlineDatumBytes.
+ * ⛔ TWO UPSTREAM COMMENTS ARE STALE AND WILL WALK YOU INTO EXACTLY THAT DEFECT.
+ * They are recorded here so the next reader does not have to re-derive it:
+ *   - `validators/issuance_mint.ak`'s header says `issuance_logic_cred` is
+ *     "field 5". It is field 1.
+ *   - `validators/issuance_logic.ak`'s header says "`transfer_cred`, field 1;
+ *     `third_party_cred`, field 2". They are fields 2 and 3.
+ * The `ProgrammableLogicGlobalParams` DECLARATION and the `*_field` accessors'
+ * `tail_list` depths in `validators/programmable_logic/params.ak` are the
+ * authority, and the vendored blueprint agrees with them. Never take a shape
+ * from prose — take it from
+ * `blueprints/standard/v0.5.0-alpha.4/plutus.json`'s `definitions`.
  *
- * ⚠ `unfracking_cred` is gone from the datum because the DISPATCHER names
- * unfracking at compile time now. `registry_node_cs` is gone because the
- * registry reads its own policy off its own input's payment credential (#117).
+ * ⛔ Nor from upstream's CONTRACT_SURFACE_CHANGES.md, which has now been wrong
+ * about this repository twice — see the block comment at the top of
+ * `src/standard/blueprint.ts`.
  *
- * ⛔ Do not take upstream's CONTRACT_SURFACE_CHANGES.md as the source for this
- * shape. Its SDK impact map is dated 2026-06-11 and describes the PREVIOUS
- * migration; an intermediate section on the same branch documents a SIX-field
- * shape that was superseded later on that same branch. Every field here comes
- * from the blueprint's own definitions at f14b359.
+ * ⚠ `max_inline_datum_bytes` did not disappear in alpha.3, it CHANGED KIND: a
+ * compile-time parameter of transfer / third_party / unfracking rather than a
+ * datum field. See DeploymentParams.maxInlineDatumBytes. `unfracking_cred` is
+ * gone because the DISPATCHER names unfracking at compile time now, and
+ * `registry_node_cs` because the registry reads its own policy off its own
+ * input's payment credential (#117).
  */
 export interface ProtocolParamsData {
   /**
@@ -509,51 +516,92 @@ export interface ProtocolParamsData {
    *
    * ⛔ COHERENCE HAZARD, unenforceable on chain: nothing verifies that the
    * dispatcher named here was compiled against the delegates whose credentials
-   * sit in fields 1 and 2. They must be written together.
+   * sit in fields 2 and 3. They must be written together.
    */
   plgCred: Cip113Credential;
-  /** index 1 — read by issuance_mint for precise delegation. */
+  /**
+   * index 1 — NEW IN alpha.4, and it DISPLACED `transferCred` from this slot.
+   * The `issuance_logic` withdraw-0 credential, read by `issuance_mint` on every
+   * mint and burn. Rewriting this field is how the protocol's issuance rules are
+   * upgraded for every token that already exists, without moving a policy id.
+   */
+  issuanceLogicCred: Cip113Credential;
+  /** index 2 — was index 1 in alpha.3. Read by issuance_logic for precise delegation. */
   transferCred: Cip113Credential;
-  /** index 2 — seize / clawback. */
+  /** index 3 — seize / clawback. */
   thirdPartyCred: Cip113Credential;
-  /** index 3 — the upgrade authority this datum trampolines to. */
+  /** index 4 — the upgrade authority this datum trampolines to. */
   upgradeCred: Cip113Credential;
+  /**
+   * index 5 — NEW IN alpha.4. `Option<Credential>`: the INCOMING upgrade
+   * authority while a handover is in flight, `null` at rest. An authority
+   * handover is two phases (nominate, then the nominee promotes itself by
+   * presenting its own withdraw-0), and this field is phase one's only effect.
+   */
+  pendingUpgradeCred: Cip113Credential | null;
 }
 
 /** Build the protocol-params datum. Field order is the on-chain contract. */
 export function protocolParamsDatum(p: ProtocolParamsData): Data.Data {
+  // `Option<Credential>`: Some(cred) = Constr(0, [Credential]), None = Constr(1, []).
+  const pending =
+    p.pendingUpgradeCred == null
+      ? Data.constr(1n, [])
+      : Data.constr(0n, [credToData(p.pendingUpgradeCred)]);
+
   return Data.constr(0n, [
     credToData(p.plgCred),
+    credToData(p.issuanceLogicCred),
     credToData(p.transferCred),
     credToData(p.thirdPartyCred),
     credToData(p.upgradeCred),
+    pending,
   ]);
+}
+
+/** Decode index 5's `Option<Credential>`. */
+function dataToPendingCred(d: Data.Data): Cip113Credential | null {
+  if (d instanceof Data.Constr) {
+    if (d.index === 1n && d.fields.length === 0) return null;
+    if (d.index === 0n && d.fields.length === 1) {
+      return dataToCred(d.fields[0]!, "ProtocolParams.pendingUpgradeCred");
+    }
+  }
+  throw new Error(
+    `ProtocolParams.pendingUpgradeCred: field 5 is Option<Credential> — ` +
+      `Constr(0, [Credential]) for a standing nomination, Constr(1, []) for none. ` +
+      `pending_upgrade_cred was added in 0.5.0-alpha.4; a datum without it is not a ` +
+      `six-field datum at all.`
+  );
 }
 
 /**
  * Parse the protocol-params datum. STRICT on arity — see the block above for
- * why that strictness is load-bearing rather than defensive.
+ * why that strictness is load-bearing rather than defensive, AND for the one
+ * misread it CANNOT catch.
  */
 export function decodeProtocolParams(d: Data.Data): ProtocolParamsData {
   if (!(d instanceof Data.Constr) || d.index !== 0n) {
     throw new Error("ProgrammableLogicGlobalParams: expected Constr(0, ...)");
   }
-  if (d.fields.length !== 4) {
+  if (d.fields.length !== 6) {
     throw new Error(
-      `ProgrammableLogicGlobalParams: expected exactly 4 fields, got ${d.fields.length}. ` +
-        `The 7-field (pre-alpha.3) layout is NOT forward-compatible and CANNOT be read ` +
-        `positionally: old index 1 was prog_logic_cred, new index 1 is transfer_cred, and both ` +
-        `are Credentials — so a shifted read returns a well-formed value with the wrong ` +
-        `meaning. A 7-field datum belongs to a 0.5.0-alpha.2 protocol instance; point at that ` +
-        `instance's SDK, do not relax this check.`
+      `ProgrammableLogicGlobalParams: expected exactly 6 fields, got ${d.fields.length}. ` +
+        `alpha.4 INSERTED issuance_logic_cred at index 1 — it was not appended — so ` +
+        `transfer_cred, which was index 1 in alpha.3, is now index 2. Both are Credentials, ` +
+        `so a shifted positional read returns a well-formed value naming the wrong authority. ` +
+        `A 4-field datum belongs to a 0.5.0-alpha.3 protocol instance and a 7-field one to ` +
+        `0.5.0-alpha.2; point at that instance's SDK, do not relax this check.`
     );
   }
   const f = d.fields;
   return {
     plgCred: dataToCred(f[0]!, "ProtocolParams.plgCred"),
-    transferCred: dataToCred(f[1]!, "ProtocolParams.transferCred"),
-    thirdPartyCred: dataToCred(f[2]!, "ProtocolParams.thirdPartyCred"),
-    upgradeCred: dataToCred(f[3]!, "ProtocolParams.upgradeCred"),
+    issuanceLogicCred: dataToCred(f[1]!, "ProtocolParams.issuanceLogicCred"),
+    transferCred: dataToCred(f[2]!, "ProtocolParams.transferCred"),
+    thirdPartyCred: dataToCred(f[3]!, "ProtocolParams.thirdPartyCred"),
+    upgradeCred: dataToCred(f[4]!, "ProtocolParams.upgradeCred"),
+    pendingUpgradeCred: dataToPendingCred(f[5]!),
   };
 }
 
@@ -567,25 +615,186 @@ export function blacklistNodeDatum(key: HexString, next: HexString): Data.Data {
 // ---------------------------------------------------------------------------
 
 /**
- * `issuance_mint`'s redeemer — a BARE `MintingRegistryProof`.
- *
- * Upstream #68 REMOVED the `SmartTokenMintingAction { minting_logic_cred,
- * minting_registry_proof }` wrapper these builders used to emit. The redeemer is
- * now the proof itself, and the minting-logic credential is no longer carried in
- * it at all — it comes from the registry node.
+ * A `MintingRegistryProof` — where the token's registry node is in this
+ * transaction.
  *
  *   ctor 0  RefInput    { index }  — the registry node is a REFERENCE input
  *   ctor 1  OutputIndex { index }  — the registry node is an OUTPUT of this tx
  *                                    (registration and first mint in one)
  *
- * Verified against the blueprint's own redeemer schema, not upstream's prose.
+ * ⛔ THIS IS NO LONGER `issuance_mint`'s REDEEMER, AND THE OLD COMMENT HERE WAS
+ * AN INSTRUCTION FOR BUILDING A TRANSACTION THE LEDGER REFUSES. In 0.5.0-alpha.3
+ * `issuance_mint` took a BARE `MintingRegistryProof`. In alpha.4 issuance was
+ * split (upstream #129): the permanent per-token policy's redeemer is now
+ * `IssuanceRedeemer { params_idx }` — see {@link issuanceRedeemer} — and the
+ * proof travels as a VALUE inside the `issuance_logic` withdraw-0 redeemer's
+ * map, keyed by policy id. See {@link issuanceLogicRedeemer}, which is where a
+ * proof built here now goes.
+ *
+ * Signatures and encodings are UNCHANGED on purpose: `src/substandards/**`
+ * still calls both, and rewiring those call sites is a separate slice.
+ *
+ * Verified against the blueprint's own `types/MintingRegistryProof` definition,
+ * not upstream's prose.
  */
 export function mintingProofRefInput(registryRefInputIndex: number): Data.Data {
   return Data.constr(0n, [Data.int(BigInt(registryRefInputIndex))]);
 }
 
+/** The other arm of {@link mintingProofRefInput} — see its block comment. */
 export function mintingProofOutputIndex(registryOutputIndex: number): Data.Data {
   return Data.constr(1n, [Data.int(BigInt(registryOutputIndex))]);
+}
+
+/**
+ * `issuance_mint`'s redeemer — `IssuanceRedeemer { params_idx }`.
+ *
+ * The PERMANENT half of issuance (upstream #129). This script's applied hash IS
+ * a token's policy id, so its redeemer is frozen for as long as any token
+ * exists: nothing but an index hint locating the protocol-params UTxO among the
+ * reference inputs. Everything that could ever change moved to
+ * {@link issuanceLogicRedeemer}.
+ *
+ * ⚠ `params_idx` INDEXES THE COMPLETE, LEDGER-SORTED REFERENCE-INPUT SET, and
+ * the validator jumps straight to `list.at(reference_inputs, params_idx)` and
+ * authenticates what it finds by the params NFT. Computing this index before
+ * the builder has added every reference input is a builder bug, and it does not
+ * report as one — it resolves to some other UTxO, fails the NFT check, and dies
+ * naming nothing. Use `referenceInputIndexOf` in `src/core/ledger-order.ts`,
+ * over the complete set, last.
+ */
+export function issuanceRedeemer(paramsIdx: number): Data.Data {
+  if (!Number.isInteger(paramsIdx) || paramsIdx < 0) {
+    throw new Error(
+      `issuanceRedeemer: params_idx must be a non-negative integer, got ${paramsIdx}`
+    );
+  }
+  return Data.constr(0n, [Data.int(BigInt(paramsIdx))]);
+}
+
+/**
+ * `issuance_logic`'s withdraw-0 redeemer — a MAP from policy id to that
+ * policy's `MintingRegistryProof`.
+ *
+ * The REPLACEABLE half of issuance (upstream #129). This is a Plutus `Pairs`
+ * association list, NOT a Constr. The two consumers read disjoint halves of it:
+ *
+ *   - `issuance_mint` reads only the KEYS — `has_key(covered, own_policy)`. It
+ *     never decodes a value.
+ *   - `issuance_logic` reads only the VALUES — `list.all` over the entries,
+ *     running the per-policy rule set on each proof.
+ *
+ * Entry ORDER is not significant to either, which is why this takes a list and
+ * imposes no sort.
+ *
+ * Three refusals, each closing a builder bug that reports as something else:
+ *
+ * ⛔ AN EMPTY MAP. `list.all([])` is VACUOUSLY TRUE on chain, so an empty
+ * redeemer sails through `issuance_logic` while every `issuance_mint` in the
+ * transaction fails its `has_key`. The failure names the mint, not the empty
+ * map, and nothing points at the omission.
+ *
+ * ⛔ A DUPLICATE POLICY ID. Compared as HEX STRINGS, not as encoded keys.
+ * MEASURED: `Data.map` builds a JS `Map` keyed by `Uint8Array` IDENTITY, so two
+ * distinct arrays holding identical bytes BOTH survive and the map is not
+ * deduplicated for you. Which of the two proofs governs is then a property of
+ * the ledger's map handling rather than of anything you wrote.
+ *
+ * ⛔ A VALUE THAT IS NOT A `MintingRegistryProof`. The keys are the frozen
+ * interface `issuance_mint` depends on; the values are what `issuance_logic`
+ * decodes, and a value it cannot decode aborts the whole withdrawal.
+ */
+export function issuanceLogicRedeemer(
+  entries: readonly { policyId: PolicyId; proof: Data.Data }[]
+): Data.Data {
+  if (entries.length === 0) {
+    throw new Error(
+      `issuanceLogicRedeemer: the entry list is EMPTY. On chain issuance_logic runs ` +
+        `list.all over these entries, which is vacuously TRUE for an empty map — so an ` +
+        `empty redeemer passes issuance_logic while every issuance_mint in the transaction ` +
+        `fails its has_key check, and the error names the mint rather than the omission. ` +
+        `Every policy this transaction issues must appear here.`
+    );
+  }
+
+  const seen = new Set<string>();
+  for (const e of entries) {
+    if (seen.has(e.policyId)) {
+      throw new Error(
+        `issuanceLogicRedeemer: duplicate policy id ${e.policyId}. A policy occupies exactly ` +
+          `one entry in the map issuance_mint's has_key runs against. MEASURED: Data.map is a ` +
+          `JS Map keyed by Uint8Array IDENTITY, so two byte-identical keys BOTH survive and the ` +
+          `map is not deduplicated — which of the two proofs governs is not something this ` +
+          `builder decides.`
+      );
+    }
+    seen.add(e.policyId);
+
+    const p = e.proof;
+    const ok =
+      p instanceof Data.Constr && (p.index === 0n || p.index === 1n) && p.fields.length === 1;
+    if (!ok) {
+      throw new Error(
+        `issuanceLogicRedeemer: the value for policy ${e.policyId} is not a ` +
+          `MintingRegistryProof. issuance_logic decodes every value, and one it cannot decode ` +
+          `aborts the whole withdrawal. Build it with mintingProofRefInput() when the registry ` +
+          `node is a reference input, or mintingProofOutputIndex() when it is an output of this ` +
+          `transaction.`
+      );
+    }
+  }
+
+  return Data.map(entries.map((e) => [Data.bytearray(e.policyId), e.proof]));
+}
+
+/**
+ * Which of the three upgrade-path shapes a `protocol_params` SPEND is.
+ * Field-less constructors; the index is the whole payload. Mirrors `PlgAct` in
+ * `src/core/ledger-order.ts`.
+ */
+export const ProtocolParamsAct = {
+  PROTOCOL_UPGRADE: 0n,
+  NOMINATE_AUTHORITY: 1n,
+  PROMOTE_AUTHORITY: 2n,
+} as const;
+
+export type ProtocolParamsActVariant = keyof typeof ProtocolParamsAct;
+
+/**
+ * Build a `ProtocolParamsRedeemer`.
+ *
+ * The arms carry no payload: every value a branch needs is already in the
+ * continuing datum, which is validated regardless. They exist to make each
+ * transaction DECLARE its intent, so `ProtocolUpgrade` freezes the nomination
+ * and `NominateAuthority` freezes everything else — an authority handover can
+ * never ride along inside a parameter change.
+ *
+ * ⛔ HAZARD: `ProtocolUpgrade` IS BYTE-IDENTICAL TO {@link voidData}, which is
+ * `Constr(0, [])`. Every existing caller that passes `voidData()` as the params
+ * spend redeemer therefore keeps working BY ACCIDENT, and no decoder anywhere —
+ * on chain or off — can distinguish a migrated caller from a stale one, because
+ * the bytes are the same bytes. Same shape as the `SpendViaTransfer` /
+ * `BaseSpendRedeemer` collision recorded in WORKLOG S-6.
+ *
+ * ⇒ The silence is ASYMMETRIC, and that is the risk profile: the other two arms
+ * are constructors 1 and 2, which `voidData()` cannot represent, so they fail
+ * loudly. Only the upgrade path is quiet — and it is the one every deployment
+ * exercises first.
+ *
+ * ⇒ Because no offline instrument can settle it, the proof that this redeemer
+ * was ever really implemented is a devnet mutation: submit `Constr(1, [])` where
+ * the validator expects `ProtocolUpgrade` and require it to go RED on chain. The
+ * ledger is the only witness with jurisdiction.
+ */
+export function protocolParamsRedeemer(arm: ProtocolParamsActVariant): Data.Data {
+  const idx = ProtocolParamsAct[arm];
+  if (idx === undefined) {
+    throw new Error(
+      `protocolParamsRedeemer: unknown act ${JSON.stringify(arm)}. ` +
+        `Expected one of: ${Object.keys(ProtocolParamsAct).join(", ")}.`
+    );
+  }
+  return Data.constr(idx, []);
 }
 
 export interface RegistryProof {
@@ -653,6 +862,213 @@ export function blacklistAddRedeemer(stakingPkh: HexString): Data.Data {
 /** Blacklist remove (constructor 2) */
 export function blacklistRemoveRedeemer(stakingPkh: HexString): Data.Data {
   return Data.constr(2n, [Data.bytearray(stakingPkh)]);
+}
+
+// ---------------------------------------------------------------------------
+// MultisigScript — the upgrade authority's tree
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound on the number of nodes (inner and leaf) a `MultisigScript` may
+ * hold, from upstream `lib/multisig.ak`'s `max_size`. Chosen there on MEASURED
+ * execution budget, not on feel, and baked into the validator's bytes — so a
+ * tree above it is refused on chain and changing the cap is a redeployment.
+ */
+export const MULTISIG_MAX_SIZE = 20;
+
+/**
+ * A `MultisigScript` tree — native-script multisig semantics in Plutus, used for
+ * the upgrade authority. Constructor indices are the on-chain contract:
+ *
+ *   0  Signature { key_hash }
+ *   1  AllOf     { scripts }
+ *   2  AnyOf     { scripts }
+ *   3  AtLeast   { required, scripts }
+ *   4  Before    { time }
+ *   5  After     { time }
+ *   6  Script    { script_hash }
+ *
+ * `time` is a bigint because a POSIX bound is a Plutus Int and must round-trip
+ * exactly; `required` is a plain number because it is bounded by
+ * {@link MULTISIG_MAX_SIZE}.
+ */
+export type MultisigScriptTree =
+  | { type: "signature"; keyHash: HexString }
+  | { type: "all-of"; scripts: readonly MultisigScriptTree[] }
+  | { type: "any-of"; scripts: readonly MultisigScriptTree[] }
+  | { type: "at-least"; required: number; scripts: readonly MultisigScriptTree[] }
+  | { type: "before"; time: bigint }
+  | { type: "after"; time: bigint }
+  | { type: "script"; scriptHash: HexString };
+
+/** Node count, leaves included — upstream `multisig.size`. */
+function multisigSize(t: MultisigScriptTree): number {
+  switch (t.type) {
+    case "all-of":
+    case "any-of":
+    case "at-least":
+      return 1 + t.scripts.reduce((acc, c) => acc + multisigSize(c), 0);
+    default:
+      return 1;
+  }
+}
+
+function expect28ByteHash(hash: HexString, where: string): void {
+  if (!/^[0-9a-fA-F]{56}$/.test(hash)) {
+    throw new Error(
+      `multisigScriptDatum: ${where} must be exactly 28 bytes (56 hex chars), got ` +
+        `${hash.length} chars. A hash of any other length can never match a signatory or a ` +
+        `withdrawal credential, so the leaf is permanently unsatisfiable — and an authority ` +
+        `nobody can satisfy is a permanent brick with no repair path.`
+    );
+  }
+}
+
+/** Encode one node, enforcing upstream `shape_ok` as it goes. */
+function encodeMultisigNode(t: MultisigScriptTree): Data.Data {
+  switch (t.type) {
+    case "signature":
+      expect28ByteHash(t.keyHash, "Signature.key_hash");
+      return Data.constr(0n, [Data.bytearray(t.keyHash)]);
+    case "script":
+      expect28ByteHash(t.scriptHash, "Script.script_hash");
+      return Data.constr(6n, [Data.bytearray(t.scriptHash)]);
+    case "before":
+      return Data.constr(4n, [Data.int(t.time)]);
+    case "after":
+      return Data.constr(5n, [Data.int(t.time)]);
+    case "all-of":
+      return Data.constr(1n, [Data.list(encodeChildren(t.scripts, "AllOf"))]);
+    case "any-of":
+      return Data.constr(2n, [Data.list(encodeChildren(t.scripts, "AnyOf"))]);
+    case "at-least": {
+      if (!Number.isInteger(t.required) || t.required < 1 || t.required > t.scripts.length) {
+        throw new Error(
+          `multisigScriptDatum: AtLeast.required must satisfy 1 <= required <= ` +
+            `${t.scripts.length} (the child count), got ${t.required}. A threshold of 0 or ` +
+            `below authorises with no evidence at all; one above the child count can never be ` +
+            `met. Upstream MINR-054 / audit-3 finding 05.`
+        );
+      }
+      return Data.constr(3n, [
+        Data.int(BigInt(t.required)),
+        Data.list(encodeChildren(t.scripts, "AtLeast")),
+      ]);
+    }
+  }
+}
+
+function encodeChildren(
+  scripts: readonly MultisigScriptTree[],
+  where: string
+): Data.Data[] {
+  if (scripts.length === 0) {
+    throw new Error(
+      `multisigScriptDatum: ${where} has an EMPTY child list. AllOf [] is VACUOUSLY TRUE on ` +
+        `chain — a permissionless authority, the sharpest edge in the whole type — and AnyOf [] ` +
+        `can never be satisfied at all. One rule for all three list nodes, as upstream does.`
+    );
+  }
+
+  const encoded = scripts.map(encodeMultisigNode);
+
+  // Structural equality, matching Aiken's `list.unique` over the children:
+  // compare the ENCODED CBOR rather than the JS objects, which are distinct
+  // references even when they describe the same node.
+  const seen = new Set<string>();
+  for (const child of encoded) {
+    const key = bytesToHex(Data.toCBORBytes(child));
+    if (seen.has(key)) {
+      throw new Error(
+        `multisigScriptDatum: ${where} has DUPLICATE children. A duplicate distorts AtLeast — ` +
+          `[A, A, B] at threshold 2 is met by A alone — and upstream refuses it on every list ` +
+          `node rather than only where it bites. Upstream MINR-054 / audit-3 finding 05.`
+      );
+    }
+    seen.add(key);
+  }
+
+  return encoded;
+}
+
+/**
+ * Build a `MultisigScript` datum, enforcing upstream `lib/multisig.ak`'s
+ * `well_formed` — 28-byte hashes, non-empty and duplicate-free child lists,
+ * `1 <= required <= |scripts|`, and at most {@link MULTISIG_MAX_SIZE} nodes.
+ *
+ * ⛔ THE RAIL LIVES ON THE ENCODER ONLY, AND {@link decodeMultisigScript}
+ * DELIBERATELY ENFORCES NONE OF IT. The two functions answer different
+ * questions: the encoder decides what may be WRITTEN, the decoder reads what is
+ * ON CHAIN. A decoder that refused an ill-formed tree could not be used to
+ * inspect one — and inspecting a live authority somebody managed to write is
+ * exactly the moment you need to read it. Do not "tidy" the check into the
+ * decoder for symmetry.
+ */
+export function multisigScriptDatum(tree: MultisigScriptTree): Data.Data {
+  const size = multisigSize(tree);
+  if (size > MULTISIG_MAX_SIZE) {
+    throw new Error(
+      `multisigScriptDatum: the tree has ${size} nodes, above MULTISIG_MAX_SIZE = ` +
+        `${MULTISIG_MAX_SIZE}. The cap is baked into the validator's bytes and was chosen on ` +
+        `MEASURED execution budget; an authority that writes itself a tree too expensive to ` +
+        `evaluate has bricked the upgrade path.`
+    );
+  }
+  return encodeMultisigNode(tree);
+}
+
+/**
+ * Parse a `MultisigScript` datum. Reads what is on chain and enforces NO
+ * well-formedness — see {@link multisigScriptDatum} for why the asymmetry is
+ * deliberate.
+ */
+export function decodeMultisigScript(d: Data.Data): MultisigScriptTree {
+  if (!(d instanceof Data.Constr)) {
+    throw new Error("MultisigScript: expected a Constr");
+  }
+  const f = d.fields;
+  const children = (where: string): MultisigScriptTree[] => {
+    const list = f[0];
+    if (!Array.isArray(list)) {
+      throw new Error(`MultisigScript.${where}: expected a list of scripts`);
+    }
+    return list.map(decodeMultisigScript);
+  };
+
+  switch (d.index) {
+    case 0n:
+      return { type: "signature", keyHash: expectBytes(f[0]!, "MultisigScript.Signature.keyHash") };
+    case 1n:
+      return { type: "all-of", scripts: children("AllOf") };
+    case 2n:
+      return { type: "any-of", scripts: children("AnyOf") };
+    case 3n: {
+      const required = f[0];
+      if (typeof required !== "bigint") {
+        throw new Error("MultisigScript.AtLeast: expected required to be an Int");
+      }
+      const list = f[1];
+      if (!Array.isArray(list)) {
+        throw new Error("MultisigScript.AtLeast: expected a list of scripts");
+      }
+      return { type: "at-least", required: Number(required), scripts: list.map(decodeMultisigScript) };
+    }
+    case 4n:
+    case 5n: {
+      const time = f[0];
+      if (typeof time !== "bigint") {
+        throw new Error("MultisigScript.Before/After: expected time to be an Int");
+      }
+      return d.index === 4n ? { type: "before", time } : { type: "after", time };
+    }
+    case 6n:
+      return { type: "script", scriptHash: expectBytes(f[0]!, "MultisigScript.Script.scriptHash") };
+    default:
+      throw new Error(
+        `MultisigScript: unknown constructor index ${d.index}. Valid indices are 0..6 ` +
+          `(Signature, AllOf, AnyOf, AtLeast, Before, After, Script).`
+      );
+  }
 }
 
 // ---------------------------------------------------------------------------

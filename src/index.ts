@@ -403,11 +403,19 @@ export {
   mintingProofOutputIndex,
   protocolParamsDatum,
   decodeProtocolParams,
+  issuanceRedeemer,
+  issuanceLogicRedeemer,
+  protocolParamsRedeemer,
+  ProtocolParamsAct,
+  multisigScriptDatum,
+  decodeMultisigScript,
+  MULTISIG_MAX_SIZE,
 } from "./core/evo-utils.js";
 export type {
   RegistryNodeData,
   ProtocolParamsData,
   Cip113Credential,
+  MultisigScriptTree,
 } from "./core/evo-utils.js";
 export {
   assertDeploymentScripts,
