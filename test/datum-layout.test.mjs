@@ -417,6 +417,44 @@ test("⛔ IssuanceLogicRedeemer: a duplicate policy id is refused (Data.map does
   );
 });
 
+/**
+ * ⛔ THE SAME DUPLICATE, ONE SPELLING APART. Hex case is presentation, not
+ * identity: `Data.bytearray` decodes both spellings to the same bytes, so two
+ * entries differing only in case land in the map as BYTE-IDENTICAL keys.
+ * MEASURED before the fix: `issuanceLogicRedeemer` accepted them and `map.size`
+ * was 2 with both keys equal.
+ *
+ * How a caller gets there without doing anything odd: one policy id derived
+ * in-process by `computeScriptHash` (lowercase), one pasted from a block
+ * explorer or a config file (uppercase). On chain `issuance_logic`'s `list.all`
+ * then runs the rule set twice, and `issuance_mint`'s `has_key` matches
+ * whichever entry the ledger reaches first — so which of the two proofs governs
+ * is decided by ledger internals rather than by the builder.
+ *
+ * Same hazard the block comment at `src/core/ledger-order.ts:60` measures for
+ * reference-input ordering, one file over.
+ */
+test("⛔ IssuanceLogicRedeemer: a duplicate policy id differing only in hex CASE is refused", () => {
+  const lower = "ab".repeat(28);
+  const upper = "AB".repeat(28);
+
+  // The premise: these two spellings ARE one key on chain.
+  assert.equal(
+    hex(Data.bytearray(lower)),
+    hex(Data.bytearray(upper)),
+    "the two spellings encode to identical bytes — that is why this is a duplicate"
+  );
+
+  assert.throws(
+    () => issuanceLogicRedeemer([
+      { policyId: lower, proof: mintingProofRefInput(0) },
+      { policyId: upper, proof: mintingProofOutputIndex(1) },
+    ]),
+    /duplicate/i,
+    "one policy, two spellings, and the map cannot hold both"
+  );
+});
+
 test("⛔ IssuanceLogicRedeemer: a value that is not a MintingRegistryProof is refused", () => {
   assert.throws(
     () => issuanceLogicRedeemer([{ policyId: "44".repeat(28), proof: Data.int(7n) }]),
@@ -462,6 +500,23 @@ test("ProtocolParamsRedeemer: an unknown arm is refused, listing the valid names
       return true;
     }
   );
+});
+
+test("ProtocolParamsRedeemer: a PROTOTYPE-inherited key is refused the same way", () => {
+  // `ProtocolParamsAct["valueOf"]` is inherited from Object.prototype, so a
+  // plain lookup returns a FUNCTION rather than undefined and the arm sails past
+  // an `=== undefined` guard into the encoder, where it dies as a Data.Constr
+  // index type error naming nothing the caller can act on.
+  for (const inherited of ["valueOf", "constructor", "toString"]) {
+    assert.throws(
+      () => protocolParamsRedeemer(inherited),
+      (err) => {
+        assert.match(err.message, /Expected one of/, `${inherited} must reach the actionable error`);
+        assert.match(err.message, /PROTOCOL_UPGRADE/);
+        return true;
+      }
+    );
+  }
 });
 
 /**

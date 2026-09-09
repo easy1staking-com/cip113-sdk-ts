@@ -694,11 +694,14 @@ export function issuanceRedeemer(paramsIdx: number): Data.Data {
  * transaction fails its `has_key`. The failure names the mint, not the empty
  * map, and nothing points at the omission.
  *
- * ⛔ A DUPLICATE POLICY ID. Compared as HEX STRINGS, not as encoded keys.
- * MEASURED: `Data.map` builds a JS `Map` keyed by `Uint8Array` IDENTITY, so two
- * distinct arrays holding identical bytes BOTH survive and the map is not
+ * ⛔ A DUPLICATE POLICY ID. Compared as LOWER-CASED HEX STRINGS, not as encoded
+ * keys. MEASURED: `Data.map` builds a JS `Map` keyed by `Uint8Array` IDENTITY,
+ * so two distinct arrays holding identical bytes BOTH survive and the map is not
  * deduplicated for you. Which of the two proofs governs is then a property of
- * the ledger's map handling rather than of anything you wrote.
+ * the ledger's map handling rather than of anything you wrote. The keys are
+ * lower-cased first because hex case is presentation and two spellings of one
+ * policy encode to identical bytes — the same normalisation `cip171.ts` applies
+ * to raw script hashes, and the hazard `ledger-order.ts` measures for ordering.
  *
  * ⛔ A VALUE THAT IS NOT A `MintingRegistryProof`. The keys are the frozen
  * interface `issuance_mint` depends on; the values are what `issuance_logic`
@@ -719,7 +722,8 @@ export function issuanceLogicRedeemer(
 
   const seen = new Set<string>();
   for (const e of entries) {
-    if (seen.has(e.policyId)) {
+    const k = e.policyId.toLowerCase();
+    if (seen.has(k)) {
       throw new Error(
         `issuanceLogicRedeemer: duplicate policy id ${e.policyId}. A policy occupies exactly ` +
           `one entry in the map issuance_mint's has_key runs against. MEASURED: Data.map is a ` +
@@ -728,7 +732,7 @@ export function issuanceLogicRedeemer(
           `builder decides.`
       );
     }
-    seen.add(e.policyId);
+    seen.add(k);
 
     const p = e.proof;
     const ok =
@@ -787,7 +791,11 @@ export type ProtocolParamsActVariant = keyof typeof ProtocolParamsAct;
  * ledger is the only witness with jurisdiction.
  */
 export function protocolParamsRedeemer(arm: ProtocolParamsActVariant): Data.Data {
-  const idx = ProtocolParamsAct[arm];
+  // `Object.hasOwn`, not `=== undefined`: `ProtocolParamsAct["valueOf"]` inherits
+  // a FUNCTION from Object.prototype, so a plain lookup sails past an undefined
+  // check and dies inside the encoder as a Data.Constr index type error naming
+  // nothing the caller can act on.
+  const idx = Object.hasOwn(ProtocolParamsAct, arm) ? ProtocolParamsAct[arm] : undefined;
   if (idx === undefined) {
     throw new Error(
       `protocolParamsRedeemer: unknown act ${JSON.stringify(arm)}. ` +
