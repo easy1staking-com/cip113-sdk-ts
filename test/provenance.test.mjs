@@ -24,6 +24,7 @@ const PINNED = [
   "blueprints/standard/v0.3.0",
   "blueprints/standard/v0.5.0-alpha.2",
   "blueprints/standard/v0.5.0-alpha.3",
+  "blueprints/standard/v0.5.0-alpha.4",
   "blueprints/substandards/freeze-and-seize/v0.1.0",
   "blueprints/substandards/dummy/v0.1.0",
   "blueprints/substandards/dummy/v0.2.0",

@@ -31,6 +31,7 @@ import {
   STANDARD_VALIDATORS,
   RETIRED_VALIDATORS,
 } from "../dist/standard/blueprint.js";
+import { computeScriptHash } from "../dist/index.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
@@ -224,4 +225,74 @@ test("comparator returns null — not 0 — when it cannot tell", () => {
   assert.equal(compareProtocolVersions("garbage", "0.5.0"), null);
   assert.equal(compareProtocolVersions("0.5.0", ""), null);
   assert.equal(compareProtocolVersions("0.5", "0.5.0"), null, "an incomplete core is unparseable");
+});
+
+// ---------------------------------------------------------------------------
+// alpha.4 — vendored (T-F01-1), but NOT the target. T-F02 owns the flip.
+//
+// ⛔ ESCALATED, NOT WRITTEN: the contract's test (a) — "alpha.4 is diagnosed
+// as LATER" — cannot be built against the real artifact. `validateStandardBlueprint`
+// only reaches its version-comparison branch when `missing.length > 0` (a
+// required title is absent). alpha.4 retires NO title `STANDARD_VALIDATORS`
+// requires — it only changes some validators' bytes/arity and adds
+// `issuance_logic` — so `missing` is `[]` for alpha.4 exactly as it is for the
+// (correctly accepted) alpha.3, and `validateStandardBlueprint(alpha4)` returns
+// silently instead of throwing, even though `compareProtocolVersions("0.5.0-alpha.4",
+// TARGET_PROTOCOL_VERSION)` correctly returns 1. Measured, not assumed: both
+// alpha.3 and alpha.4 produce `missing: []` and neither throws. Fixing this is a
+// `src/standard/blueprint.ts` change and `src/**` is off this slice's allowlist —
+// reported to the Orchestrator rather than routed around. See the worker report.
+// ---------------------------------------------------------------------------
+
+test("the alpha.3 → alpha.4 validator delta is exactly what T-F02 must absorb", () => {
+  // Keyed by the validator's first title segment (e.g. "issuance_mint" from
+  // "issuance_mint.issuance_mint.mint"), hashing compiledCode rather than
+  // trusting titles — a title can survive while its bytes do not, and vice
+  // versa (see the alpha.2/alpha.3 delta test above).
+  const hashesByKey = (bp) => {
+    const m = new Map();
+    for (const v of bp.validators) {
+      const key = v.title.split(".")[0];
+      const hash = computeScriptHash(v.compiledCode);
+      if (!m.has(key)) m.set(key, new Set());
+      m.get(key).add(hash);
+    }
+    return m;
+  };
+
+  const h3 = hashesByKey(load("blueprints/standard/v0.5.0-alpha.3/plutus.json"));
+  const h4 = hashesByKey(load("blueprints/standard/v0.5.0-alpha.4/plutus.json"));
+
+  const allKeys = new Set([...h3.keys(), ...h4.keys()]);
+  const added = [];
+  const removed = [];
+  const changed = [];
+  for (const key of allKeys) {
+    const s3 = h3.get(key);
+    const s4 = h4.get(key);
+    if (!s3) {
+      added.push(key);
+      continue;
+    }
+    if (!s4) {
+      removed.push(key);
+      continue;
+    }
+    const sameSet = s3.size === s4.size && [...s3].every((h) => s4.has(h));
+    if (!sameSet) changed.push(key);
+  }
+
+  // Red first (proven manually, not left in the suite): dropping
+  // "issuance_logic" from `added` below makes this assertion fail, because
+  // the measured set really does contain it.
+  assert.deepEqual(
+    { added: added.sort(), removed: removed.sort(), changed: changed.sort() },
+    {
+      added: ["issuance_logic"],
+      removed: [],
+      changed: ["issuance_mint", "protocol_params", "upgrade_multisig"],
+    },
+    "the alpha.3 → alpha.4 validator surface moved differently than measured here — " +
+      "if upstream's diff changed, the scope T-F02 must absorb changed with it, and someone must look",
+  );
 });
