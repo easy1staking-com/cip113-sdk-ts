@@ -16,17 +16,29 @@
  * delegates hit 3150, that is the PREDICTED case and the fix is
  * register-and-delegate. If they do NOT, that is also a result: it would mean
  * 3150 scopes differently for script credentials than for key ones.
+ *
+ * alpha.4 adds a second protocol withdrawal to every mint and burn:
+ * `issuance_logic`'s withdraw-0. Omitting it is silent — `issuance_mint` finds
+ * no matching redeemer and simply fails — and this file is the first place an
+ * alpha.4 issuance transaction is exercised on chain.
  */
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
+import {
+  Address as EvoAddress,
+  Assets as EvoAssets,
+  RewardAccount as EvoRewardAccount,
+  Transaction as EvoTransaction,
+  Withdrawals as EvoWithdrawals,
+} from "@evolution-sdk/evolution";
 import { dummySubstandard } from "../../dist/substandards/dummy/index.js";
 import {
   CIP113,
   stringToHex,
   baseAddress,
+  rewardAddress,
   compareWithdrawalKeys,
   sortWithdrawalKeys,
   withdrawalIndexOf,
@@ -107,8 +119,55 @@ test("register, mint and transfer a dummy token end to end", async () => {
     assetName,
     quantity: 1_000n,
   });
+  // [tx size] measured from the returned CBOR, NOT from TX_SIZE_DIAG.
+  // MEASURED (T-F04-2 r2): that env var gates one site — a closure private to
+  // `bootstrapProtocol` — so it instruments the FIXTURE's six submissions and is
+  // blind to every transaction this file builds. The size of a transaction the
+  // SDK returns is a property of the object in hand; do not reach for a harness
+  // switch to learn it.
+  const regBytes = reg.cbor.length / 2;
+  console.error(`  [tx size] dummy.register: ${regBytes} bytes (limit 16384)`);
+  assert.ok(regBytes < 16384, `register transaction is ${regBytes} bytes, over the 16384 cap`);
+
   const policy = reg.tokenPolicyId!;
   const unit = policy + assetName;
+  const regTx = EvoTransaction.fromCBORHex(reg.cbor);
+  // Assertion 1 is defence-in-depth, not the guard, under a live evaluator
+  // (measured by N1b): Ogmios catches the missing withdrawal during build before
+  // a CBOR reaches this check. Its evaluator-independent value is unproven by
+  // this slice, but it stays because it is fast, readable and names the specific
+  // credential rather than accepting any two withdrawals.
+  const regWithdrawals = regTx.body.withdrawals;
+  assert.ok(regWithdrawals, "register must carry its two script withdrawals");
+  const withdrawalEntries = EvoWithdrawals.entries(regWithdrawals);
+  assert.equal(withdrawalEntries.length, 2, "register must carry exactly two withdrawals");
+  const issuanceLogicReward = rewardAddress(
+    networkId,
+    deployment.issuanceLogic.scriptHash
+  );
+  assert.ok(
+    withdrawalEntries.some(
+      ([account]) => EvoRewardAccount.toBech32(account) === issuanceLogicReward
+    ),
+    "register withdrawals must include issuance_logic"
+  );
+
+  // Assertion 2 is also downstream of the live evaluator (measured by N2),
+  // which catches a mis-declared output tag during build. Its independent value
+  // without an evaluator is unproven by this slice; this direct NFT check stays
+  // because it is fast, readable and names the exact planned output.
+  const outputIndices = reg.metadata?.outputIndices as Record<string, number> | undefined;
+  assert.ok(outputIndices, "register must report its planned output indices");
+  const newNodeOutput = regTx.body.outputs[outputIndices.OUT_NEW_NODE];
+  assert.ok(newNodeOutput, "the planned new-node output must exist");
+  const registryNftQuantity = EvoAssets.getByUnit(
+    newNodeOutput.assets,
+    deployment.registry.scriptHash + policy
+  );
+  // This is `verify_registry_node`'s own NFT check performed off chain. It
+  // kills a mismatch between the declared tag order and actual output order.
+  assert.equal(registryNftQuantity, 1n, "the planned new-node output must carry its registry NFT");
+
   await reg._signBuilder.signAndSubmit();
   await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), policy, assetName)) === 1_000n, {
     what: "the registered supply to appear",
@@ -124,6 +183,10 @@ test("register, mint and transfer a dummy token end to end", async () => {
     quantity: 500n,
     substandardId: "dummy",
   });
+  // [tx size] measured from the returned CBOR; see the register measurement.
+  const mintBytes = more.cbor.length / 2;
+  console.error(`  [tx size] dummy.mint: ${mintBytes} bytes (limit 16384)`);
+  assert.ok(mintBytes < 16384, `mint transaction is ${mintBytes} bytes, over the 16384 cap`);
   await more._signBuilder.signAndSubmit();
   await waitFor(async () => (await heldAt(baseAddress(networkId, plb, address), policy, assetName)) === 1_500n, {
     what: "the additional mint to settle",
