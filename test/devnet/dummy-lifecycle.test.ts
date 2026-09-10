@@ -132,11 +132,13 @@ test("register, mint and transfer a dummy token end to end", async () => {
   const policy = reg.tokenPolicyId!;
   const unit = policy + assetName;
   const regTx = EvoTransaction.fromCBORHex(reg.cbor);
-  // Assertion 1 is defence-in-depth, not the guard, under a live evaluator
-  // (measured by N1b): Ogmios catches the missing withdrawal during build before
-  // a CBOR reaches this check. Its evaluator-independent value is unproven by
-  // this slice, but it stays because it is fast, readable and names the specific
-  // credential rather than accepting any two withdrawals.
+  // Assertion 1 is readable documentation of the invariant, not a guard. The
+  // live evaluator catches an omitted withdrawal during build, before CBOR
+  // exists. There is no evaluator-less consumer build path: Evolution's
+  // resolveEvaluator falls back to the provider's evaluateTx, and without
+  // either, the build fails outright. The identity comparison is circular: it
+  // derives the reward address from the same deployment.issuanceLogic.scriptHash
+  // that the builder used, so it can only detect the omission the evaluator owns.
   const regWithdrawals = regTx.body.withdrawals;
   assert.ok(regWithdrawals, "register must carry its two script withdrawals");
   const withdrawalEntries = EvoWithdrawals.entries(regWithdrawals);
@@ -152,10 +154,12 @@ test("register, mint and transfer a dummy token end to end", async () => {
     "register withdrawals must include issuance_logic"
   );
 
-  // Assertion 2 is also downstream of the live evaluator (measured by N2),
-  // which catches a mis-declared output tag during build. Its independent value
-  // without an evaluator is unproven by this slice; this direct NFT check stays
-  // because it is fast, readable and names the exact planned output.
+  // Assertion 2 is load-bearing and evaluator-independent. It defends
+  // UnsignedTx.metadata.outputIndices, a public-API value that never reaches the
+  // chain, so no evaluator or ledger can observe a defect in it. M-2 proved that
+  // pointing OUT_NEW_NODE at plan.outputIndexOf("covering-node") leaves the
+  // transaction valid and accepted on chain but fails this off-chain NFT check.
+  // This is the only guard on that property.
   const outputIndices = reg.metadata?.outputIndices as Record<string, number> | undefined;
   assert.ok(outputIndices, "register must report its planned output indices");
   const newNodeOutput = regTx.body.outputs[outputIndices.OUT_NEW_NODE];

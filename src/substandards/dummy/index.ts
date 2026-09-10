@@ -540,8 +540,11 @@ export function dummySubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registry.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
-      // Withdrawal count cross-check: plan.withdrawals.length is 2, and this
-      // builder emits exactly 2 withdraw() calls.
+      // Deliberately no decoded-transaction assertion checks mint's withdrawal
+      // set here. The chain is complete for this property, and the evaluator
+      // runs inside the builder, so such an assertion cannot fire first. The
+      // devnet tests are also outside the offline suite, so it would add no CI
+      // coverage. See ledger-order.ts for the rule; this site is the exception.
       return finish(tx, feePayerAddress, {
         tokenPolicyId,
         unit,
