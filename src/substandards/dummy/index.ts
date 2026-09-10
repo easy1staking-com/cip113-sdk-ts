@@ -540,11 +540,10 @@ export function dummySubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registry.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
-      // Deliberately no decoded-transaction assertion checks mint's withdrawal
-      // set here. The chain is complete for this property, and the evaluator
-      // runs inside the builder, so such an assertion cannot fire first. The
-      // devnet tests are also outside the offline suite, so it would add no CI
-      // coverage. See ledger-order.ts for the rule; this site is the exception.
+      // Register's withdrawal set is asserted on the decoded transaction at
+      // test/devnet/dummy-lifecycle.test.ts:142-155. It stays there as readable
+      // documentation of the invariant rather than as a guard, because the live
+      // evaluator is upstream of it.
       return finish(tx, feePayerAddress, {
         tokenPolicyId,
         unit,
@@ -640,8 +639,13 @@ export function dummySubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
-      // Withdrawal count cross-check: plan.withdrawals.length is 2, and this
-      // builder emits exactly 2 withdraw() calls.
+      // Deliberately no decoded-transaction assertion checks mint's withdrawal
+      // set here. The evaluator runs inside the builder, so such an assertion
+      // could not fire first; test/devnet/ is outside the offline suite, so it
+      // would add no CI coverage either. Upstream issuance_mint.ak's checks are
+      // presence checks, so the chain catches every omission. The declared set
+      // is inert on this path: plan.withdrawals is read by nothing executable
+      // here, so a divergence in the other direction has no on-chain consequence.
       return finish(tx, feePayerAddress, { tokenPolicyId, unit });
     },
 
