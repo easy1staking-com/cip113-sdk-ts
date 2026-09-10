@@ -5,7 +5,8 @@ How to run the devnet-backed tests, and the traps that cost real time getting th
 ## Running
 
 ```bash
-npx --yes @bloxbean/yaci-devkit up --enable-yaci-store --tail false   # node, store, ogmios
+setsid nohup npx --yes @bloxbean/yaci-devkit up --enable-yaci-store --tail false \
+  >/tmp/yaci.log 2>&1 </dev/null &                                     # node, store, ogmios
 setsid nohup bash ~/.yaci-cli/local-clusters/default/kupo.sh \
   >/tmp/kupo.log 2>&1 </dev/null &                                     # Kupo — see below
 npm run test:devnet
@@ -73,6 +74,38 @@ run `--help` against a devnet you care about.
 **`yaci-devkit`'s exit code cannot be trusted.** The npx wrapper exits **0** while the underlying
 yaci-cli exits 1. A CI step that only checks the exit code will report a green devnet that never
 started. Health-check the ports instead.
+
+**⛔ `--tail false` DOES NOT DAEMONIZE — and this is the biggest trap on the page.** It stops the
+wrapper *streaming logs*; it does **not** detach anything. Every component stays a CHILD of the
+invoking process, so the whole devnet dies when that process goes away: a `timeout` wrapper firing,
+the launching shell exiting, a CI step ending, an agent session being torn down. **And none of
+those announce themselves**, because the exit status is masked by the entry above.
+
+MEASURED 2026-09-10: a launch wrapped in `timeout 300` was killed at five minutes; five of six
+ports vanished and the chain stalled. The kill reported **exit code 0**. The one component that
+survived was **Kupo — precisely because it had been started detached**, which is why this document
+used to read the hazard as a Kupo quirk. It is not: Kupo was the exception, not the special case.
+
+⇒ **Detach the CORE the same way you detach Kupo**, as the Running block does:
+
+```bash
+setsid nohup npx --yes @bloxbean/yaci-devkit up --enable-yaci-store --tail false \
+  >/tmp/yaci.log 2>&1 </dev/null &
+```
+
+**Never wrap `up` in `timeout`.** A timeout on a process that owns the devnet is a scheduled
+outage, not a safety net.
+
+### ⚑ A liveness check taken INSIDE the lifetime of the process that owns the thing proves only that both are alive right now
+
+The general form of the trap above, and it outlives this tool. Ports were checked; a slot delta was
+checked — both are the right instruments, and both were correct at the moment they ran. Neither
+asked **whether what had just been started would outlive the checking**, and the answer was no: the
+prover was the owner. A verification that shares a fate with its subject cannot report on that fate.
+
+⇒ Prove it the way it will actually be used: check **from a process that did not start it**, or
+after the starter has exited. On this machine, "the devnet is up" is only meaningful once the shell
+that ran `up` is gone — before that you have measured a coincidence.
 
 **Every subcommand binds port 10000, including `down`.** So `down` fails with a BindException
 while a devnet is running — the thing it exists to stop. Recovery is to kill the processes
@@ -152,7 +185,8 @@ Two reasons a restart is expensive beyond the coordination:
   and do not simplify that back to `&` when copying it somewhere new; the flags ARE the fix, not
   ceremony. (Found by the DevOps role, 2026-09-10.)
 - **A reset wipes everyone's state**, including any suite mid-run.
-- **It does not survive a reboot, and nothing brings it back.** Assume it is gone rather than
+- **It does not survive its launcher, let alone a reboot** — see `--tail false` above; the common
+  case is not a reboot but a shell or session ending. Assume it is gone rather than
   assume it is there: run the health checks first, and if it is down, ask (see the ownership rule
   above). ⚠ **Memory is the binding constraint, not disk** — measured 2026-09-10, ~5.0 GB
   available of 29.3 GB, because this machine also runs the ryzen k8s cluster.
