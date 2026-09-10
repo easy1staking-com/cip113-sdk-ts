@@ -1,34 +1,47 @@
 /**
- * Standard script parameterization — CIP-113 0.5.0-alpha.2 (upstream 9db7e06).
+ * Standard script parameterization — CIP-113 0.5.0-alpha.4 (upstream d37ca8d).
  *
  * Uses Evolution SDK directly for UPLC.applyParamsToScript and ScriptHash.
  *
- * Dependency graph. Note it is NO LONGER a single chain: upstream #110 removed
- * programmable_logic_global, and PLB is now parameterised by the params-NFT
- * policy rather than by PLG's credential, so everything downstream hangs off
- * `params_policy` in parallel instead of in series.
+ * Dependency graph. It is NOT a single chain: `programmable_logic_base` hangs
+ * off the params-NFT policy, so everything downstream of it fans out in
+ * parallel rather than in series.
  *
- *   always_fail(nonce)                          -> hash   (issuance side only now)
- *   coordination_spend(nonce)                   -> hash   NEW: the lock target
- *   protocol_params_mint(utxo_ref, coord_hash)  -> policy  == params_policy
+ *   always_fail(nonce)                          -> hash   (issuance side only)
+ *   protocol_params(utxo_ref)                   -> policy  == params_policy
  *     |
- *     +-- programmable_logic_base(params_policy) -> hash
- *     +-- transfer(params_policy)                -> hash   (PLG's transfer arm, renamed)
- *     +-- third_party(params_policy)             -> hash   NEW: seize / clawback
- *     +-- unfracking(params_policy)              -> hash
- *     +-- registry_spend(params_policy)          -> hash
+ *     +-- programmable_logic_base(params_policy)                  -> hash  == plb
+ *     |     |
+ *     |     +-- transfer(Script(plb), registry_node_cs, max_inline)     -> hash
+ *     |     +-- third_party(Script(plb), registry_node_cs, max_inline)  -> hash
+ *     |     +-- unfracking(Script(plb), registry_node_cs, max_inline)   -> hash
+ *     |     +-- issuance_logic(Script(plb), registry_node_cs,
+ *     |                        params_policy, max_inline)              -> hash  NEW in alpha.4
+ *     |
+ *     +-- issuance_mint(Script(minting_logic), params_policy)     -> policy
  *
- *   issuance_cbor_hex_mint(utxo_ref, always_fail_hash)              -> policy
- *   registry_mint(utxo_ref, issuance_cbor_hex_cs, registry_spend_cred) -> policy
- *   issuance_mint(PLB_cred, registry_node_cs, minting_logic_cred, params_policy)
- *   upgrade_multisig(signers, threshold)        -> hash   (independent)
+ *   programmable_logic_global(transfer_hash, third_party_hash, unfracking_hash)
+ *                                                                -> hash   (built LAST)
+ *
+ *   issuance_cbor_hex_mint(utxo_ref, always_fail_hash)            -> policy
+ *   registry(utxo_ref, issuance_cbor_hex_cs)                      -> policy
+ *
+ *   upgrade_multisig(utxo_ref)                  -> hash   (independent one-shot)
  *
  * ⚠ PARAMETER TYPES ARE NOT INTERCHANGEABLE and TypeScript cannot tell them
  * apart — every one of these is a hex string at the call site. `params_policy`
- * is a PolicyId (a bare ByteArray); `minting_logic_cred` and friends are
- * Credentials (a constructor-wrapped Script/VerificationKey). Passing a policy
- * where a credential belongs produces a valid script with the wrong hash. The
- * types below come from the blueprint's own parameter schemas, not from
+ * and `registry_node_cs` are PolicyIds (bare ByteArrays); `minting_logic_cred`
+ * and `programmable_logic_base` are Credentials (constructor-wrapped
+ * Script/VerificationKey). `scriptCredential()` wraps; `Data.bytearray()` does
+ * not. Passing a policy where a credential belongs produces a valid script with
+ * the wrong hash.
+ *
+ * ⛔ alpha.4 makes that sharper: `issuance_logic` takes TWO ADJACENT PolicyId
+ * parameters — `registry_node_cs` then `params_policy`. They are the same type,
+ * the same length, and both are `string` here. Swapping them yields a script
+ * that builds, hashes and deploys, and nothing before the ledger will say so.
+ *
+ * The types below come from the blueprint's own parameter schemas, not from
  * upstream's prose docs — see the hazard note in blueprint.ts.
  */
 import { Data } from "@evolution-sdk/evolution";
@@ -115,7 +128,22 @@ export interface StandardScripts {
     unfrackingHash: ScriptHash,
   ): PlutusScript;
 
-  upgradeMultisig(signers: HexString[], threshold: number | bigint): PlutusScript;
+  /**
+   * `upgrade_multisig` — a ONE-SHOT in alpha.4: `(signers, threshold)` are gone
+   * and a single `utxo_ref` takes their place.
+   *
+   * ⚑ ONE VALUE, THREE ROLES. Its hash is the config NFT's POLICY ID, the
+   * config UTxO's ADDRESS payment credential, AND the withdraw-0 CREDENTIAL the
+   * upgrade authority is satisfied by. Do not derive any of the three
+   * separately — that is the dual-hash collapse of `protocol_params` and
+   * `registry` again, with one more role attached.
+   *
+   * The signer set moved OFF the parameters and INTO a `MultisigScript` tree in
+   * the config UTxO's datum, so rotating signers no longer changes the hash.
+   * Build those trees with `multisigScriptDatum` in `src/core/evo-utils.ts`
+   * (T-F02-1), which enforces upstream's `well_formed`.
+   */
+  upgradeMultisig(utxoRef: TxInput): PlutusScript;
   issuanceCborHexMint(utxoRef: TxInput, alwaysFailHash: ScriptHash): PlutusScript;
 
   /**
@@ -129,11 +157,38 @@ export interface StandardScripts {
    */
   registry(utxoRef: TxInput, issuanceCborHexPolicy: PolicyId): PlutusScript;
 
-  issuanceMint(
-    plbHash: ScriptHash,
-    registryNodePolicy: PolicyId,
-    mintingLogicHash: ScriptHash,
+  /**
+   * `issuance_mint` — arity 4 -> 2 in alpha.4.
+   *
+   * ⚠ `programmable_logic_base` and `registry_node_cs` are GONE from its
+   * parameters. It reads the delegate credentials out of the params datum at
+   * runtime instead, which is why `params_policy` survives and the other two do
+   * not. Its POLICY ID therefore CHANGES for the same minting logic — see
+   * {@link ResolvedStandardScripts.buildIssuanceMint}.
+   */
+  issuanceMint(mintingLogicHash: ScriptHash, paramsPolicy: PolicyId): PlutusScript;
+
+  /**
+   * `issuance_logic` — NEW in alpha.4. The replaceable half of issuance: the
+   * params datum's field 1 names its credential, and its withdraw-0 rides on
+   * EVERY mint and burn.
+   *
+   * ⛔ ONE CREDENTIAL, THEN TWO BARE POLICIES, AND THE TWO POLICIES ARE NOT
+   * INTERCHANGEABLE. `progLogicCred` is constructor-wrapped by
+   * `scriptCredential()`; `registryPolicy` and `paramsPolicy` are bare
+   * ByteArrays applied in THAT ORDER (`registry_node_cs`, then
+   * `params_policy`). Both are `string` at the call site and nothing — not the
+   * compiler, not the parameteriser, not the hash — can tell a swap from the
+   * intended order.
+   *
+   * ⚠ `progLogicCred` is programmable_logic_base's hash, NOT the dispatcher's,
+   * exactly as for the three delegates.
+   */
+  issuanceLogic(
+    progLogicCred: ScriptHash,
+    registryPolicy: PolicyId,
     paramsPolicy: PolicyId,
+    maxInlineDatumBytes: number | bigint,
   ): PlutusScript;
 }
 
@@ -244,11 +299,8 @@ export function createStandardScripts(
       ]);
     },
 
-    upgradeMultisig(signers, threshold) {
-      return parameterize(STANDARD_VALIDATORS.UPGRADE_MULTISIG, [
-        Data.list(signers.map((s) => Data.bytearray(s))),
-        Data.int(BigInt(threshold)),
-      ]);
+    upgradeMultisig(utxoRef) {
+      return parameterize(STANDARD_VALIDATORS.UPGRADE_MULTISIG, [outputReference(utxoRef)]);
     },
 
     issuanceCborHexMint(utxoRef, alwaysFailHash) {
@@ -277,12 +329,22 @@ export function createStandardScripts(
       ]);
     },
 
-    issuanceMint(plbHash, registryNodePolicy, mintingLogicHash, paramsPolicy) {
+    issuanceMint(mintingLogicHash, paramsPolicy) {
       return parameterize(STANDARD_VALIDATORS.ISSUANCE_MINT, [
-        scriptCredential(plbHash),
-        Data.bytearray(registryNodePolicy),
         scriptCredential(mintingLogicHash),
         Data.bytearray(paramsPolicy),
+      ]);
+    },
+
+    issuanceLogic(progLogicCred, registryPolicy, paramsPolicy, maxInlineDatumBytes) {
+      // Credential, then TWO bare PolicyIds in blueprint order
+      // (registry_node_cs, params_policy), then the Int. See the interface
+      // doc: the two policies are the swap hazard alpha.4 introduced.
+      return parameterize(STANDARD_VALIDATORS.ISSUANCE_LOGIC, [
+        scriptCredential(progLogicCred),
+        Data.bytearray(registryPolicy),
+        Data.bytearray(paramsPolicy),
+        Data.int(BigInt(maxInlineDatumBytes)),
       ]);
     },
   };
@@ -334,11 +396,11 @@ export class DeploymentMismatchError extends Error {
  * check that catches it, and it is why buildDeploymentScripts no longer
  * overwrites derived hashes with deployment values.
  *
- * Not covered: always_fail (its nonce is not carried in DeploymentParams),
- * issuance_mint (parameterized per minting logic), and upgrade_multisig (its
- * signers/threshold are an authority choice, not a derived protocol value).
- * coordination_spend IS covered — DeploymentParams carries its nonce precisely
- * so the lock target can be re-derived rather than trusted.
+ * Not covered: always_fail (its nonce is not carried in DeploymentParams) and
+ * issuance_mint (parameterized per minting logic, so there is no single hash to
+ * assert). `upgrade_multisig` NO LONGER BELONGS ON THAT LIST — alpha.4
+ * parameterises it by a recordable `utxo_ref`, so it is derived and checked
+ * again; see the block beside its check.
  *
  * WHERE THIS CHECK HAS VALUE — and where it has none.
  *
@@ -427,27 +489,54 @@ export function assertDeploymentScripts(
       ).hash,
       deployed: registryPolicy,
     },
-    // ⛔ `upgrade_multisig` IS DELIBERATELY NOT CHECKED, and the reason is a bug
-    // this assertion itself shipped.
-    //
-    // It was checked here, derived as `upgradeMultisig([upgradeAuthority.hash], 1)`.
-    // That is WRONG: `upgrade_multisig` is parameterised by the deployer's
-    // PAYMENT key hash (its signers are matched against `extra_signatories`),
-    // while `upgradeAuthority` is the STAKE credential named in the params
-    // datum (it must appear in the withdrawals map). Two different keys of the
-    // same shape and length; neither derives from the other.
-    //
-    // ⚠ The offline fixture used ONE value for both fields, so the wrong
-    // relationship reproduced perfectly and the check passed vacuously. Only a
-    // real deployment — where the two genuinely differ — exposed it, and it
-    // took a devnet bootstrap to get one.
-    //
-    // It is not checked now because it CANNOT BE: `upgrade_multisig`'s signer
-    // set and threshold are a deployment CHOICE, and DeploymentParams does not
-    // record them — the same category as `maxInlineDatumBytes`, which IS
-    // recorded precisely so it can be asserted. Inventing a derivation from the
-    // nearest same-shaped field is what produced the bug. A guard that cannot
-    // decide should stop, not guess.
+    {
+      // ⛔ THE FOURTH CONSUMER OF `mid`. transfer, third_party and unfracking
+      // were three; alpha.4's issuance_logic is the fourth, and the count is
+      // the mechanism: the negative test asserting FOUR mismatches for a wrong
+      // `maxInlineDatumBytes` is what proves this call site exists. A comment
+      // cannot prove a call site; a count can.
+      //
+      // ⚠ Argument order is `(plb, registry_node_cs, params_policy, mid)` and
+      // the middle two are both bare PolicyIds. Swapping them builds, hashes
+      // and deploys — see the adjacent-parameter negative in
+      // test/deployment-assertion.test.mjs.
+      name: "issuance_logic",
+      derived: builders.issuanceLogic(
+        plb,
+        registryPolicy,
+        deployment.protocolParams.policyId,
+        mid,
+      ).hash,
+      deployed: deployment.issuanceLogic.scriptHash,
+    },
+    {
+      // ⛔ CHECKED AGAIN, AND THE REASON IT CAN BE IS THE WHOLE CHANGE. This
+      // check was REMOVED in S-11 after it shipped a defect: it derived
+      // `upgrade_multisig` from `upgradeAuthority.hash`, a relationship that
+      // never existed (a PAYMENT key hash matched against `extra_signatories`
+      // versus the STAKE credential named in the params datum). alpha.3 could
+      // not derive it at all — its signer set and threshold were a deployment
+      // CHOICE that DeploymentParams did not record. alpha.4 replaces both
+      // parameters with a single `utxo_ref`, which IS recorded, so the hash is
+      // derivable and the check comes back.
+      //
+      // ⚠ AND THE VACUITY TRAP COMES BACK WITH IT, IN A NEW SHAPE. What hid the
+      // S-11 bug was a fixture using ONE value for two fields, so the wrong
+      // derivation reproduced perfectly and the check passed vacuously — only a
+      // live devnet exposed it. DeploymentParams now holds TWO one-shot
+      // `TxInput`s of identical type: `protocolParams.txInput` and
+      // `upgradeMultisig.txInput`. A fixture that reuses one for both makes
+      // this check pass no matter which one the code reads.
+      //
+      // ⛔ Do NOT add any check relating `upgradeAuthority` to
+      // `upgradeMultisig`. A deployment may legitimately name a key credential,
+      // a different script, or the multisig as its authority, and the validator
+      // never inspects it. Such a check would reject valid deployments — it is
+      // the S-11 defect returning under a new name.
+      name: "upgrade_multisig",
+      derived: builders.upgradeMultisig(deployment.upgradeMultisig.txInput).hash,
+      deployed: deployment.upgradeMultisig.scriptHash,
+    },
   ];
 
   const mismatches = checks.filter((c) => c.derived !== c.deployed);
@@ -497,8 +586,17 @@ export function buildDeploymentScripts(
       deployment.registry.txInput,
       deployment.registry.issuanceScriptHash,
     ),
+    issuanceLogic: builders.issuanceLogic(plb, registryPolicy, paramsPolicy, mid),
+    // Resolved HERE from the deployment's own one-shot, so nothing downstream
+    // derives it a second time: one fact, one derivation.
+    upgradeMultisig: builders.upgradeMultisig(deployment.upgradeMultisig.txInput),
     buildIssuanceMint(mintingLogicHash: ScriptHash) {
-      return builders.issuanceMint(plb, registryPolicy, mintingLogicHash, paramsPolicy);
+      // ⚑ ITS SIGNATURE IS UNCHANGED AND ITS RESULT IS NOT. alpha.4 dropped
+      // `programmable_logic_base` and `registry_node_cs` from issuance_mint's
+      // parameters, so THE POLICY ID CHANGES FOR THE SAME MINTING LOGIC. That
+      // is correct, not a bug to fix: an alpha.3 token and an alpha.4 token
+      // built from identical issuance logic are different assets.
+      return builders.issuanceMint(mintingLogicHash, paramsPolicy);
     },
   };
 }
@@ -517,6 +615,17 @@ export interface ResolvedStandardScripts {
   issuanceCborHexMint: PlutusScript;
   /** Mint AND spend in one script; its hash is both policy and address. */
   registry: PlutusScript;
+  /**
+   * The replaceable half of issuance (alpha.4). Its withdraw-0 rides on every
+   * mint and burn, and its credential must be REGISTERED to do so.
+   */
+  issuanceLogic: PlutusScript;
+  /**
+   * The reference upgrade authority. ⚑ Its hash is the config NFT policy, the
+   * config UTxO's address payment credential, AND the withdraw-0 credential —
+   * one value, three roles.
+   */
+  upgradeMultisig: PlutusScript;
   /** Build issuance_mint for a specific minting logic — NOT cached */
   buildIssuanceMint(mintingLogicHash: ScriptHash): PlutusScript;
 }

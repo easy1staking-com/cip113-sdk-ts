@@ -7,29 +7,26 @@ import type { PlutusBlueprint, BlueprintValidator, HexString } from "../types.js
 /**
  * Standard validator titles as they appear in the blueprint.
  *
- * Targets CIP-113 0.5.0-alpha.2 (upstream commit 9db7e06). See PLAN.md D-11.
+ * Targets CIP-113 0.5.0-alpha.4 (upstream commit d37ca8d). See PLAN.md D-11.
  *
- * --- The dissolution of programmable_logic_global ------------------------
+ * --- What alpha.4 moved --------------------------------------------------
  *
- * Upstream #110 dissolved the PLG coordinator. Its transfer arm was RENAMED
- * `transfer`; third-party (seize/clawback) logic moved to a new standalone
- * `third_party`; `unfracking` is no longer reached through it. Instead
- * `programmable_logic_base` dispatches straight to one of the three.
- *
- * The practical consequence for this table: the title
- * `programmable_logic_global.programmable_logic_global.withdraw` NO LONGER
- * EXISTS in any 0.5.x blueprint. Its removal is why validateStandardBlueprint()
- * fails closed on the new artifact rather than silently building transactions
- * against a validator that is not there — the loud failure is deliberate and
- * must not be "fixed" by relaxing the check.
+ * ADDITIONS ONLY, at the level of titles: 28 -> 34 handlers, and no title this
+ * SDK requires was retired. What DID move is arity — `issuance_mint` went from
+ * four parameters to two, `upgrade_multisig` from `(signers, threshold)` to a
+ * single `utxo_ref` — plus one new validator, `issuance_logic`. An arity change
+ * is invisible to every title check in this file; see `src/standard/scripts.ts`
+ * for the builders that encode it and `test/blueprint-version-guard.test.mjs`
+ * for the pin that catches upstream moving it again.
  *
  * --- Do not read upstream's CONTRACT_SURFACE_CHANGES.md for these ---------
  *
  * That document contains an SDK impact map naming this repository by path, and
- * it is WRONG about the params datum in a way that produces malformed
- * transactions (it says 6 fields; the artifact has 7, and one line is phrased
- * as an instruction to build the 6-field shape). Every title, arity and field
- * order here comes from the blueprint itself. See PLAN.md, W-D hazard box.
+ * it has been WRONG about this repository twice. Once about the params datum in
+ * a way that produces malformed transactions (it said 6 fields; the artifact
+ * had 7, and one line was phrased as an instruction to build the 6-field
+ * shape). Every title, arity and field order here comes from the blueprint
+ * itself. See PLAN.md, W-D hazard box.
  */
 export const STANDARD_VALIDATORS = {
   ALWAYS_FAIL: "always_fail.always_fail.spend",
@@ -68,6 +65,22 @@ export const STANDARD_VALIDATORS = {
 
   /** Reference upgrade authority; the initial `upgrade_cred` target. Withdraw-0. */
   UPGRADE_MULTISIG: "upgrade_multisig.upgrade_multisig.withdraw",
+
+  /**
+   * `issuance_logic` — NEW in alpha.4, and the replaceable half of issuance.
+   *
+   * The params datum's FIELD 1 names its credential (see
+   * `ProgrammableLogicGlobalParams.issuanceLogicCred`), and `issuance_mint`
+   * dispatches to whatever that field says — so this validator's withdraw-0
+   * rides on EVERY mint and EVERY burn.
+   *
+   * ⚠ Its credential must be REGISTERED before it can withdraw. An unregistered
+   * stake credential does not fail with "not registered"; the ledger reports
+   * code 3141, *"rewards withdrawals must consume rewards in full"*, which
+   * reads as a balance problem. That is how S-11 lost an afternoon on the
+   * dispatcher.
+   */
+  ISSUANCE_LOGIC: "issuance_logic.issuance_logic.withdraw",
 } as const;
 
 /**
@@ -76,10 +89,10 @@ export const STANDARD_VALIDATORS = {
  * ⚠ SINGLE SOURCE OF TRUTH for the version verdict. A migration flips this one
  * constant; nothing else should encode a target version.
  */
-export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.3";
+export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.4";
 
 /** Upstream commit the target version's blueprint was built from. */
-export const TARGET_PROTOCOL_COMMIT = "f14b359";
+export const TARGET_PROTOCOL_COMMIT = "d37ca8d";
 
 /**
  * Validator titles that existed in an ADJACENT CIP-113 release and are absent
@@ -97,6 +110,12 @@ export const TARGET_PROTOCOL_COMMIT = "f14b359";
  * A symbol's absence tells you nothing about direction, because a symbol can
  * come back. The version comes from the PREAMBLE; these strings only add colour
  * once the direction is already known.
+ *
+ * ⚠ ALPHA.4 ADDS NOTHING HERE, and that is measured rather than assumed: no
+ * alpha.3 title is absent from alpha.4 (28 -> 34 handlers, additions only; the
+ * delta is pinned in `test/blueprint-version-guard.test.mjs`). Do not add
+ * speculative entries — a title listed here that is also required makes the
+ * guard contradict itself, which is the original defect's exact shape.
  */
 export const RETIRED_VALIDATORS: Record<string, string> = {
   "protocol_params_mint.protocol_params_mint.mint":
@@ -224,28 +243,56 @@ export function compareProtocolVersions(a: string, b: string): number | null {
  * Validate that a blueprint contains all required standard validators.
  *
  * ⛔ THE VERSION VERDICT COMES FROM THE PREAMBLE, NEVER FROM WHICH SYMBOLS ARE
- * PRESENT. The previous implementation inferred "this blueprint is OLDER" from
- * the presence of any retired validator title, and reality broke it on first
+ * PRESENT. The first implementation inferred "this blueprint is OLDER" from the
+ * presence of any retired validator title, and reality broke it on first
  * contact: `programmable_logic_global` was removed by upstream #110 and brought
  * BACK by #117 in a new role, so 0.5.0-alpha.3 — strictly newer than the target
  * — was reported as "an earlier protocol version that this SDK no longer
- * supports". The guard fired correctly and named the wrong cause, which is worse
- * than not firing: it sends the reader to look for a stale checkout.
+ * supports". The guard fired correctly and named the wrong cause, which is
+ * worse than not firing: it sends the reader to look for a stale checkout.
  *
  * A symbol can come back. A version number cannot go backwards.
+ *
+ * ⛔⛔ AND THE SAME DEFECT CLASS SURVIVED ONE LEVEL UP IN CONTROL FLOW, WHICH IS
+ * WHAT THIS ORDERING FIXES. The version comparison used to sit BELOW an early
+ * `if (missing.length === 0) return;`, so symbol presence still decided the
+ * verdict — it just decided it by returning silently instead of by throwing.
+ * alpha.4 retires no title this SDK requires, so a strictly LATER blueprint
+ * produced `missing: []` and was ACCEPTED, while
+ * `compareProtocolVersions("0.5.0-alpha.4", TARGET_PROTOCOL_VERSION)` was
+ * returning `1` the whole time. The comparator was correct; the gate never
+ * called it.
+ *
+ * ⚠ The file's own "newer" fixture could not catch that, and the reason
+ * generalises: `NEWER_WITH_SAME_SYMBOL` is built from the alpha.2-shaped v0.3.0
+ * artefact, which is ALSO missing titles — so it entered through the
+ * missing-title door and only ever exercised the comparator. A fixture that
+ * reaches a branch by the wrong route proves nothing about the route that
+ * matters.
+ *
+ * ⇒ THE ORDER BELOW IS LOAD-BEARING: preamble verdict first, `missing` second.
+ * Every case that reaches the `missing` branch has already been established to
+ * be AT the target version.
  */
 export function validateStandardBlueprint(blueprint: PlutusBlueprint): void {
   const titles = blueprint.validators.map((v) => v.title);
   const missing = Object.entries(STANDARD_VALIDATORS).filter(
     ([, title]) => !titles.includes(title)
   );
-  if (missing.length === 0) return;
 
   const version = blueprint.preamble.version;
   const label = `${blueprint.preamble.title} v${version}`;
+
+  // ⚠ `detail` must stay honest in BOTH cases. Emitting
+  // "Missing required validator(s): ." with an empty list would be a guard
+  // naming a defect it did not find — the same failure mode as reporting a
+  // direction the comparator never established.
   const detail =
-    `Missing required validator(s): ` +
-    missing.map(([name, title]) => `${name} (title: "${title}")`).join(", ") + `.`;
+    missing.length > 0
+      ? `Missing required validator(s): ` +
+        missing.map(([name, title]) => `${name} (title: "${title}")`).join(", ") + `.`
+      : `Every required validator title IS present, which is exactly why this is not a ` +
+        `missing-symbol failure: the PROTOCOL VERSION ITSELF is the mismatch.`;
 
   // Hints, added only once direction is known from the preamble — never used to
   // decide it. See RETIRED_VALIDATORS.
@@ -258,11 +305,25 @@ export function validateStandardBlueprint(blueprint: PlutusBlueprint): void {
 
   const cmp = compareProtocolVersions(version, TARGET_PROTOCOL_VERSION);
 
+  // ⛔ THE RULING ON AN UNPARSEABLE PREAMBLE, AND THE REASON, so nobody relaxes
+  // it back. This file's doctrine is that the verdict comes from the preamble;
+  // a preamble that cannot be read therefore cannot yield a verdict, and
+  // accepting-because-the-symbols-look-right is the precise defect fixed above.
+  // So an unreadable version is refused EVEN WHEN EVERY REQUIRED TITLE IS
+  // PRESENT.
+  //
+  // ACCEPTED CONSEQUENCE: a fork carrying a non-semver version string ("main",
+  // "2026-09-10", a git describe) is now refused. It is refused LOUDLY and the
+  // message names the remedy, which is the trade being made — a fork that wants
+  // to be usable gives its preamble a semver-parseable version.
   if (cmp === null) {
     throw new Error(
-      `Standard blueprint "${label}" is not usable by this SDK, and its version string ` +
-        `could not be parsed, so this SDK cannot say whether it is older or newer than the ` +
-        `target ${TARGET_PROTOCOL_VERSION} (upstream ${TARGET_PROTOCOL_COMMIT}). ${detail}${hint} ` +
+      `Standard blueprint "${label}" cannot be used: its preamble version could not be ` +
+        `parsed, so this SDK cannot establish whether it is behind or ahead of the target ` +
+        `${TARGET_PROTOCOL_VERSION} (upstream ${TARGET_PROTOCOL_COMMIT}), and a verdict this ` +
+        `SDK cannot establish is not one it will guess. ${detail}${hint} ` +
+        `Give the blueprint a semver-parseable preamble version (e.g. "${TARGET_PROTOCOL_VERSION}"), ` +
+        `or use one from blueprints/standard/v${TARGET_PROTOCOL_VERSION}/. ` +
         `Present titles: ${titles.join(", ")}`
     );
   }
@@ -284,6 +345,9 @@ export function validateStandardBlueprint(blueprint: PlutusBlueprint): void {
         `Upgrade the SDK, or pin the blueprint to v${TARGET_PROTOCOL_VERSION}.`
     );
   }
+
+  // At the target version, with every required title present: usable.
+  if (missing.length === 0) return;
 
   // Same version, still missing validators: the artifact does not match what
   // this version is supposed to contain. Neither older nor newer explains it.

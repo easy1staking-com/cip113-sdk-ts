@@ -8,11 +8,16 @@
  * `coordination_addr_hash`, same ByteArray either way. TypeScript cannot see
  * that. Neither can `tsc`.
  *
- * alpha.3 supplies a sharper instance: `max_inline_datum_bytes` is an Int the
- * DEPLOYER CHOOSES, baked into all three delegates and recoverable from no
- * hash. The negative cases below are the proof the check has teeth — a wrong
- * value of the correct type, and two same-signature delegates swapped. Without
- * them a passing positive case proves only that nothing was checked.
+ * alpha.3 supplied a sharper instance: `max_inline_datum_bytes` is an Int the
+ * DEPLOYER CHOOSES, baked into the delegates and recoverable from no hash.
+ * alpha.4 adds a FOURTH consumer of it (`issuance_logic`) and a hazard of its
+ * own: `issuance_logic` takes TWO ADJACENT PolicyId parameters,
+ * `registry_node_cs` then `params_policy`, the same type, the same length, and
+ * both `string` at the call site. The negative cases below are the proof the
+ * check has teeth — a wrong value of the correct type, two same-signature
+ * delegates swapped, two same-typed policies swapped, and a one-shot outref
+ * taken from the wrong field. Without them a passing positive case proves only
+ * that nothing was checked.
  *
  * ⛔ AND ONE CHECK EXISTS BECAUSE THE LEDGER CANNOT DO IT. `programmable_logic_global`
  * is compiled against the three delegate hashes, and no script can read another
@@ -20,7 +25,7 @@
  * for the delegates actually deployed. A stale dispatcher fails at withdrawal
  * time with an index error that names neither cause.
  *
- * TARGET: CIP-113 0.5.0-alpha.3 (upstream f14b359).
+ * TARGET: CIP-113 0.5.0-alpha.4 (upstream d37ca8d).
  *
  * The preprod deployment this repo used to assert against was a 0.3.x protocol
  * instance and is no longer REPRESENTABLE — programmable_logic_global does not
@@ -46,25 +51,43 @@ import { validateStandardBlueprint } from "../dist/standard/blueprint.js";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
 
-const blueprint = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
+const blueprint = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
 
 /** Arbitrary but fixed inputs — nothing here needs to be a real deployment. */
 const PP_TX = { txHash: "aa".repeat(32), outputIndex: 0 };
 const ISS_TX = { txHash: "cc".repeat(32), outputIndex: 1 };
 const REG_TX = { txHash: "bb".repeat(32), outputIndex: 0 };
+/**
+ * ⛔ A FOURTH ONE-SHOT, DISTINCT FROM ALL THREE ABOVE, AND THE DISTINCTNESS IS
+ * ITSELF UNDER TEST. alpha.4 parameterises `upgrade_multisig` by an outref
+ * instead of by a signer set, so `DeploymentParams` now carries TWO same-typed
+ * one-shot `TxInput`s — `protocolParams.txInput` and `upgradeMultisig.txInput`.
+ * Nothing in the type system separates them.
+ *
+ * ⚠ THIS IS THE S-11 VACUITY TRAP IN A NEW SHAPE. That fixture used ONE value
+ * for two fields, so a derivation reading the wrong one reproduced perfectly
+ * and the check passed vacuously; only a live devnet exposed it. If `UM_TX`
+ * ever equals `PP_TX`, every assertion below about `upgrade_multisig` silently
+ * stops discriminating.
+ */
+const UM_TX = { txHash: "77".repeat(32), outputIndex: 3 };
 const ALWAYS_FAIL = "dd".repeat(28);
-// ⚠ TWO DIFFERENT KEYS, DELIBERATELY. `upgrade_multisig` is parameterised by
-// the deployer's PAYMENT key hash; `upgradeAuthority` is the STAKE credential
-// in the params datum. This fixture used ONE value for both, which made a check
-// that conflated them reproduce perfectly and pass vacuously — the bug S-11
-// found on a live devnet. Keeping them distinct means any future conflation
-// fails here instead of on chain.
-const PAYMENT_SIGNER = "11".repeat(28);
+/**
+ * The upgrade authority named in the params datum, and NOTHING ELSE.
+ *
+ * ⚑ THE PAYMENT-VS-STAKE CONFLATION RETIRES WITH THE SIGNER PARAMETERS.
+ * `upgrade_multisig` no longer takes a payment key hash at all, so there is no
+ * second same-shaped key here for a derivation to reach for — which is why the
+ * `PAYMENT_SIGNER` constant this file used to carry is gone. What survives is
+ * the rule: `upgradeAuthority` is a deployment CHOICE unrelated to every other
+ * field in the record, kept as a KEY credential so that any derivation reaching
+ * for it stands out.
+ */
 const STAKE_AUTHORITY = "22".repeat(28);
 const MAX_INLINE_DATUM_BYTES = 512;
 
 /**
- * A self-consistent 0.5.0-alpha.3 deployment, derived from the blueprint.
+ * A self-consistent 0.5.0-alpha.4 deployment, derived from the blueprint.
  *
  * DERIVED, not observed: no protocol instance with these hashes has ever been
  * deployed. It is sufficient for these tests, which are about whether the
@@ -73,6 +96,10 @@ const MAX_INLINE_DATUM_BYTES = 512;
  * ⚑ Note what is NOT here any more: no nonce, and no separate registry-spend or
  * params-address hash. alpha.3 merged each pair into one validator whose single
  * hash is both the policy id and the address's payment credential.
+ *
+ * ⚑ And what is NEW in alpha.4: `issuanceLogic` (a fourth consumer of
+ * `max_inline_datum_bytes`) and an `upgradeMultisig` derived from its OWN
+ * one-shot outref rather than from a signer set.
  */
 function deriveDeployment(bp) {
   const b = scriptsModule.createStandardScripts(bp);
@@ -87,9 +114,14 @@ function deriveDeployment(bp) {
   const transfer = b.transfer(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
   const thirdParty = b.thirdParty(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
   const unfracking = b.unfracking(plb, registry, MAX_INLINE_DATUM_BYTES).hash;
+  // ⚠ THE FOURTH consumer of MAX_INLINE_DATUM_BYTES, and the only one that also
+  // takes params_policy. Argument order is (plb, registry_node_cs,
+  // params_policy, max_inline) — the middle two are both bare PolicyIds.
+  const issuanceLogic = b.issuanceLogic(plb, registry, paramsPolicy, MAX_INLINE_DATUM_BYTES).hash;
   // Built LAST: it names the three delegates at compile time.
   const plg = b.programmableLogicGlobal(transfer, thirdParty, unfracking).hash;
-  const upgradeMultisig = b.upgradeMultisig([PAYMENT_SIGNER], 1).hash;
+  // From its OWN one-shot — not PP_TX, and not derived from upgradeAuthority.
+  const upgradeMultisig = b.upgradeMultisig(UM_TX).hash;
 
   const ref = (i) => ({ txHash: "ee".repeat(32), outputIndex: i });
 
@@ -102,8 +134,11 @@ function deriveDeployment(bp) {
     unfracking: { scriptHash: unfracking },
     programmableLogicGlobal: { scriptHash: plg },
     maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
-    upgradeMultisig: { scriptHash: upgradeMultisig },
+    upgradeMultisig: { scriptHash: upgradeMultisig, txInput: UM_TX, utxo: ref(6) },
+    upgradeMultisigRefInput: ref(7),
     upgradeAuthority: { type: "key", hash: STAKE_AUTHORITY },
+    issuanceLogic: { scriptHash: issuanceLogic },
+    issuanceLogicRefInput: ref(8),
     issuance: { txInput: ISS_TX, policyId: issuanceCborHex, alwaysFailScriptHash: ALWAYS_FAIL },
     registry: { txInput: REG_TX, issuanceScriptHash: issuanceCborHex, scriptHash: registry },
     programmableBaseRefInput: ref(1),
@@ -116,12 +151,26 @@ function deriveDeployment(bp) {
 
 const DEPLOYMENT = deriveDeployment(blueprint);
 
+test("⛔ FIXTURE INTEGRITY: the two one-shot outrefs are DIFFERENT", () => {
+  // TWO SAME-TYPED ONE-SHOT OUTREFS ARE TWO CHANCES FOR A VACUOUS CHECK.
+  // `protocol_params` and `upgrade_multisig` are each parameterised by an
+  // already-spent UTxO, of identical type and indistinguishable shape. A
+  // fixture reusing one for both makes the `upgrade_multisig` assertion pass no
+  // matter which field the derivation reads — which is exactly how the S-11
+  // defect survived every offline slice until a devnet found it.
+  assert.notDeepEqual(
+    UM_TX,
+    PP_TX,
+    "if these are ever equal, the upgrade_multisig checks below stop discriminating",
+  );
+});
+
 /** Every check the assertion performs, so a silent shrink is caught. */
 const EXPECTED_CHECKS = [
-  // ⚠ upgrade_multisig is deliberately ABSENT — see the block in
-  // assertDeploymentScripts. Its signer set is a deployment choice that
-  // DeploymentParams does not record, so it cannot be derived; it WAS checked,
-  // wrongly, against upgradeAuthority.
+  // ⚑ TEN in alpha.4, up from eight. `issuance_logic` is new; `upgrade_multisig`
+  // COMES BACK, because it is now parameterised by a recordable `utxo_ref`
+  // instead of by an unrecorded signer set. See the blocks beside both checks
+  // in src/standard/scripts.ts.
   "protocol_params (policy == address)",
   "programmable_logic_base",
   "transfer",
@@ -130,9 +179,11 @@ const EXPECTED_CHECKS = [
   "programmable_logic_global (dispatcher coherence)",
   "issuance_cbor_hex_mint",
   "registry (policy == address)",
+  "issuance_logic",
+  "upgrade_multisig",
 ];
 
-test("POSITIVE: every derivable 0.5.0-alpha.3 script is checked and reproduces", () => {
+test("POSITIVE: every derivable 0.5.0-alpha.4 script is checked and reproduces", () => {
   const checks = assertDeploymentScripts(blueprint, DEPLOYMENT);
   assert.deepEqual(
     checks.map((c) => c.name).sort(),
@@ -143,12 +194,19 @@ test("POSITIVE: every derivable 0.5.0-alpha.3 script is checked and reproduces",
 });
 
 test("NEGATIVE (fail-first): a wrong value of the CORRECT type is caught", () => {
-  // alpha.3's version of the hazard, and it is sharper than alpha.2's.
   // `max_inline_datum_bytes` is an Int the DEPLOYER CHOOSES — it cannot be
-  // derived from anything, cannot be recovered from any hash, and is baked into
-  // all THREE delegates. A wrong value is a perfectly well-typed number that
-  // silently produces three different scripts, and then a fourth: the
-  // dispatcher named them.
+  // derived from anything and cannot be recovered from any hash. A wrong value
+  // is a perfectly well-typed number that silently produces different scripts.
+  //
+  // ⚑ FOUR NAMES, NOT THREE, AND THE COUNT IS THE MECHANISM. alpha.4 adds
+  // `issuance_logic` as a fourth consumer of this field. The fourth name IS the
+  // proof that `issuance_logic` reads the same field the delegates do — a
+  // comment cannot prove a call site exists, a count can. If this ever drops
+  // back to three, the issuance_logic derivation stopped reading
+  // `maxInlineDatumBytes` and nothing else would say so.
+  //
+  // ⚠ The dispatcher does NOT appear: it is parameterised by the delegate
+  // hashes recorded in the deployment, which this mutation does not touch.
   const wrong = structuredClone(DEPLOYMENT);
   wrong.maxInlineDatumBytes = MAX_INLINE_DATUM_BYTES + 1;
 
@@ -159,8 +217,8 @@ test("NEGATIVE (fail-first): a wrong value of the CORRECT type is caught", () =>
       const names = err.mismatches.map((m) => m.name).sort();
       assert.deepEqual(
         names,
-        ["third_party", "transfer", "unfracking"],
-        `off-by-one on a chosen Int must break all three delegates, got: ${names.join(", ")}`
+        ["issuance_logic", "third_party", "transfer", "unfracking"],
+        `off-by-one on a chosen Int must break all FOUR consumers, got: ${names.join(", ")}`
       );
       return true;
     },
@@ -185,6 +243,10 @@ test("NEGATIVE (fail-first): the three delegates are distinguished from each oth
       // so swapping two delegates also makes the deployment's recorded
       // dispatcher unreproducible. That third mismatch is the coherence check
       // upstream cannot enforce on chain doing its job.
+      // ⚠ AND `issuance_logic` MUST NOT APPEAR. It is parameterised by
+      // (plb, registry, params_policy, max_inline) — none of which is a
+      // delegate hash — so a delegate swap cannot move it. Its presence here
+      // would mean the derivation reads something it should not.
       assert.deepEqual(
         names,
         ["programmable_logic_global (dispatcher coherence)", "third_party", "transfer"],
@@ -220,19 +282,22 @@ test("a 0.3.x blueprint is diagnosed by protocol version, not as a corrupt file"
       assert.match(err.message, /EARLIER CIP-113 protocol version/);
       // ⚠ The named symbol MOVED with the target. Until S-4 this asserted
       // `programmable_logic_global`; alpha.3 REQUIRES that validator, so it is
-      // no longer a retired-symbol hint. v0.3.0's retired symbols are now the
-      // pre-merge registry and params pair.
+      // no longer a retired-symbol hint, and alpha.4 retires nothing further.
+      // v0.3.0's retired symbols are the pre-merge registry and params pair.
       assert.match(err.message, /registry_mint|registry_spend|protocol_params_mint/,
         "must name what it found");
       assert.match(err.message, /merged/, "must say what replaced it");
-      assert.match(err.message, /v0\.5\.0-alpha\.3/, "must name where to go");
+      assert.match(err.message, /v0\.5\.0-alpha\.4/, "must name where to go");
       return true;
     },
     "loading old contracts must explain the version gap, not report a missing validator"
   );
 });
 
-test("the shipped 0.5.0-alpha.3 blueprint validates", () => {
+test("the shipped 0.5.0-alpha.4 blueprint validates", () => {
+  // ⚑ The §7f control for this file: the gate got STRICTER (the preamble
+  // verdict now runs before the missing-title check), and a guard that refuses
+  // everything is not a fixed guard. This must stay green.
   validateStandardBlueprint(blueprint);
 });
 
@@ -259,8 +324,9 @@ test("VALUABLE on load: a stale deployment against a changed blueprint is caught
   // deployment stays put. This repo shipped exactly that — same v0.3.0
   // directory name, 4 of 8 validator hashes moved.
   const changed = structuredClone(blueprint);
-  // registry_spend is gone in alpha.3 (merged into `registry`), so the donor
-  // pair moved with it. The mechanism under test is unchanged.
+  // registry_spend was merged into `registry` in alpha.3, so the donor pair
+  // moved with it then and is unchanged in alpha.4. The mechanism under test is
+  // unchanged.
   const v = changed.validators.find((x) => x.title === "registry.registry.mint");
   const donor = changed.validators.find((x) => x.title === "unfracking.unfracking.withdraw");
   assert.ok(v && donor, "fixture must contain registry and unfracking");
@@ -333,39 +399,121 @@ test("registry and protocol_params each expose ONE hash, not a pair", () => {
   }
 });
 
-test("⛔ upgrade_multisig's signer and the upgrade AUTHORITY are different keys", () => {
-  // The regression, stated directly. S-4 added a check deriving upgrade_multisig
-  // from `upgradeAuthority.hash`. That relationship does not exist:
-  //   - upgrade_multisig's signers are matched against `extra_signatories`
-  //     → a PAYMENT key hash
-  //   - upgradeAuthority must appear in the withdrawals map
-  //     → a STAKE credential
-  // Same shape, same length, different keys. The fixture used one value for
-  // both, so the wrong derivation reproduced and the check passed vacuously.
-  // Only a live devnet bootstrap, where they genuinely differ, caught it.
+test("NEGATIVE: the WRONG one-shot outref for upgrade_multisig is caught", () => {
+  // ⛔ THE ALPHA.4 SUCCESSOR TO THE S-11 TEST, AND ITS HISTORY IS THE REASON IT
+  // LOOKS LIKE THIS.
+  //
+  // S-4 added a check deriving `upgrade_multisig` from `upgradeAuthority.hash`.
+  // That relationship never existed: `upgrade_multisig`'s signers were matched
+  // against `extra_signatories` (a PAYMENT key hash) while `upgradeAuthority`
+  // must appear in the withdrawals map (a STAKE credential). Same shape, same
+  // length, different keys. ⚠ AND THE FIXTURE USED ONE VALUE FOR BOTH FIELDS,
+  // so the wrong derivation reproduced perfectly and the check passed
+  // vacuously through every offline slice. Only a live devnet exposed it, and
+  // S-11 REMOVED the check rather than correcting it, because alpha.3 recorded
+  // no signer set to derive from.
+  //
+  // alpha.4 parameterises the validator by a `utxo_ref` that IS recorded, so
+  // the check returns — and the vacuity trap returns with it in a new shape:
+  // `protocolParams.txInput` and `upgradeMultisig.txInput` are two same-typed
+  // one-shot outrefs in one record. ONE-VALUE-FOR-TWO-FIELDS IS WHAT HID IT
+  // LAST TIME. This test is the instrument that says the derivation reads the
+  // right one.
+  const wrong = structuredClone(DEPLOYMENT);
+  wrong.upgradeMultisig.txInput = DEPLOYMENT.protocolParams.txInput;
+
+  assert.throws(
+    () => assertDeploymentScripts(blueprint, wrong),
+    (err) => {
+      assert.ok(err instanceof DeploymentMismatchError);
+      const names = err.mismatches.map((m) => m.name).sort();
+      assert.deepEqual(
+        names,
+        ["upgrade_multisig"],
+        `exactly one check reads this field, got: ${names.join(", ")}`
+      );
+      return true;
+    },
+    "reading protocolParams.txInput where upgradeMultisig.txInput belongs MUST be caught"
+  );
+});
+
+test("NEGATIVE: issuance_logic's two ADJACENT PolicyIds are not interchangeable", () => {
+  // `registry_node_cs` and `params_policy` sit side by side in
+  // `issuance_logic`'s parameter list. Both are `cardano/assets/PolicyId` in
+  // the blueprint, both are 28 bytes, and both are `string` here — NO TYPE CAN
+  // TELL THEM APART. Swapping them produces a script that builds, hashes and
+  // deploys, and the first thing that would notice is the ledger.
+  const b = scriptsModule.createStandardScripts(blueprint);
+  const plb = DEPLOYMENT.programmableLogicBase.scriptHash;
+  const registry = DEPLOYMENT.registry.scriptHash;
+  const params = DEPLOYMENT.protocolParams.policyId;
+
+  assert.notEqual(registry, params, "the fixture must keep these distinct or it proves nothing");
   assert.notEqual(
-    PAYMENT_SIGNER,
-    STAKE_AUTHORITY,
-    "the fixture must keep these distinct or it cannot catch a conflation",
+    b.issuanceLogic(plb, registry, params, MAX_INLINE_DATUM_BYTES).hash,
+    b.issuanceLogic(plb, params, registry, MAX_INLINE_DATUM_BYTES).hash,
+    "swapping the two same-typed PolicyIds must change the hash — if it ever does not, " +
+      "the builder is not applying them in blueprint order",
   );
 
-  const derivedFromAuthority = scriptsModule
-    .createStandardScripts(blueprint)
-    .upgradeMultisig([DEPLOYMENT.upgradeAuthority.hash], 1).hash;
+  // ⛔ AND THE HASH COMPARISONS ABOVE ARE NOT ENOUGH ON THEIR OWN, MEASURED.
+  // Every hash in this file — both operands of every comparison — is produced
+  // by this same builder, so a mutation inside it moves both sides together and
+  // survives. Substituting `registryPolicy` for `paramsPolicy` in the builder
+  // was applied here and killed NOTHING: `DEPLOYMENT.issuanceLogic.scriptHash`
+  // is derived by the mutant too, and the swapped pair still differs
+  // ([reg, reg] vs [params, params]).
+  //
+  // ⇒ So assert BY INDEX against values fixed OUTSIDE the builder. The
+  // parameterisation recorder reports what was actually applied, in application
+  // order — an observation of the call, not a second derivation of its result.
+  const applied = [];
+  scriptsModule
+    .createStandardScripts(blueprint, (e) => applied.push(e))
+    .issuanceLogic(plb, registry, params, MAX_INLINE_DATUM_BYTES);
 
-  assert.notEqual(
-    derivedFromAuthority,
-    DEPLOYMENT.upgradeMultisig.scriptHash,
-    "deriving upgrade_multisig from the upgrade authority must NOT reproduce it — " +
-      "if this ever passes, the two values have been conflated again",
-  );
+  assert.equal(applied.length, 1, "exactly one parameterisation should have been recorded");
+  assert.equal(applied[0].title, "issuance_logic.issuance_logic.withdraw");
 
-  // And the assertion must not be quietly re-added: it cannot be derived,
-  // because DeploymentParams does not record the signer set.
-  const names = assertDeploymentScripts(blueprint, DEPLOYMENT).map((c) => c.name);
-  assert.ok(
-    !names.includes("upgrade_multisig"),
-    "upgrade_multisig cannot be asserted from DeploymentParams — record the " +
-      "signers first if you want it checked",
+  const hexAt = (i) => Buffer.from(applied[0].params[i]).toString("hex");
+  assert.equal(hexAt(1), registry, "param 1 is registry_node_cs");
+  assert.equal(hexAt(2), params, "param 2 is params_policy — NOT registry_node_cs again");
+  assert.equal(applied[0].params[3], BigInt(MAX_INLINE_DATUM_BYTES), "param 3 is max_inline_datum_bytes");
+
+  // And the correct order is the one the deployment records. (Self-consistent
+  // by construction — see the VACUOUS test above — so it is the by-index
+  // assertions, not this one, that carry the weight.)
+  assert.equal(
+    b.issuanceLogic(plb, registry, params, MAX_INLINE_DATUM_BYTES).hash,
+    DEPLOYMENT.issuanceLogic.scriptHash,
   );
+});
+
+test("⛔ upgradeAuthority is NOT an input to any derivation", () => {
+  // Stated positively, because the property is that nothing reads it.
+  //
+  // A deployment may legitimately name a key credential, a different script, or
+  // the multisig itself as its upgrade authority — the validator only requires
+  // the credential to appear in `tx.withdrawals` and never inspects it. So a
+  // deployment whose `upgradeAuthority` is an unrelated KEY credential must
+  // PASS, and no check may relate `upgradeAuthority` to `upgradeMultisig`.
+  // Adding one would reject valid deployments; it is the S-11 defect returning
+  // under a new name.
+  assert.equal(DEPLOYMENT.upgradeAuthority.type, "key");
+  assert.notEqual(DEPLOYMENT.upgradeAuthority.hash, DEPLOYMENT.upgradeMultisig.scriptHash);
+
+  const checks = assertDeploymentScripts(blueprint, DEPLOYMENT);
+  assert.equal(checks.length, EXPECTED_CHECKS.length);
+
+  // Move it to a completely unrelated key: still ten checks, still all green.
+  const rotated = structuredClone(DEPLOYMENT);
+  rotated.upgradeAuthority = { type: "key", hash: "99".repeat(28) };
+  const after = assertDeploymentScripts(blueprint, rotated);
+  assert.deepEqual(
+    after.map((c) => c.name).sort(),
+    checks.map((c) => c.name).sort(),
+    "changing upgradeAuthority must change nothing — no derivation reads it",
+  );
+  for (const c of after) assert.equal(c.derived, c.deployed);
 });

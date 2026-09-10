@@ -119,7 +119,12 @@ test("PROOF OF HARNESS: the parsers actually find fields", () => {
 
   // And the names must be the specific ones alpha.3 introduced, so a parser
   // that silently returned a stale-but-plausible list would be caught.
-  for (const required of ["programmableLogicGlobal", "maxInlineDatumBytes", "registry"]) {
+  for (const required of [
+    "programmableLogicGlobal",
+    "maxInlineDatumBytes",
+    "registry",
+    "issuanceLogic",
+  ]) {
     assert.ok(actual.includes(required), `source must expose ${required}`);
     assert.ok(documented.includes(required), `docs must document ${required}`);
   }

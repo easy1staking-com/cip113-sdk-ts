@@ -49,6 +49,11 @@ const OLD = load("blueprints/standard/v0.3.0/plutus.json");
  * It was "0.5.0-alpha.3" until S-4 made that the target; a fixture whose whole
  * job is to be newer silently stops being newer the moment the SDK catches up,
  * and the test would then pass for the wrong reason.
+ *
+ * ⛔ AND IT IS NOT COVERAGE OF THE GATE. It is built from the alpha.2-shaped
+ * v0.3.0 artefact, so it is ALSO missing required titles and exercises the
+ * MISSING-TITLE path only. Keep it — the discriminating pair below is still
+ * worth having — but read `LATER_WITH_EVERY_TITLE` for the gate itself.
  */
 const NEWER_WITH_SAME_SYMBOL = {
   ...OLD,
@@ -155,15 +160,25 @@ test("alpha.2 is now diagnosed as EARLIER — a real artifact, not a fixture", (
 // The real alpha.3 artifact — the case that exposed the defect
 // ---------------------------------------------------------------------------
 
-test("the VENDORED alpha.3 blueprint is now ACCEPTED — S-4's whole point", () => {
-  // In S-3 this asserted a LATER refusal. S-4 migrated the SDK to alpha.3, so
-  // the assertion INVERTS: the artifact that used to be refused must now
-  // validate. Kept as one test rather than deleted-and-rewritten so the flip is
-  // visible in the diff.
+test("F. the VENDORED alpha.3 blueprint is now diagnosed as EARLIER", () => {
+  // In S-3 this asserted a LATER refusal. S-4 migrated the SDK to alpha.3 and
+  // it INVERTED to an acceptance. T-F02 moves the target to alpha.4, so it
+  // inverts once more — alpha.3 is now behind. Kept as ONE test through all
+  // three states rather than deleted-and-rewritten, so each flip is visible in
+  // the diff; that is the convention S-4 used one migration ago.
   const alpha3 = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
   assert.equal(alpha3.preamble.version, "0.5.0-alpha.3");
-  assert.equal(alpha3.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.3 IS the target now");
-  assert.equal(validateStandardBlueprint(alpha3), undefined);
+  assert.notEqual(alpha3.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.4 IS the target now");
+
+  const msg = messageOf(alpha3);
+  assert.ok(msg, "alpha.3 is no longer the target and must be refused");
+  assert.match(msg, /EARLIER CIP-113 protocol version/);
+  assert.doesNotMatch(msg, /LATER/);
+  assert.match(
+    msg,
+    /blueprints\/standard\/v0\.5\.0-alpha\.4\//,
+    "must point at the alpha.4 blueprint directory",
+  );
 });
 
 test("alpha.3 declares the merged validators, and not their predecessors", () => {
@@ -228,21 +243,76 @@ test("comparator returns null — not 0 — when it cannot tell", () => {
 });
 
 // ---------------------------------------------------------------------------
-// alpha.4 — vendored (T-F01-1), but NOT the target. T-F02 owns the flip.
+// alpha.4 — vendored by T-F01-1, and THE TARGET since T-F02-2.
 //
-// ⛔ ESCALATED, NOT WRITTEN: the contract's test (a) — "alpha.4 is diagnosed
-// as LATER" — cannot be built against the real artifact. `validateStandardBlueprint`
-// only reaches its version-comparison branch when `missing.length > 0` (a
-// required title is absent). alpha.4 retires NO title `STANDARD_VALIDATORS`
-// requires — it only changes some validators' bytes/arity and adds
-// `issuance_logic` — so `missing` is `[]` for alpha.4 exactly as it is for the
-// (correctly accepted) alpha.3, and `validateStandardBlueprint(alpha4)` returns
-// silently instead of throwing, even though `compareProtocolVersions("0.5.0-alpha.4",
-// TARGET_PROTOCOL_VERSION)` correctly returns 1. Measured, not assumed: both
-// alpha.3 and alpha.4 produce `missing: []` and neither throws. Fixing this is a
-// `src/standard/blueprint.ts` change and `src/**` is off this slice's allowlist —
-// reported to the Orchestrator rather than routed around. See the worker report.
+// ⛔ WHAT THE GATE USED TO DO, kept because the repair is only legible beside
+// the defect. `validateStandardBlueprint` computed `missing` and its FIRST
+// statement after that was `if (missing.length === 0) return;`. Every version
+// comparison lived below that line. So the function RETURNED SILENTLY for any
+// blueprint whose required titles all happened to be present — including a
+// strictly LATER one. alpha.4 retires no title this SDK requires, so `missing`
+// was `[]` for alpha.4 exactly as for the correctly-accepted alpha.3, and an
+// SDK targeting alpha.3 accepted an alpha.4 artefact it could not build
+// against: wrong arities on `issuance_mint` and `upgrade_multisig`, and a
+// validator it had no builder for at all.
+//
+// ⚠ The comparator was never the problem —
+// `compareProtocolVersions("0.5.0-alpha.4", TARGET_PROTOCOL_VERSION)` returned
+// 1 throughout. The gate simply never called it. This is the same defect class
+// the file header warns about (symbol presence deciding the verdict), one level
+// up in control flow: there it decided by throwing the wrong message, here by
+// returning nothing at all.
+//
+// ⚠ AND THE EXISTING "newer" FIXTURE COULD NOT CATCH IT. `NEWER_WITH_SAME_SYMBOL`
+// is built from the alpha.2-shaped v0.3.0 blueprint, which is ALSO missing
+// titles — so it entered through the missing-title door and only ever proved
+// the comparator. Test A above is the fixture that enters through the other
+// door: every required title present, and refusable only by a gate that
+// consults the preamble first. T-F01's worker measured that this test could not
+// be written against the old control flow and escalated rather than routing
+// around it; the comparison now runs FIRST, which is what makes it writable.
 // ---------------------------------------------------------------------------
+
+test("E. the VENDORED alpha.4 blueprint is now ACCEPTED — the flip", () => {
+  // Nothing to invert here: no earlier test asserted anything about alpha.4's
+  // acceptance, because under the old control flow it was accepted silently and
+  // wrongly. This is a new assertion, and it is the §7f control for the whole
+  // file — a gate that refuses everything is not a fixed gate.
+  const alpha4 = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  assert.equal(alpha4.preamble.version, "0.5.0-alpha.4");
+  assert.equal(alpha4.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.4 IS the target now");
+  assert.equal(validateStandardBlueprint(alpha4), undefined);
+});
+
+test("G. alpha.4 PARAMETER ARITY, read from the artefact", () => {
+  // The delta pin below catches changed BYTES. This catches a changed ARITY,
+  // which is a different failure and the one the builders encode: a validator
+  // can keep its title and its compiled code can move without its parameter
+  // list moving, and vice versa. An arity change is invisible to every title
+  // check in blueprint.ts and produces a script that builds and hashes.
+  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  const paramsOf = (title) => {
+    const v = bp.validators.find((x) => x.title === title);
+    assert.ok(v, `alpha.4 must declare ${title}`);
+    return (v.parameters ?? []).map((p) => p.title);
+  };
+
+  assert.deepEqual(
+    paramsOf("issuance_logic.issuance_logic.withdraw"),
+    ["programmable_logic_base", "registry_node_cs", "params_policy", "max_inline_datum_bytes"],
+    "issuance_logic takes FOUR parameters, and the two adjacent PolicyIds are in THIS order",
+  );
+  assert.deepEqual(
+    paramsOf("issuance_mint.issuance_mint.mint"),
+    ["minting_logic_cred", "params_policy"],
+    "issuance_mint dropped to TWO in alpha.4 — it was four",
+  );
+  assert.deepEqual(
+    paramsOf("upgrade_multisig.upgrade_multisig.withdraw"),
+    ["utxo_ref"],
+    "upgrade_multisig takes ONE parameter — its signers/threshold moved into a datum",
+  );
+});
 
 test("the alpha.3 → alpha.4 validator delta is exactly what T-F02 must absorb", () => {
   // Keyed by the validator's first title segment (e.g. "issuance_mint" from
@@ -295,4 +365,68 @@ test("the alpha.3 → alpha.4 validator delta is exactly what T-F02 must absorb"
     "the alpha.3 → alpha.4 validator surface moved differently than measured here — " +
       "if upstream's diff changed, the scope T-F02 must absorb changed with it, and someone must look",
   );
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ THE GATE ITSELF — reachable in both directions, with EVERY title present
+// ---------------------------------------------------------------------------
+
+/**
+ * The alpha.4 validator set relabelled as a version strictly ABOVE any target.
+ *
+ * ⛔ THIS FIXTURE ENTERS THROUGH THE DOOR `NEWER_WITH_SAME_SYMBOL` NEVER USED.
+ * That one is built from the alpha.2-shaped v0.3.0 artefact, which is ALSO
+ * missing required titles — so it reaches the version comparison through the
+ * missing-title branch and proves only the comparator. This one declares every
+ * title this SDK requires, so it can only be refused by a gate that consults
+ * the preamble BEFORE it consults `missing`.
+ *
+ * It stays valid after the target flips precisely because it is built from the
+ * TARGET-SHAPED artefact: whatever titles the target requires, this fixture has
+ * them, and 0.9.9 stays ahead.
+ */
+const LATER_WITH_EVERY_TITLE = (() => {
+  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  return { ...bp, preamble: { ...bp.preamble, version: "0.9.9" } };
+})();
+
+test("A. a strictly LATER blueprint with EVERY required title PRESENT is refused as LATER", () => {
+  const msg = messageOf(LATER_WITH_EVERY_TITLE);
+
+  assert.ok(msg, "a blueprint from a later protocol version must be refused");
+  assert.match(msg, /LATER CIP-113 protocol version/);
+  assert.match(msg, /not a stale or corrupt file/);
+  assert.doesNotMatch(msg, /EARLIER/, "it is not earlier, and must never be called earlier");
+
+  // ⚠ And it must not name a defect it did not find. Nothing is missing here,
+  // so an empty "Missing required validator(s):" list would be the guard
+  // reporting the wrong cause.
+  assert.doesNotMatch(
+    msg,
+    /Missing required validator\(s\): \./,
+    "an empty missing-validator list names a defect that is not present",
+  );
+});
+
+test("B. the missing twin: EVERY title present, version BELOW the target, refused as EARLIER", () => {
+  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  const msg = messageOf({ ...bp, preamble: { ...bp.preamble, version: "0.4.0" } });
+
+  assert.ok(msg, "a blueprint from an earlier protocol version must be refused");
+  assert.match(msg, /EARLIER CIP-113 protocol version/);
+  assert.doesNotMatch(msg, /LATER/);
+  assert.match(
+    msg,
+    new RegExp(`blueprints/standard/v${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}/`),
+    "must point at the blueprint directory for the target",
+  );
+});
+
+test("C. EVERY title present and an UNPARSEABLE version claims no direction", () => {
+  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  const msg = messageOf({ ...bp, preamble: { ...bp.preamble, version: "not-a-version" } });
+
+  assert.ok(msg, "a preamble that cannot be read cannot yield a verdict");
+  assert.match(msg, /could not be parsed/);
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "must not claim a direction it cannot establish");
 });

@@ -173,16 +173,64 @@ export interface DeploymentParams {
    * ⚠ Deployed and hash-asserted, but NOT necessarily the ACTIVE authority. See
    * `upgradeAuthority`, which records what the params datum actually says.
    */
-  upgradeMultisig: { scriptHash: ScriptHash };
+  upgradeMultisig: {
+    /**
+     * ⚑ ONE VALUE, THREE ROLES: the config NFT's POLICY ID, the config UTxO
+     * address's PAYMENT CREDENTIAL, and the WITHDRAW-0 CREDENTIAL an upgrade
+     * authorisation is satisfied by.
+     *
+     * ⛔ DO NOT ADD A SECOND FIELD FOR THE POLICY OR THE ADDRESS. This is the
+     * same collapse `protocolParams` and `registry` already record, with one
+     * more role attached: a second field is a second chance to disagree about
+     * one fact, and the disagreement presents as a valid-looking address that
+     * holds nothing.
+     */
+    scriptHash: ScriptHash;
+    /**
+     * The one-shot UTxO `upgrade_multisig` is parameterised by. Already spent.
+     *
+     * ⚠ IDENTICAL IN TYPE TO `protocolParams.txInput`, AND NOT INTERCHANGEABLE
+     * WITH IT. Nothing can tell the two apart, and a record that reuses one for
+     * both makes the `upgrade_multisig` hash assertion pass regardless of which
+     * the code reads — the vacuity that hid a real defect for an entire
+     * migration once already.
+     */
+    txInput: TxInput;
+    /**
+     * MUTABLE STATE — the config UTxO holding the NFT and the `MultisigScript`
+     * tree, exactly as `protocolParams.utxo` holds the params datum. A signer
+     * rotation SPENDS this UTxO and recreates it, so the recorded value goes
+     * stale; re-read it rather than trusting an old record.
+     */
+    utxo: TxInput;
+  };
 
   /**
-   * The credential in the params datum's `upgrade_cred` field — the authority
-   * that must produce a withdraw-0 for ANY upgrade, including a change of
-   * authority.
+   * `upgrade_multisig`'s reference script input.
+   *
+   * ⚠ Its body is ~2,791 B — far past what an authorisation can afford to
+   * inline. Publishing the script without recording where it landed strands
+   * every later authorisation: the credential is satisfiable in principle and
+   * unusable in practice, with nothing to point at.
+   */
+  upgradeMultisigRefInput: TxInput;
+
+  /**
+   * The credential in the params datum's `upgrade_cred` field — the SOURCE OF
+   * TRUTH for the ACTIVE upgrade authority, whatever `upgradeMultisig` records
+   * as deployed.
    *
    * The validator only requires this credential to appear in `tx.withdrawals`;
    * it never inspects the authority's internals, so a verification-key
-   * credential is as valid as a script one.
+   * credential is as valid as a script one. ⛔ Nothing derives this from
+   * `upgradeMultisig` and nothing may check the two against each other — a
+   * deployment may legitimately name a key, an unrelated script, or the
+   * multisig.
+   *
+   * ⚠ ALPHA.4 MAKES A HANDOVER TWO-PHASE. The params datum carries a
+   * `pending_upgrade_cred` beside this one: a rotation NOMINATES the successor
+   * there and a second transaction promotes it, so for the window between them
+   * two credentials exist and only this one is live.
    *
    * ⚠ AN UNSATISFIABLE VALUE HERE IS A ONE-WAY BRICK, in upstream's own words:
    * it makes the authority check "permanently unsatisfiable, with no repair
@@ -190,6 +238,24 @@ export interface DeploymentParams {
    * in a withdrawals map — is exactly that.
    */
   upgradeAuthority: { type: "key" | "script"; hash: ScriptHash };
+
+  /**
+   * `issuance_logic` — the withdraw-0 credential named by the params datum's
+   * FIELD 1, and the replaceable half of issuance (alpha.4).
+   *
+   * ⚠ EVERY MINT AND EVERY BURN CARRIES ITS WITHDRAWAL. `issuance_mint`
+   * dispatches to whatever the datum's field 1 says, so this credential is on
+   * the critical path of both operations rather than of an occasional one.
+   *
+   * ⛔ IT MUST BE REGISTERED. An unregistered stake credential does not fail
+   * with "not registered": the ledger reports code 3141, *"rewards withdrawals
+   * must consume rewards in full"*, which reads as a balance problem and sends
+   * the reader to the wrong subsystem.
+   */
+  issuanceLogic: { scriptHash: ScriptHash };
+
+  /** `issuance_logic`'s reference script input. */
+  issuanceLogicRefInput: TxInput;
 
   programmableLogicBase: {
     scriptHash: ScriptHash;

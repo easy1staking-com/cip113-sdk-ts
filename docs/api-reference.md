@@ -188,8 +188,22 @@ interface DeploymentParams {
   // hashes and recoverable from none of them.
   maxInlineDatumBytes: number;
 
-  upgradeMultisig: { scriptHash: ScriptHash };
+  // ⚑ ONE hash, THREE roles: scriptHash is the config NFT policy, the config
+  // UTxO address's payment credential, AND the withdraw-0 credential.
+  // txInput is the spent one-shot it is parameterised by — NOT interchangeable
+  // with protocolParams.txInput, which has the same type. utxo is MUTABLE: a
+  // signer rotation spends the config UTxO and recreates it.
+  upgradeMultisig: { scriptHash: ScriptHash; txInput: TxInput; utxo: TxInput };
+  upgradeMultisigRefInput: TxInput;
+
+  // The ACTIVE authority the params datum names. Not derived from
+  // upgradeMultisig, and never checked against it.
   upgradeAuthority: { type: "key" | "script"; hash: ScriptHash };
+
+  // The withdraw-0 credential named by the params datum's field 1. Every mint
+  // and every burn carries its withdrawal, and it must be REGISTERED.
+  issuanceLogic: { scriptHash: ScriptHash };
+  issuanceLogicRefInput: TxInput;
 
   issuance: { txInput: TxInput; policyId: PolicyId; alwaysFailScriptHash: ScriptHash };
 
