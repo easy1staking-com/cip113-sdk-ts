@@ -342,11 +342,37 @@ export function issuancePlan(params: {
     isScript: true,
   };
 
+  // ⛔ `plgHash: ""` IS NOT "NO DISPATCHER", IT IS A MALFORMED ONE. `plgHash` is
+  // optional, so the natural JavaScript way to pass one through is
+  // `plgHash: maybeHash ?? ""` — and an empty string is a credential hash of
+  // length zero, which no credential has. Refused by name here rather than
+  // classified: every OTHER site in this function asks `=== undefined`, and a
+  // falsy-but-present value that some branches read as absent and others as
+  // present is how a duplicate-credential scan gets skipped by both halves at
+  // once (T-F04-1 audit r1, F-2).
+  if (params.plgHash !== undefined && params.plgHash.length === 0) {
+    throw new Error(
+      `issuancePlan: plgHash was supplied as an EMPTY STRING. Pass the ` +
+        `programmable_logic_global script hash when this transaction spends a ` +
+        `programmable_logic_base input, or OMIT plgHash entirely when it does not — a ` +
+        `zero-length credential hash is neither, and it would occupy a withdrawal slot ` +
+        `that no credential can ever match on chain.`
+    );
+  }
+
   // The withdrawal set. When a PLB input is spent, reuse plbWithdrawalPlan so
   // the dispatcher rule lives in exactly one place — it already adds plgHash and
   // already refuses duplicates over the complete set.
+  //
+  // ⚠ PAIRED WITH THE EMPTY-plgHash GUARD ABOVE, and legitimate only because of
+  // it. `!== undefined` rather than truthiness is what makes this branch agree
+  // with the two `=== undefined` tests further down; with the entry guard in
+  // place no falsy-but-present value can reach here, so MUTATING THIS LINE BACK
+  // TO TRUTHINESS REDDENS NOTHING (measured, r3 M-F2b — a deliberate survivor).
+  // If that entry guard is ever removed, this line becomes load-bearing again
+  // and its absence is the F-2 defect: both duplicate scans skipped at once.
   const withOthers = [issuanceLogicKey, ...params.otherWithdrawals];
-  const withdrawals = params.plgHash
+  const withdrawals = params.plgHash !== undefined
     ? plbWithdrawalPlan({ plgHash: params.plgHash, others: withOthers }).all
     : withOthers;
 
@@ -427,8 +453,12 @@ export function issuancePlan(params: {
   };
 
   const entries = params.issued.map((e) => {
+    // Each arm requires its OWN payload, not merely the right `kind`: without
+    // this, `{ kind: "reference-input" }` with no `input` raised a raw TypeError
+    // from inside the catch block's own template literal, so the named refusal
+    // below never emerged (T-F04-1 audit r1, F-5).
     const src = e.proof as IssuanceProofSource | undefined;
-    if (src?.kind === "reference-input") {
+    if (src?.kind === "reference-input" && src.input != null) {
       let idx: number;
       try {
         idx = referenceInputIndexOfMember(src.input);
@@ -441,7 +471,7 @@ export function issuancePlan(params: {
       }
       return { policyId: e.policyId, proof: mintingProofRefInput(idx) };
     }
-    if (src?.kind === "output") {
+    if (src?.kind === "output" && typeof src.tag === "string") {
       return { policyId: e.policyId, proof: mintingProofOutputIndex(outputIndexOf(src.tag)) };
     }
     throw new Error(
@@ -453,9 +483,17 @@ export function issuancePlan(params: {
   });
 
   // Built EAGERLY, and that is itself a guard: the map cannot be forgotten, and
-  // issuanceLogicRedeemer's own refusals — empty map, duplicate policy id
-  // compared as lower-cased hex, a value that is not a MintingRegistryProof —
-  // fire here, in the caller's own stack, rather than three lines from submission.
+  // TWO of issuanceLogicRedeemer's three refusals — the empty map, and a
+  // duplicate policy id compared as lower-cased hex — fire here, in the caller's
+  // own stack, rather than three lines from submission.
+  //
+  // Its THIRD refusal, a value that is not a MintingRegistryProof, is
+  // structurally UNREACHABLE through this path and is not inherited: the plan
+  // builds every proof itself with mintingProofRefInput/mintingProofOutputIndex
+  // and can never hand a bad value down. MEASURED — neutering that guard in
+  // evo-utils.ts moves no issuancePlan test (T-F04-1 audit r1, M17). The guard
+  // for the equivalent CALLER mistake is this function's own "is not an
+  // IssuanceProofSource" refusal above, which is load-bearing.
   const issuanceRedeemerData = buildIssuanceRedeemer(paramsIdx);
   const issuanceLogicRedeemerData = buildIssuanceLogicRedeemer(entries);
 

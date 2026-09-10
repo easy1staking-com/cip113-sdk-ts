@@ -749,10 +749,18 @@ const REFUSALS = [
     match: /no-such-tag/,
   },
   {
+    // ⛔ WAS `/outputs/`, WHICH THE NEIGHBOURING GUARD ALSO SATISFIED. With this
+    // guard removed, `declaredOutputs` falls through as [] and the unknown-tag
+    // guard fires instead with "Declared outputs, in emission order: []" — which
+    // contains the word "outputs", so the old regex stayed green and the guard
+    // was undefended (audit r1, M1: guard removed, 161/161 still passing).
+    // Pinned now on text unique to THIS guard, plus the ABSENCE of the
+    // neighbour's, so the test can only pass by the right guard firing.
     name: "an output proof when outputs was not supplied at all",
     build: () =>
       validPlan({ issued: [{ policyId: POLICY_A, proof: { kind: "output", tag: "new-node" } }] }),
-    match: /outputs/,
+    match: /`outputs` was not supplied/,
+    absent: /unknown output tag/,
   },
   {
     name: "a duplicate output tag",
@@ -761,7 +769,10 @@ const REFUSALS = [
         outputs: ["covering-node", "covering-node"],
         issued: [{ policyId: POLICY_A, proof: { kind: "output", tag: "covering-node" } }],
       }),
-    match: /covering-node/,
+    // Also tightened in the r3 sweep: `/covering-node/` was satisfied by the
+    // unknown-tag guard's message, which lists the declared outputs — and
+    // "covering-node" is one of them.
+    match: /duplicate output tag/,
   },
   {
     name: "a duplicate reference input",
@@ -775,17 +786,119 @@ const REFUSALS = [
   },
 ];
 
-for (const { name, build, match } of REFUSALS) {
+for (const { name, build, match, absent } of REFUSALS) {
   test(`⚑ issuancePlan refuses: ${name}`, () => {
-    assert.throws(() => issuancePlan(build()), match);
+    assert.throws(() => issuancePlan(build()), (err) => {
+      assert.match(err.message, match, `${name}: must be pinned by ITS OWN message`);
+      if (absent) {
+        assert.doesNotMatch(
+          err.message,
+          absent,
+          `${name}: a NEIGHBOURING guard fired instead — the test would be green for the wrong reason`
+        );
+      }
+      return true;
+    });
   });
 }
+
+test("⛔ each refusal is pinned by a message no OTHER refusal produces", () => {
+  // §2d, one level up from the count. A refusal test can be green because the
+  // guard under test fired, or because a NEIGHBOURING guard fired with a message
+  // that happens to satisfy the same regex — and the second is invisible until
+  // someone removes the guard. That is exactly what audit r1's M1 found: the
+  // guard deleted, the suite 161/161 green.
+  //
+  // So the uniqueness is asserted as a standing property rather than swept once
+  // by hand: build the message every case actually produces, then require each
+  // case's regex to match its OWN message and NO other. Two regexes failed this
+  // when it was first run (#7 `/outputs/`, #8 `/covering-node/`); both are
+  // tightened above.
+  const messages = REFUSALS.map(({ name, build }) => {
+    try {
+      issuancePlan(build());
+      throw new Error(`refusal "${name}" did not throw at all`);
+    } catch (err) {
+      return err.message;
+    }
+  });
+
+  for (const [i, { name, match, absent }] of REFUSALS.entries()) {
+    assert.match(messages[i], match, `${name}: its own message must satisfy its own regex`);
+    if (absent) assert.doesNotMatch(messages[i], absent, `${name}: absence assertion must hold on its own message`);
+    for (const [j, other] of messages.entries()) {
+      if (i === j) continue;
+      assert.doesNotMatch(
+        other,
+        match,
+        `${name}'s regex is ALSO satisfied by "${REFUSALS[j].name}" — that guard could be deleted and this test would stay green`
+      );
+    }
+  }
+});
+
+test("⛔ a falsy plgHash cannot switch the duplicate-credential refusal off", () => {
+  // AUDIT r1, F-2. `plgHash` was classified by TRUTHINESS where the set is built
+  // and by `=== undefined` everywhere else, and the two disagree on "". With
+  // `plgHash: ""` the build took the pure-mint branch (so plbWithdrawalPlan's
+  // inherited duplicate scan never ran) while the explicit scan took the
+  // plgHash-was-supplied branch (so it never ran either): BOTH halves of the
+  // duplicate refusal were skipped and a plan carrying bbbb… twice was returned.
+  //
+  // Fixed two ways, and this asserts the outer one: "" is refused AT ENTRY by
+  // name, because a zero-length credential hash is neither a dispatcher nor the
+  // absence of one. The inner fix — `!== undefined` where the set is built — is
+  // what the mutation below the entry guard exercises.
+  assert.throws(
+    () =>
+      issuancePlan(
+        validPlan({ plgHash: "", otherWithdrawals: [S(ISSUER_ADMIN), S(ISSUER_ADMIN)] })
+      ),
+    (err) => {
+      assert.match(err.message, /plgHash/, "must name the parameter the caller got wrong");
+      assert.match(err.message, /EMPTY STRING/, "and say what was wrong with it");
+      return true;
+    }
+  );
+
+  // A real dispatcher hash on the same fixture still reaches the duplicate
+  // refusal — §7f, a guard that refuses everything is not a fixed guard.
+  assert.throws(
+    () =>
+      issuancePlan(
+        validPlan({ plgHash: PLG_HASH, otherWithdrawals: [S(ISSUER_ADMIN), S(ISSUER_ADMIN)] })
+      ),
+    /duplicate withdrawal credential/
+  );
+});
+
+test("a proof source missing its own payload reaches the NAMED refusal", () => {
+  // AUDIT r1, F-5. `{ kind: "reference-input" }` with no `input` used to raise a
+  // raw TypeError from inside the catch block's own template literal, so the
+  // plan's named refusal never emerged. TypeScript blocks this; the JavaScript
+  // consumers this package ships to do not.
+  for (const proof of [{ kind: "reference-input" }, { kind: "output" }]) {
+    assert.throws(
+      () => issuancePlan(validPlan({ issued: [{ policyId: POLICY_A, proof }] })),
+      (err) => {
+        assert.match(err.message, /is not an IssuanceProofSource/, `${proof.kind}: the named refusal`);
+        assert.notEqual(err.constructor.name, "TypeError", `${proof.kind}: not a raw TypeError`);
+        return true;
+      }
+    );
+  }
+});
 
 test("issuancePlan's refusal set has exactly ten members", () => {
   // §2d — a membership list only ever detects REMOVALS, and the member it stops
   // noticing is the newest one, which is the one least likely to be covered
   // anywhere else. Pinning the count is what makes an added-and-untested
   // refusal, or a quietly deleted one, visible.
+  // SCOPE: REFUSALS enumerates the ten refusals the contract names, over the
+  // issued / reference-input / output / withdrawal SETS. The entry-validation
+  // refusal on a malformed `plgHash` (added in r3) is a different category and
+  // is tested on its own above; it deliberately does not join this list, so this
+  // count keeps meaning what it meant.
   assert.equal(REFUSALS.length, 10);
   assert.equal(new Set(REFUSALS.map((r) => r.name)).size, 10, "ten DISTINCT cases, not one listed twice");
 });
