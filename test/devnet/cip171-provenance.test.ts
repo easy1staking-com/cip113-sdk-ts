@@ -142,19 +142,28 @@ test("the bootstrap's CIP-171 record recomputes to the deployed script hashes", 
       .filter((v: any) => v.compiledCode)
       .map((v: any) => computeScriptHash(v.compiledCode).toLowerCase())
   ).size;
-  // TEN in 0.5.0-alpha.3, of the blueprint's ELEVEN distinct validators. It was
-  // 11 of 12 in alpha.2: the merges removed four validators (protocol_params_mint,
-  // coordination_spend, registry_mint, registry_spend) and added three
-  // (protocol_params, registry, programmable_logic_global). The EXCLUSION is
-  // unchanged and is the only one — issuance_mint takes a substandard's
-  // minting_logic_cred, which a core deployment does not have.
+  // ELEVEN in 0.5.0-alpha.4, of the blueprint's TWELVE distinct validators. It
+  // was 10 of 11 in alpha.3 and 11 of 12 in alpha.2.
+  //
+  // WHY IT MOVED, deliberately and in two independent steps:
+  //   * alpha.4 ADDED `issuance_logic` — the replaceable half of the issuance
+  //     split — taking the blueprint from 11 distinct validators to 12. The
+  //     bootstrap parameterises and deploys it, so it is covered.
+  //   * `upgrade_multisig` is now parameterised by a RECORDABLE one-shot
+  //     `utxo_ref` instead of an unrecorded signer set, so the bootstrap
+  //     parameterises it through the same builder path as everything else and
+  //     the event is captured.
+  //   ⇒ the bootstrap parameterises 12 validators and records 11.
+  //
+  // The EXCLUSION is unchanged and is STILL THE ONLY ONE — issuance_mint takes
+  // a substandard's minting_logic_cred, which a core deployment does not have.
   //
   // ⚠ This number moved because the PROTOCOL changed, which is the deliberate
   // decision this pin demands. It must not be adjusted to make a run go green.
   assert.equal(
     record.scripts.length,
-    10,
-    `core's record must cover exactly 10 scripts of the blueprint's ${distinctInBlueprint}. ` +
+    11,
+    `core's record must cover exactly 11 scripts of the blueprint's ${distinctInBlueprint}. ` +
       `The one absent is issuance_mint, which takes a substandard's minting_logic_cred and ` +
       `therefore CANNOT be parameterised by a core deployment. If this number moved, decide ` +
       `deliberately whether a script became coverable or one was dropped — do not adjust it.`
