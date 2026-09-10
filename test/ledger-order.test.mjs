@@ -815,12 +815,23 @@ test("⛔ each refusal is pinned by a message no OTHER refusal produces", () => 
   // when it was first run (#7 `/outputs/`, #8 `/covering-node/`); both are
   // tightened above.
   const messages = REFUSALS.map(({ name, build }) => {
+    let threw = false;
+    let message;
     try {
       issuancePlan(build());
-      throw new Error(`refusal "${name}" did not throw at all`);
     } catch (err) {
-      return err.message;
+      threw = true;
+      message = err.message;
     }
+    // ⛔ HOISTED OUT OF THE try, T-F04-1b (audit r2, N-2): thrown INSIDE the try,
+    // this sentinel was caught right back and returned as messages[i] — and it
+    // embeds `name`, so a guard that stopped throwing could satisfy ITS OWN
+    // regex via the sentinel (measured: #8 and #10 stayed green with their
+    // guard removed). Thrown here, a non-throwing guard now fails the test loudly.
+    if (!threw) {
+      throw new Error(`refusal "${name}" did not throw at all`);
+    }
+    return message;
   });
 
   for (const [i, { name, match, absent }] of REFUSALS.entries()) {
@@ -870,6 +881,74 @@ test("⛔ a falsy plgHash cannot switch the duplicate-credential refusal off", (
       ),
     /duplicate withdrawal credential/
   );
+});
+
+test("a non-string falsy plgHash cannot switch the duplicate-credential refusal off", () => {
+  // AUDIT r2, N-1 + N-3. Before T-F04-1b, the entry guard above tested
+  // `params.plgHash.length === 0`, which catches `""` alone — `0`, `false`,
+  // `NaN` and `null` all still reached the `!== undefined` classification line
+  // downstream. With truthiness restored there (r3's M-F2b), `0`/`false`/`NaN`
+  // fall into the pure-mint branch and BOTH duplicate scans are skipped (N-1);
+  // with the classification line intact, `null` instead reaches a raw
+  // TypeError from `.toLowerCase()` inside compareHex (N-3), naming nothing
+  // actionable. T-F04-1b's widened entry guard (`typeof !== "string" ||
+  // length === 0`) refuses every one of these at entry, by name, before either
+  // branch runs.
+  for (const bad of [0, false, null, NaN, ""]) {
+    assert.throws(
+      () =>
+        issuancePlan(
+          validPlan({ plgHash: bad, otherWithdrawals: [S(ISSUER_ADMIN), S(ISSUER_ADMIN)] })
+        ),
+      (err) => {
+        assert.match(
+          String(err.message),
+          /plgHash/,
+          `plgHash: ${String(bad)} must name the parameter the caller got wrong`
+        );
+        assert.notEqual(
+          err.constructor.name,
+          "TypeError",
+          `plgHash: ${String(bad)}: must be a NAMED refusal, not a raw TypeError`
+        );
+        return true;
+      },
+      `plgHash: ${String(bad)} must throw — not silently return a plan with the duplicate intact`
+    );
+  }
+});
+
+test("issuanceLogicHash present-but-invalid is refused at entry, by name", () => {
+  // T-F04-1b, twin of the plgHash guard: unlike plgHash, issuanceLogicHash is
+  // REQUIRED, so there is no `=== undefined` "absent" branch to disagree with —
+  // but nothing stopped `""` from building a zero-length credential silently
+  // (it becomes `issuanceLogicKey.hash`, a withdrawal-set member no on-chain
+  // credential can ever match) or a non-string value from reaching a raw
+  // TypeError downstream. Show the pre-fix shape in the assertion itself: the
+  // plan must NOT be returned.
+  for (const bad of ["", 0]) {
+    let plan;
+    assert.throws(
+      () => {
+        plan = issuancePlan(validPlan({ issuanceLogicHash: bad }));
+      },
+      (err) => {
+        assert.match(
+          String(err.message),
+          /issuanceLogicHash/,
+          `issuanceLogicHash: ${String(bad)} must name the parameter the caller got wrong`
+        );
+        assert.notEqual(
+          err.constructor.name,
+          "TypeError",
+          `issuanceLogicHash: ${String(bad)}: must be a NAMED refusal, not a raw TypeError`
+        );
+        return true;
+      },
+      `issuanceLogicHash: ${String(bad)} must throw`
+    );
+    assert.equal(plan, undefined, `issuanceLogicHash: ${String(bad)} must NOT build a plan`);
+  }
 });
 
 test("a proof source missing its own payload reaches the NAMED refusal", () => {
