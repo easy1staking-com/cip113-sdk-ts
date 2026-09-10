@@ -110,7 +110,42 @@ export function createOgmiosEvaluator(ogmiosUrl: string): Evaluator {
             console.error("\n=== OGMIOS EVALUATION ERROR ===");
             console.error(JSON.stringify(json.error, null, 2));
             console.error("===============================\n");
-            throw new Error(json.error.message || JSON.stringify(json.error));
+            // ⛔ EMBED THE STRUCTURED POINTER INTO THE MESSAGE. The payload
+            // printed above reaches a human reading stderr and NOTHING ELSE:
+            // the `catch` below rebuilds an `EvaluationError` that keeps only
+            // this string (its `failures` is hardcoded empty), so every caller
+            // — every negative test in this repo — has been asserting on the
+            // `3010` wrapper text alone, which is BYTE-IDENTICAL whether the
+            // refusal came from a `spend` or from a `withdraw`.
+            //
+            // MEASURED, audit r1 F-1: a mutation that moved a refusal between
+            // two different validators left this message unchanged and the test
+            // green. F-3: a `3011` "missing script witness" travels through the
+            // same wrapper as every `3012`, so a message regex cannot separate
+            // "the validator said no" from "the transaction was malformed".
+            //
+            // ⚠ APPENDED, NEVER SUBSTITUTED. The original text stays a PREFIX so
+            // that every existing matcher keeps matching — verified by grep, not
+            // assumed: the repo's two matchers on evaluation text are unanchored
+            // substring alternations, which a suffix cannot break.
+            const pointer = Array.isArray(json.error.data)
+              ? json.error.data
+                  .map(
+                    (d: any) =>
+                      // `@` rather than `[i]`: the whole pointer is wrapped in
+                      // `[...]`, so a bracket inside the list terminates a
+                      // reader's capture early. Measured — the first draft of
+                      // the parser in `upgrade.test.ts` read `spend[0` and
+                      // failed loudly, which is why the entry separator is not
+                      // a bracket.
+                      `${d?.validator?.purpose}@${d?.validator?.index}=${d?.error?.code}`
+                  )
+                  .join(",")
+              : "";
+            throw new Error(
+              `${json.error.message || JSON.stringify(json.error)}` +
+                ` [ogmios code=${json.error.code}${pointer ? ` validators=${pointer}` : ""}]`
+            );
           }
 
           if (!json.result || !Array.isArray(json.result)) {
