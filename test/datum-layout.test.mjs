@@ -453,6 +453,26 @@ test("⛔ IssuanceLogicRedeemer: a duplicate policy id differing only in hex CAS
     /duplicate/i,
     "one policy, two spellings, and the map cannot hold both"
   );
+
+  // ⚑ THE SAME PAIR IN THE OPPOSITE ORDER, and it is not redundant.
+  // MEASURED 2026-09-10: with the normalisation lost on ONE side only —
+  // `seen.add(k)` written as `seen.add(e.policyId)` — the lowercase-first case
+  // above STAYS GREEN, because the second entry lower-cases into a key the set
+  // already holds. Only this ordering kills that mutant. The production code is
+  // correct on both orderings; this closes a half-attached pin, it does not fix
+  // a bug.
+  //
+  // The lesson, from T-F02-1's round-2 audit: when a fix touches a SYMMETRIC
+  // PAIR, mutate each half separately — "identity on one side only" had two
+  // readings and only one of them reddens.
+  assert.throws(
+    () => issuanceLogicRedeemer([
+      { policyId: upper, proof: mintingProofRefInput(0) },
+      { policyId: lower, proof: mintingProofOutputIndex(1) },
+    ]),
+    /duplicate/i,
+    "uppercase first: the normalisation must happen on BOTH the lookup and the insert"
+  );
 });
 
 test("⛔ IssuanceLogicRedeemer: a value that is not a MintingRegistryProof is refused", () => {
