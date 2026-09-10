@@ -731,6 +731,41 @@ export async function bootstrapProtocol(
     // NO `script:` here — rail 4 requires `reference_script == None`. The
     // reference script is published in tx2 like every other one.
   });
+  /**
+   * A DECOY: a second, NFT-FREE UTxO parked at the multisig address.
+   *
+   * ⛔ THIS IS A FIXTURE FOR THE GATE BELOW, NOT PROTOCOL STATE. It exists so
+   * the policy-correlation clause in the config-UTxO lookup is exercised rather
+   * than merely claimed. MEASURED (audit r1, F-2): with only ONE UTxO at this
+   * address, replacing that filter with "take anything at this address" changed
+   * nothing — both the harness gate and the devnet test stayed green, while
+   * their comments asserted the filter asked the question the validator asks. A
+   * lookup that has never had to discriminate has not been shown to.
+   *
+   * ⚑ It is also a REAL condition, not an invented one. Upstream at d37ca8d,
+   * `upgrade_multisig.spend`, contemplates it explicitly: "a second UTxO at the
+   * address cannot carry the one-shot NFT ... junk UTxOs parked at the address
+   * cannot interfere." Anyone may pay to a script address at any time.
+   *
+   * ⚠ Safe against `upgrade_multisig.mint`: rail 3 uses `list.expect_find` over
+   * outputs, which SKIPS a non-matching output rather than rejecting it, and
+   * rails 1/2/4 constrain the mint, the token count and `nft_output` only. This
+   * output carries no NFT, so `has_nft_strict` never matches it.
+   *
+   * ⚠ It is permanently unspendable (no datum, so `expect Some(old_tree)` in the
+   * spend handler fails). That is deliberate and costs one min-UTxO of devnet
+   * ADA per bootstrap. It does not accumulate: every bootstrap derives a NEW
+   * upgrade_multisig from a new seed, hence a new address.
+   */
+  const decoyLovelace = minUtxoAtLeast(2_000_000n, {
+    address: multisigAddr,
+    assets: outputAssets(0n),
+    coinsPerUtxoByte,
+  });
+  msTx = msTx.payToAddress({
+    address: EvoAddress.fromBech32(multisigAddr),
+    assets: outputAssets(decoyLovelace),
+  });
   msTx = msTx.attachScript({ script: buildEvoScript(upgradeMultisig.compiledCode) });
 
   const multisigTxHash = await submitAndWait(
@@ -757,13 +792,32 @@ export async function bootstrapProtocol(
   // datum to name an authority that does not exist — rather than a comment
   // saying it must not.
   await settleIndexer();
-  const multisigCandidates = (await client.getUtxos(EvoAddress.fromBech32(multisigAddr)))
+  const multisigAtAddress = await client.getUtxos(EvoAddress.fromBech32(multisigAddr));
+  // ⚑ PROVE THE FILTER HAS SOMETHING TO REJECT. tx0 parked a decoy alongside the
+  // config UTxO precisely so this lookup must discriminate; if the decoy is not
+  // there, the filter below is passing over a population of one and this gate is
+  // back to being a claim rather than a check. Fail loudly rather than silently
+  // reverting to vacuity.
+  if (multisigAtAddress.length < 2) {
+    throw new Error(
+      `upgrade_multisig address ${multisigAddr} holds ${multisigAtAddress.length} UTxO(s); the ` +
+        `bootstrap parks a decoy beside the config UTxO so the policy filter below is exercised. ` +
+        `With fewer than 2 there is nothing to discriminate and the gate proves nothing.`
+    );
+  }
+  const multisigCandidates = multisigAtAddress
     // ⚑ STRUCTURALLY, BY POLICY, EXACTLY AS THE VALIDATOR DOES — `has_currency_
     // symbol`, not an equality test against a unit string we just built. A
     // lookup keyed on our own constructed unit shares a blind spot with the
     // code that constructed it: get the asset name wrong in both places and the
     // check agrees with itself. Asking "is there any asset under this policy?"
     // is a question our own bug cannot answer for us.
+    //
+    // ⛔ AND THE CLAUSE IS LOAD-BEARING, NOT DECORATIVE — which is only true
+    // because of the decoy above. Audit r1 F-2 measured this exact filter
+    // surviving replacement by "take anything at this address", because there
+    // was only ever one UTxO here. Delete the decoy and this comment becomes a
+    // lie again.
     .filter((u: EvoUTxO.UTxO) =>
       EvoAssets.getUnits(u.assets).some((unit) => unit !== "lovelace" && unit.slice(0, 56) === upgradeMultisig.hash)
     );

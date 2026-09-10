@@ -37,7 +37,13 @@ import {
   decodeMultisigScript,
   paymentCredentialHash,
 } from "../../dist/index.js";
-import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
+import {
+  Address as EvoAddress,
+  Assets as EvoAssets,
+  ScriptHash as EvoScriptHash,
+  TransactionHash as EvoTransactionHash,
+  TransactionInput as EvoTransactionInput,
+} from "@evolution-sdk/evolution";
 import { requireDevnet, makeClient } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { createStandardScripts } from "../../dist/standard/scripts.js";
@@ -333,9 +339,21 @@ test("the deployed protocol state is what the bootstrap intended — read back f
   const multisigAddr = scriptAddress(networkId, deployment.upgradeMultisig.scriptHash);
   const multisigNftUnit =
     deployment.upgradeMultisig.scriptHash + stringToHex("UpgradeMultisig");
+  const atMultisigAddr = await client.getUtxos(EvoAddress.fromBech32(multisigAddr));
+  // ⛔ FIRST, PROVE THIS LOOKUP HAS TO DISCRIMINATE AT ALL. The bootstrap parks
+  // a decoy — an NFT-free UTxO — at this address in tx0, so the address holds at
+  // least two. Without it, "filter by policy" and "take anything here" are the
+  // same function over a population of one, which is exactly what audit r1 F-2
+  // measured: deleting the policy clause from this filter changed nothing.
+  // Asserting the decoy exists is what keeps the next assertion honest.
+  assert.ok(
+    atMultisigAddr.length >= 2,
+    `the multisig address must hold the config UTxO AND the bootstrap's parked decoy, so the ` +
+      `policy filter below has something to reject; found ${atMultisigAddr.length} UTxO(s)`
+  );
   // Located STRUCTURALLY, by policy, exactly as `upgrade_multisig.mint` does —
   // not by an equality test on a unit string this test built for itself.
-  const configUtxos = (await client.getUtxos(EvoAddress.fromBech32(multisigAddr))).filter(
+  const configUtxos = atMultisigAddr.filter(
     (u: { assets: EvoAssets.Assets }) =>
       EvoAssets.getUnits(u.assets).some(
         (unit: string) =>
@@ -436,10 +454,100 @@ test("the deployed protocol state is what the bootstrap intended — read back f
   // And seven DISTINCT output indices. Two fields sharing an index means one
   // script was published and the other's reference input points at the wrong
   // body — which does not fail loudly, it fails at evaluation naming neither.
+  //
+  // ⚠ WHAT THESE THREE DO **NOT** CATCH — do not delete the resolution block
+  // below as redundant, it is the half that has teeth.
+  //
+  // MEASURED (audit r1, F-1): drop `issuanceLogic` from the tx2 publish loop and
+  // from REF_SCRIPT_ORDER and all three of these stay GREEN. `refIdx` returns
+  // **-1** for a name it no longer holds, the script is never published, and -1
+  // is a perfectly distinct seventh index — so the count is 7, the txHash is
+  // shared, the indices are distinct, and `DeploymentParams` ships naming output
+  // -1. These three assertions only ever catch a future EIGHTH ref input added
+  // to the record and not counted; every other change to the field SET is
+  // already a compile error against the interface. Whether a recorded index
+  // points at a script that was actually PUBLISHED is a different question, and
+  // only the on-chain resolution below asks it.
   assert.equal(
     new Set(refInputs.map(([, v]) => v.outputIndex)).size,
     7,
     `the seven reference inputs must have pairwise distinct output indices; got ` +
       refInputs.map(([k, v]) => `${k}=${v.outputIndex}`).join(", ")
   );
+
+  // --- every recorded RefInput must RESOLVE to the script it NAMES ----------
+  //
+  // ⛔ THE PROPERTY `REF_SCRIPT_ORDER`'s OWN COMMENT SAYS MATTERS: "a mismatch
+  // here does not fail loudly, it hands out a reference input carrying the WRONG
+  // script and the transaction dies at evaluation naming neither." Everything
+  // above this line is arithmetic on the record; this reads the chain.
+  //
+  // The mapping is written out BY HAND on purpose. Deriving the target from the
+  // key by string surgery (`fooRefInput` -> `deployment.foo`) would make the
+  // check agree with a record whose naming convention drifted, and would silently
+  // skip any field the transformation failed to resolve — the check and the thing
+  // checked would share a blind spot. An explicit table cannot skip anything, and
+  // the exhaustiveness assertion beneath it makes a missing row fail loudly.
+  const refTargets: Record<string, string> = {
+    programmableBaseRefInput: deployment.programmableLogicBase.scriptHash,
+    programmableLogicGlobalRefInput: deployment.programmableLogicGlobal.scriptHash,
+    transferRefInput: deployment.transfer.scriptHash,
+    thirdPartyRefInput: deployment.thirdParty.scriptHash,
+    unfrackingRefInput: deployment.unfracking.scriptHash,
+    issuanceLogicRefInput: deployment.issuanceLogic.scriptHash,
+    upgradeMultisigRefInput: deployment.upgradeMultisig.scriptHash,
+  };
+  // An eighth RefInput added without a row here fails NOW, at a message that
+  // names it, rather than by being quietly unresolved.
+  assert.deepEqual(
+    refInputs.map(([k]) => k).sort(),
+    Object.keys(refTargets).sort(),
+    "every *RefInput field must have an explicit expected-script row in refTargets — " +
+      "an unmapped field is an unchecked field"
+  );
+
+  for (const [name, ref] of refInputs) {
+    const expectedHash = refTargets[name]!;
+
+    // (a) The index must be a real output index BEFORE anything tries to look it
+    // up. -1 is what `REF_SCRIPT_ORDER.indexOf` returns for a name it no longer
+    // holds, and it is the exact value the audit measured shipping undetected.
+    // Asserted separately so the red NAMES the field instead of surfacing as a
+    // schema error from deep inside the provider.
+    assert.ok(
+      Number.isInteger(ref.outputIndex) && ref.outputIndex >= 0,
+      `${name} records outputIndex ${ref.outputIndex}, which is not a real output index. ` +
+        `-1 means REF_SCRIPT_ORDER.indexOf did not find the name — the script was never ` +
+        `published and this record points at nothing.`
+    );
+
+    // (b) The output must exist, and (c) carry a reference script.
+    const resolved = await client.getUtxosByOutRef([
+      new EvoTransactionInput.TransactionInput({
+        transactionId: EvoTransactionHash.fromHex(ref.txHash),
+        index: BigInt(ref.outputIndex),
+      }),
+    ]);
+    assert.equal(
+      resolved.length,
+      1,
+      `${name} points at ${ref.txHash}#${ref.outputIndex}, which does not exist on chain`
+    );
+    const scriptRef = (resolved[0] as { scriptRef?: unknown }).scriptRef;
+    assert.ok(
+      scriptRef,
+      `${name} resolves to ${ref.txHash}#${ref.outputIndex}, but that output carries NO ` +
+        `reference script. A reference input without a script body is useless to every ` +
+        `operation that names it.`
+    );
+
+    // (d) And it must be the RIGHT script. This is the "right index, wrong body"
+    // case: publishing in one order and recording in another produces indices
+    // that all exist, all carry scripts, and hand out the wrong bytes.
+    assert.equal(
+      EvoScriptHash.toHex(EvoScriptHash.fromScript(scriptRef as never)),
+      expectedHash,
+      `${name} resolves to a reference script whose hash is not the one the record names`
+    );
+  }
 });
