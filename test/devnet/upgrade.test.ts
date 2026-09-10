@@ -42,23 +42,117 @@ import { requireDevnet, makeClient } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { readCoordination, upgradeProtocol } from "../harness/upgrade.js";
 
+/** Which Ogmios validator purpose, and which numeric error, a negative expects. */
+interface ExpectedRefusal {
+  /**
+   * The Ogmios `validator.purpose` that must have refused.
+   *
+   * ⛔ PIN `purpose`; NEVER PIN `index`. MEASURED, audit r1: the SAME rail
+   * reported `index: 1` in the worker's runs and `index: 0` in the auditor's,
+   * because the redeemer index is a position in the ledger-ordered input set and
+   * therefore depends on coin selection. `purpose` was stable in every run on
+   * every machine. An assertion on `index` would be flaky across environments
+   * while looking stricter — which is the worst of both.
+   */
+  readonly purpose?: "spend" | "mint" | "withdraw" | "publish";
+  /**
+   * The inner Ogmios error code. `3012` is "the script evaluated to False";
+   * `3011` is "an associated script witness is missing" — a MALFORMED
+   * transaction, not a validator verdict. Both travel through the same `3010`
+   * wrapper, so only this number separates "the rail bit" from "we built the
+   * transaction wrong" (audit r1 F-3).
+   */
+  readonly code?: number;
+}
+
 /**
  * A negative test that passes because the CLIENT refused proves nothing about
  * the on-chain rail — it proves Evolution has an opinion. These rails live in
  * protocol_params, so the rejection must come from script evaluation.
  *
- * OBSERVED: all three rejections below arrive as Ogmios code 3010, "Some
- * scripts of the transactions terminated with error(s)".
+ * ⛔ AND "SCRIPT EVALUATION FAILED" IS NOT ENOUGH EITHER. MEASURED, audit r1
+ * F-1: narrowing `omitAuthority` to drop only the signer moved test 5's refusal
+ * from `protocol_params` (`purpose: "spend"`) to `upgrade_multisig`
+ * (`purpose: "withdraw"`) — two different validators, two different rails — and
+ * the test stayed GREEN, because the wrapper message is byte-identical. So a
+ * negative must name WHICH validator refused, or it cannot notice when the rail
+ * it documents stops being the rail it exercises.
+ *
+ * The pointer is supplied by `ogmios-evaluator.ts`, which appends
+ * ` [ogmios code=<c> validators=<purpose>@<idx>=<code>,…]` to the message.
+ *
+ * ⚠ FACTORY, not a predicate — see the guard below.
  */
-function assertRejectedByTheValidator(err: unknown): true {
-  const msg = String((err as Error)?.message ?? err);
-  assert.match(
-    msg,
-    /Script evaluation failed|terminated with error/,
-    "the rejection must come from the VALIDATOR, not from client-side validation — " +
-      `got: ${msg.slice(0, 200)}`
-  );
-  return true;
+function assertRejectedByTheValidator(expected: ExpectedRefusal = {}) {
+  // ⛔ FOOTGUN GUARD. This used to BE the predicate, so the obvious mistake is
+  // to keep passing it bare: `assert.rejects(fn, assertRejectedByTheValidator)`.
+  // Node would then call the FACTORY as the validator, and a factory returns a
+  // function — truthy — so EVERY negative test would pass unconditionally, in
+  // silence. Detect it by the argument node would have passed.
+  if (expected instanceof Error) {
+    throw new Error(
+      "assertRejectedByTheValidator is a FACTORY: call it with parentheses, e.g. " +
+        'assertRejectedByTheValidator({ purpose: "spend", code: 3012 }). Passed bare, ' +
+        "it makes every negative test pass unconditionally."
+    );
+  }
+
+  return (err: unknown): true => {
+    const msg = String((err as Error)?.message ?? err);
+    assert.match(
+      msg,
+      /Script evaluation failed|terminated with error/,
+      "the rejection must come from the VALIDATOR, not from client-side validation — " +
+        `got: ${msg.slice(0, 200)}`
+    );
+
+    // No expectation supplied ⇒ behave exactly as this guard always has.
+    if (expected.purpose === undefined && expected.code === undefined) return true;
+
+    const m = msg.match(/\[ogmios code=(\d+)(?: validators=([^\]]*))?\]/);
+    assert.ok(
+      m,
+      "expected an Ogmios pointer in the message, but found none. The evaluator " +
+        "appends it on every evaluation failure, so its absence means the refusal did not " +
+        `come from script evaluation at all — got: ${msg.slice(0, 300)}`
+    );
+
+    const entries = (m![2] ?? "")
+      .split(",")
+      .filter(Boolean)
+      .map((e) => {
+        const parts = e.match(/^(\w+)@(\d+)=(\d+)$/);
+        assert.ok(parts, `unparseable Ogmios validator entry ${JSON.stringify(e)}`);
+        return { purpose: parts![1]!, code: Number(parts![3]!) };
+      });
+    assert.ok(entries.length > 0, `the Ogmios pointer named no validator — got: ${msg.slice(0, 300)}`);
+
+    if (expected.purpose !== undefined) {
+      // ⚑ SET EQUALITY, not "some entry matches". Ogmios reports EVERY failing
+      // script, so "at least one is a spend" would still pass if a second
+      // validator had begun failing alongside it — which is new information and
+      // must redden rather than hide.
+      const purposes = [...new Set(entries.map((e) => e.purpose))].sort();
+      assert.deepEqual(
+        purposes,
+        [expected.purpose],
+        `the refusal must come from ${expected.purpose}, and from nothing else — got ` +
+          `${JSON.stringify(purposes)} in: ${msg.slice(0, 300)}`
+      );
+    }
+    if (expected.code !== undefined) {
+      for (const e of entries) {
+        assert.equal(
+          e.code,
+          expected.code,
+          `expected Ogmios ${expected.code} from ${e.purpose}, got ${e.code} — ` +
+            `3012 is a validator verdict, 3011 is a malformed transaction, and they are ` +
+            `not interchangeable evidence. In: ${msg.slice(0, 300)}`
+        );
+      }
+    }
+    return true;
+  };
 }
 
 before(async () => {
@@ -164,7 +258,12 @@ test("REFUSED: an upgrade without the authority's withdraw-0", async () => {
         omitAuthority: true,
         change: (p) => ({ ...p, transferCred: { type: "script", hash: "ab".repeat(28) } }),
       }),
-    assertRejectedByTheValidator,
+    // ⛔ `purpose: "spend"` IS THE WHOLE POINT OF THIS ASSERTION. The rail under
+    // test — `sitting_authority_approves` — lives in `protocol_params`; without
+    // pinning the purpose this test passes just as happily when the refusal comes
+    // from `upgrade_multisig` instead, which is a different validator enforcing a
+    // different rail (measured: audit r1 F-1, mutant A1).
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
     "an upgrade with no authority withdrawal must be rejected"
   );
 
@@ -227,7 +326,12 @@ test("REFUSED: a mutable credential that is not 28 bytes — the one-way brick",
         act: "PROTOCOL_UPGRADE",
         change: (p) => ({ ...p, upgradeCred: { type: "key", hash: "ab".repeat(20) } }),
       }),
-    assertRejectedByTheValidator,
+    // Tightened alongside test 5. Both rails this change violates live in
+    // `protocol_params`, so `spend` is right; `3012` additionally forbids a
+    // `3011` from masquerading as a validator verdict here (audit r1 F-3 named
+    // this test as the exposed one). ⚠ It does NOT say WHICH of the two rails
+    // fired — that isolation is F-4, seated for T-F05.
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
     "a 20-byte upgrade_cred must be rejected — it would brick the protocol permanently"
   );
 

@@ -123,14 +123,23 @@ export async function readCoordination(
  * it, and would agree with itself if we got the asset name wrong in both
  * places.
  *
- * ⛔ THE POLICY CLAUSE IS LOAD-BEARING, NOT DECORATIVE, AND ONLY BECAUSE OF THE
- * DECOY. T-F03-1's tx0 deliberately parks a second, NFT-free, datum-less UTxO
- * at this address so this filter has something to reject — upstream's `spend`
- * handler explicitly contemplates junk parked at the address, and anyone may
- * pay to a script address at any time. "The only UTxO at this address" is
- * therefore WRONG as well as vacuous: the address holds at least two. The
- * `>= 2` gate below mirrors `bootstrap.ts` so that a vanished decoy is loud
- * rather than silently restoring vacuity.
+ * ⚑ WHAT THE DECOY DOES AND DOES NOT DEFEND. It makes the CARDINALITY reading
+ * non-vacuous: the address really holds >= 2, so "the only UTxO here" is wrong
+ * as well as lazy, and over-narrowing is caught loudly (0 found among 2). It
+ * does NOT make the POLICY VALUE load-bearing — measured, audit r1 A2a: delete
+ * the `=== policy` comparison and test 1 stays green, because the decoy is
+ * funded with lovelace only, so "has any native asset" discriminates
+ * identically. The policy comparison stays because a *wrong* policy still
+ * throws loudly and because it mirrors the validator's own
+ * `has_currency_symbol`; it becomes genuinely load-bearing only once the decoy
+ * carries a FOREIGN-POLICY asset, which lives in the frozen `bootstrap.ts` and
+ * is seated as residue.
+ *
+ * T-F03-1's tx0 parks that second, NFT-free, datum-less UTxO deliberately —
+ * upstream's `spend` handler explicitly contemplates junk parked at the address,
+ * and anyone may pay to a script address at any time. The `>= 2` gate below
+ * mirrors `bootstrap.ts` so that a vanished decoy is loud rather than silently
+ * restoring vacuity.
  */
 export async function readUpgradeMultisigConfig(
   client: any,
