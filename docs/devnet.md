@@ -301,7 +301,56 @@ across unrelated tests, including ones whose code had not been touched. The port
 exactly the kind of clean, plausible reading an instrument gives when it cannot see the thing you
 are asking it about.
 
-**Restart it unconditionally after a reset** — and note the second trap below.
+**Restart it unconditionally after a reset** — and note the two traps below.
+
+### ⛔ AND `/health` CANNOT TELL YOU — it returns 200 on a Kupo whose database has been DELETED
+
+The trap above says an open port is not a healthy index. **This is one layer deeper: a 200-returning
+health endpoint is not a healthy index either**, and every check this page previously prescribed was
+satisfied by a completely broken Kupo.
+
+MEASURED 2026-09-10, and it cost a whole slice dispatch. A reset recreated
+`~/.yaci-cli/local-clusters/default/` and **deleted `kupo_db/`** while Kupo kept running. Kupo held
+its SQLite files open on **deleted inodes**, went on consuming from Ogmios once a second, and
+reported `connection_status 1.0` with `most_recent_checkpoint` equal to the node tip — while every
+query returned 500:
+
+```
+/health      → 200          ← what we were all checking
+/matches     → 500          ← what the SDK actually calls
+/checkpoints → 500
+```
+```
+SQLite3 returned ErrorCan'tOpen while attempting to perform open2
+  "file:/home/giovanni/.yaci-cli/local-clusters/default/kupo_db/kupo.sqlite3":
+  unable to open database file
+```
+
+`/health` is green because it reports the **Ogmios socket and an in-memory checkpoint** — both
+genuinely alive. It never touches the database. So it answers a question nobody was asking.
+
+**⇒ Health-check `/matches`, never `/health`.** It is the endpoint `Kupmios.getUtxos` calls, so it
+cannot be green while the SDK is broken:
+
+```bash
+curl -sf http://localhost:1442/matches >/dev/null && echo kupo-ok
+```
+
+Diagnose the state in one command — deleted inodes are the signature:
+
+```bash
+ls -l /proc/$(pgrep -x kupo)/fd | grep deleted      # kupo.sqlite3 (deleted), -wal, -shm
+ps -o pid,lstart,comm -p $(pgrep -f 'kupo|yaci-cli|ogmios|yaci-store')   # which reset orphaned it
+```
+
+A Kupo started minutes BEFORE the other five components is the fingerprint: it survived a reset it
+should have died with.
+
+⚠ **And note what made this quiet: process survival is orthogonal to service health.** Kupo's
+`setsid` detachment — the hardening two sections above — is precisely what let it outlive the reset
+that destroyed its data. A crashed Kupo would have been caught by the port check. **Detaching was
+still right; the lesson is that liveness and correctness need separate instruments**, because the
+fix for one made the other's failure silent.
 
 ```bash
 curl -X POST http://localhost:10000/local-cluster/api/admin/devnet/reset
