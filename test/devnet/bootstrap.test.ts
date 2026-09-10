@@ -1,5 +1,11 @@
 /**
- * Protocol bootstrap on a live devnet — CIP-113 0.5.0-alpha.2.
+ * Protocol bootstrap on a live devnet — CIP-113 0.5.0-alpha.4.
+ *
+ * ⚠ THIS IS A FIRST-EVER EXECUTION, NOT A REGRESSION TEST. No alpha.4 bootstrap
+ * has ever run. A green here is a SINGLE OBSERVATION with nothing behind it —
+ * it does not inherit the alpha.3 greens and "restored parity" is the wrong way
+ * to read it. The qualifier belongs here, inside the acceptance, rather than in
+ * a footnote of whatever report cites this file.
  *
  * This file previously asserted a BLOCKER: the bundled 0.3.0 blueprint had no
  * `publish` handler on programmable_logic_global, so registering its stake
@@ -28,8 +34,10 @@ import {
   scriptAddress,
   stringToHex,
   getInlineDatum,
+  decodeMultisigScript,
+  paymentCredentialHash,
 } from "../../dist/index.js";
-import { Address as EvoAddress } from "@evolution-sdk/evolution";
+import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
 import { requireDevnet, makeClient } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { createStandardScripts } from "../../dist/standard/scripts.js";
@@ -52,6 +60,7 @@ test("bootstraps a protocol instance on a live devnet", async () => {
     ["unfracking.scriptHash", deployment.unfracking.scriptHash],
     ["upgradeMultisig.scriptHash", deployment.upgradeMultisig.scriptHash],
     ["upgradeAuthority.hash", deployment.upgradeAuthority.hash],
+    ["issuanceLogic.scriptHash", deployment.issuanceLogic.scriptHash],
     ["issuance.policyId", deployment.issuance.policyId],
     ["registry.scriptHash", deployment.registry.scriptHash],
   ] as const) {
@@ -82,12 +91,30 @@ test("bootstraps a protocol instance on a live devnet", async () => {
     "the dispatcher must not collide with a delegate"
   );
 
-  // Distinct one-shot seeds, or the parameterised policies collide and the
-  // protocol could be re-bootstrapped over itself.
-  assert.notEqual(
-    `${deployment.protocolParams.txInput.txHash}#${deployment.protocolParams.txInput.outputIndex}`,
-    `${deployment.issuance.txInput.txHash}#${deployment.issuance.txInput.outputIndex}`,
-    "protocolParams and issuance must consume different seed UTxOs"
+  // ⛔ THREE DISTINCT ONE-SHOT SEEDS, PAIRWISE. Two reasons, and the second is
+  // the one that grew teeth in alpha.4:
+  //
+  //  1. Colliding seeds mean colliding parameterised policies, so the protocol
+  //     could be re-bootstrapped over itself.
+  //  2. `DeploymentParams` now carries TWO same-typed one-shot outrefs —
+  //     `protocolParams.txInput` and `upgradeMultisig.txInput` — and
+  //     `assertDeploymentScripts` derives a script hash from each. Two same-typed
+  //     outrefs in one record are TWO CHANCES FOR A VACUOUS CHECK: give them one
+  //     value and the `upgrade_multisig` derivation reproduces whichever field
+  //     the code actually reads, so the check cannot fail and a genuine
+  //     wrong-field bug is invisible. That is precisely how the alpha.3
+  //     `upgrade_multisig` check stayed green for an entire migration.
+  const seeds = [
+    ["protocolParams", deployment.protocolParams.txInput],
+    ["issuance", deployment.issuance.txInput],
+    ["upgradeMultisig", deployment.upgradeMultisig.txInput],
+  ] as const;
+  const seedKeys = seeds.map(([, r]) => `${r.txHash}#${r.outputIndex}`);
+  assert.equal(
+    new Set(seedKeys).size,
+    3,
+    `protocolParams, issuance and upgradeMultisig must each consume a DIFFERENT seed UTxO; ` +
+      `got ${seeds.map(([n], i) => `${n}=${seedKeys[i]}`).join(", ")}`
   );
 
   // Persist and reload so blueprint and deployment are independent artifacts —
@@ -96,15 +123,30 @@ test("bootstraps a protocol instance on a live devnet", async () => {
   const reloaded = JSON.parse(JSON.stringify(deployment));
   const blueprint = loadStandardBlueprint();
   const checks = assertDeploymentScripts(blueprint, reloaded);
-  // EIGHT, not nine. `upgrade_multisig` was the ninth until S-11 showed the
-  // check was deriving it from `upgradeAuthority` — a PAYMENT-vs-STAKE
-  // conflation that only a real deployment could expose, because the offline
-  // fixture used one value for both. Its signer set is a deployment choice
-  // DeploymentParams does not record, so it cannot be derived at all.
+  // TEN in alpha.4, up from eight — `issuance_logic` and `upgrade_multisig`
+  // both became derivable.
   //
-  // The count stays PINNED: a silent shrink is exactly what this catches, and
-  // it caught this one.
-  assert.equal(checks.length, 8, "all eight derivable scripts must be checked");
+  // ⚑ KEEP THE HISTORY, because it is the reason this pin exists. In alpha.3
+  // `upgrade_multisig` was NOT derivable and the count was deliberately
+  // shrunk to eight: S-4 had derived it as
+  //     upgradeMultisig([upgradeAuthority.hash], 1)
+  // — a PAYMENT-vs-STAKE relationship THAT DOES NOT EXIST — and the check
+  // passed anyway, for an entire migration, because the offline fixture used
+  // ONE VALUE FOR BOTH FIELDS and so the wrong derivation reproduced exactly.
+  // A fixture that conflates two values cannot test whether the code conflates
+  // them; only a real deployment, where they genuinely differ, exposed it. The
+  // signer set was a deployment choice `DeploymentParams` did not record, so
+  // the check was removed rather than corrected.
+  //
+  // alpha.4 restores it on a sound basis rather than by relaxing anything:
+  // `upgrade_multisig` is now parameterised by a RECORDABLE one-shot `utxo_ref`
+  // and holds its signer tree in a config UTxO, so the derivation reads a field
+  // that genuinely determines the hash. See the three-distinct-seeds assertion
+  // above, which is what stops the new derivation going vacuous the same way.
+  //
+  // The count stays PINNED and the pin stays a pin: a silent SHRINK is what it
+  // catches, and it caught that one.
+  assert.equal(checks.length, 10, "all ten derivable scripts must be checked");
   for (const c of checks) assert.equal(c.derived, c.deployed, `${c.name} must reproduce`);
 
   // And prove that is not vacuous: substitute a DIFFERENT validator's program
@@ -155,31 +197,80 @@ test("the deployed protocol state is what the bootstrap intended — read back f
       "where the 0.3.x fixture put it, and that mistake is invisible to every offline check)"
   );
 
-  // --- its datum must be the FOUR-field layout, wired to the real delegates --
+  // --- its datum must be the SIX-field layout, wired to the real delegates ---
   const datum = getInlineDatum(coordUtxos[0]);
   assert.ok(datum, "the coordination UTxO must carry an inline datum");
   const params = decodeProtocolParams(datum);
 
-  assert.equal(params.plgCred.hash, deployment.programmableLogicGlobal.scriptHash, "field 0 = plg_cred");
-  assert.equal(params.transferCred.hash, deployment.transfer.scriptHash, "field 1 = transfer");
-  assert.equal(params.thirdPartyCred.hash, deployment.thirdParty.scriptHash, "field 2 = third_party");
-  assert.equal(params.upgradeCred.hash, deployment.upgradeAuthority.hash, "field 3 = upgrade_cred");
-  assert.equal(params.upgradeCred.type, deployment.upgradeAuthority.type, "upgrade_cred kind");
-
-  // ⚠ THE BRICK CHECK. protocol_params requires upgrade_cred to appear in
-  // tx.withdrawals, and upstream states an unsatisfiable value here makes the
-  // authority check "permanently unsatisfiable, with no repair path". A
-  // credential that cannot be REGISTERED can never appear in a withdrawals map,
-  // so this asserts the installed authority is one we can actually satisfy.
+  // ⛔ READ BACK BY NAME, FIELD BY FIELD, AND MIND INDICES 1 AND 2.
   //
-  // upgrade_multisig is deployed but is NOT the authority: the blueprint gives
-  // it no `publish` handler, so a script-witnessed RegCert fails under the
-  // publish purpose, and Evolution refuses an unwitnessed one outright.
+  // alpha.4 INSERTED `issuance_logic_cred` at index 1, displacing
+  // `transfer_cred` to index 2. Both are `Credential` — same constructor, same
+  // 28 bytes — so a datum written in alpha.3's order is still six fields long,
+  // still passes `params_wellformed`, and still DECODES CLEANLY. A shifted read
+  // returns a perfectly well-formed value that names the WRONG AUTHORITY, and
+  // no decoder anywhere can catch it: there is nothing malformed to catch.
+  // Only comparing each field to the script it is supposed to name does.
+  assert.equal(params.plgCred.hash, deployment.programmableLogicGlobal.scriptHash, "field 0 = plg_cred");
+  assert.equal(
+    params.issuanceLogicCred.hash,
+    deployment.issuanceLogic.scriptHash,
+    "field 1 = issuance_logic_cred — NEW in alpha.4, and it displaced transfer_cred from this slot"
+  );
+  assert.equal(
+    params.transferCred.hash,
+    deployment.transfer.scriptHash,
+    "field 2 = transfer_cred — was field 1 in alpha.3"
+  );
+  assert.equal(params.thirdPartyCred.hash, deployment.thirdParty.scriptHash, "field 3 = third_party");
+  assert.equal(params.upgradeCred.hash, deployment.upgradeAuthority.hash, "field 4 = upgrade_cred");
+  assert.equal(params.upgradeCred.type, deployment.upgradeAuthority.type, "upgrade_cred kind");
+  // ⛔ `pending_upgrade_cred` MUST be None at genesis. protocol_params runs
+  // `params_wellformed(genesis_params, is_init: True)`, and `is_init: True` is
+  // precisely what forbids a nomination baked into the genesis datum. A handover
+  // is two-phase; phase one has not happened.
+  assert.equal(
+    params.pendingUpgradeCred,
+    null,
+    "field 5 = pending_upgrade_cred must be None at genesis — a nomination baked into the " +
+      "genesis datum is forbidden by params_wellformed(is_init: True)"
+  );
+
+  // ⚠ THE BRICK CHECK — INVERTED IN PLACE, AND THE HARM ANALYSIS TRAVELS WITH IT.
+  //
+  // This assertion used to read `"key"`. It is not being relaxed; the fact that
+  // justified it has been removed upstream, and the flip is left visible in the
+  // diff for exactly that reason.
+  //
+  // WHY IT EXISTED: protocol_params requires `upgrade_cred` to appear in
+  // `tx.withdrawals`, so the credential must be a REGISTERED stake credential.
+  // alpha.3's `upgrade_multisig` had `withdraw` and `else` and NOTHING ELSE — a
+  // Conway RegCert runs the script under the **publish** purpose, so a
+  // script-witnessed registration fell through to `else` and failed, and
+  // Evolution refuses an unwitnessed one outright ("Redeemer required for
+  // script-controlled stake credential registration"). Naming a credential that
+  // could never be registered is upstream's ONE-WAY BRICK: the authority check
+  // becomes "permanently unsatisfiable, with no repair path". So the fixture
+  // installed the wallet's verification key instead, and this pin guarded it.
+  //
+  // WHAT REMOVED THE REASON, specifically and narrowly: upstream d37ca8d added
+  //     publish(_r, c, _s) { when c is { RegisterCredential { .. } -> True
+  //                                      _ -> False } }
+  // to `upgrade_multisig`. THAT HANDLER IS THE ENTIRE JUSTIFICATION for a script
+  // authority here. The rule above still holds unchanged — the credential must
+  // be registrable — and alpha.4 is the first version in which this particular
+  // credential satisfies it.
   assert.equal(
     params.upgradeCred.type,
-    "key",
-    "the installed upgrade authority must be a credential this toolchain can register — " +
-      "a script authority without a publish handler is a one-way brick"
+    "script",
+    "alpha.4 installs a SCRIPT upgrade authority — legitimate only because " +
+      "upgrade_multisig.publish(RegisterCredential) exists at d37ca8d and makes the credential " +
+      "registrable. Without that handler this is a one-way brick."
+  );
+  assert.equal(
+    params.upgradeCred.hash,
+    deployment.upgradeMultisig.scriptHash,
+    "the installed authority must be THIS deployment's upgrade_multisig"
   );
   // ⛔ THE COHERENCE CHECK THE LEDGER CANNOT MAKE. The datum names a dispatcher;
   // the dispatcher was compiled against three delegate hashes. Nothing on chain
@@ -205,6 +296,7 @@ test("the deployed protocol state is what the bootstrap intended — read back f
   // and programmable_logic_base would never resolve the delegate.
   for (const [name, c] of [
     ["plg", params.plgCred],
+    ["issuanceLogic", params.issuanceLogicCred],
     ["transfer", params.transferCred],
     ["thirdParty", params.thirdPartyCred],
   ] as const) {
@@ -225,13 +317,129 @@ test("the deployed protocol state is what the bootstrap intended — read back f
   assert.equal(origin.key, "", "sentinel head has an empty key");
   assert.equal(origin.next, "ff".repeat(30), "sentinel tail pointer");
 
-  // --- the four reference scripts must exist and be resolvable --------------
-  for (const [name, ref] of [
-    ["programmableLogicBase", deployment.programmableBaseRefInput],
-    ["transfer", deployment.transferRefInput],
-    ["thirdParty", deployment.thirdPartyRefInput],
-    ["unfracking", deployment.unfrackingRefInput],
-  ] as const) {
+  // --- the upgrade authority is OPERABLE, not merely NAMED ------------------
+  //
+  // ⛔ §15b, and the measured instance of "correct and useless" IS THIS REPO: a
+  // deployment named an authority credential that could not be registered at
+  // all. Every hash reproduced, every read-back matched, every test passed, and
+  // the protocol's upgrade path was permanently unsatisfiable. "It exists and
+  // is well-formed" left "and can be used" untested.
+  //
+  // The datum assertions above prove the deployment NAMES upgrade_multisig.
+  // They say nothing about whether that authority can be satisfied. The tree
+  // lives in a config UTxO, not in the script's parameters, so an authority
+  // whose config UTxO is missing, bundled, or carrying the wrong tree is named
+  // correctly and unusable.
+  const multisigAddr = scriptAddress(networkId, deployment.upgradeMultisig.scriptHash);
+  const multisigNftUnit =
+    deployment.upgradeMultisig.scriptHash + stringToHex("UpgradeMultisig");
+  // Located STRUCTURALLY, by policy, exactly as `upgrade_multisig.mint` does —
+  // not by an equality test on a unit string this test built for itself.
+  const configUtxos = (await client.getUtxos(EvoAddress.fromBech32(multisigAddr))).filter(
+    (u: { assets: EvoAssets.Assets }) =>
+      EvoAssets.getUnits(u.assets).some(
+        (unit: string) =>
+          unit !== "lovelace" && unit.slice(0, 56) === deployment.upgradeMultisig.scriptHash
+      )
+  );
+  assert.equal(
+    configUtxos.length,
+    1,
+    "exactly one config UTxO must hold the UpgradeMultisig NFT — it is one-shot, so zero " +
+      "means the authority named by the genesis datum has no configuration and is unsatisfiable"
+  );
+  const configUtxo = configUtxos[0];
+
+  // ⛔ THE NFT AND NOTHING ELSE. `upgrade_multisig.mint` finds its output with
+  // `has_nft_strict`, which is strict about the WHOLE value: bundle any other
+  // asset alongside the NFT and the output is simply NOT FOUND. Asserting this
+  // off chain pins the property the validator will silently refuse on.
+  const configUnits = EvoAssets.getUnits(configUtxo.assets).filter((u: string) => u !== "lovelace");
+  assert.deepEqual(
+    configUnits,
+    [multisigNftUnit],
+    "the config UTxO must carry the UpgradeMultisig NFT and NO other asset — has_nft_strict " +
+      "does not find a bundled output"
+  );
+  assert.ok(
+    !(configUtxo as { scriptRef?: unknown }).scriptRef,
+    "the config UTxO must carry NO reference script — upgrade_multisig.mint requires " +
+      "reference_script == None, and every later upgrade pays for it if it is there"
+  );
+
+  // And the tree itself must be the authority we meant, by name.
+  const configDatum = getInlineDatum(configUtxo);
+  assert.ok(configDatum, "the config UTxO must carry an inline datum — the tree IS the authority");
+  const tree = decodeMultisigScript(configDatum);
+  const walletPkh = paymentCredentialHash(EvoAddress.toBech32(await client.address()));
+  assert.deepEqual(
+    tree,
+    { type: "signature", keyHash: walletPkh },
+    "the config UTxO must hold Signature(<the wallet's payment credential>) — an authority " +
+      "nobody can satisfy is a permanent brick with no repair path"
+  );
+
+  // --- all six delegate/authority stake credentials are DISTINCT ------------
+  //
+  // Six credentials, six roles. Upstream does NOT enforce distinctness on
+  // chain — it is explicitly a deployment responsibility — and the roles are
+  // structurally identical 28-byte hashes, so a swap deploys cleanly and a real
+  // chain ACCEPTS it. (Measured: a deliberately-swapped delegate credential was
+  // submitted for real and the chain took it. Only a read-back caught it.)
+  const stakeCreds = [
+    ["plg", deployment.programmableLogicGlobal.scriptHash],
+    ["transfer", deployment.transfer.scriptHash],
+    ["thirdParty", deployment.thirdParty.scriptHash],
+    ["unfracking", deployment.unfracking.scriptHash],
+    ["issuanceLogic", deployment.issuanceLogic.scriptHash],
+    ["upgradeMultisig", deployment.upgradeMultisig.scriptHash],
+  ] as const;
+  assert.equal(
+    new Set(stakeCreds.map(([, h]) => h)).size,
+    6,
+    `all six withdraw-0 credentials must be distinct; got ` +
+      stakeCreds.map(([n, h]) => `${n}=${h.slice(0, 8)}`).join(", ")
+  );
+
+  // --- the SEVEN reference inputs: a COUNT plus an identity ------------------
+  //
+  // ⛔ THE MEMBERSHIP LIST THIS REPLACES NAMED FOUR AND SILENTLY OMITTED
+  // `programmableLogicGlobal` — the §2d shape exactly: the member a list stops
+  // noticing is the NEWEST one, which is also the one least covered anywhere
+  // else. A membership list only ever detects REMOVALS; it decays into a stale
+  // subset and reads as coverage the whole time.
+  //
+  // So collect the RefInput fields off the deployment rather than naming them,
+  // and assert the COUNT as well as the properties. Adding an eighth reference
+  // script without recording it now fails here.
+  const refInputs = Object.entries(deployment).filter(([k]) => k.endsWith("RefInput")) as Array<
+    [string, { txHash: string; outputIndex: number }]
+  >;
+  assert.equal(
+    refInputs.length,
+    7,
+    `DeploymentParams must carry exactly 7 *RefInput fields (plb, plg, transfer, thirdParty, ` +
+      `unfracking, issuanceLogic, upgradeMultisig); found ${refInputs.length}: ` +
+      refInputs.map(([k]) => k).join(", ")
+  );
+  // All seven name the SAME publish transaction — they are one tx2's outputs.
+  const refTxHashes = new Set(refInputs.map(([, v]) => v.txHash));
+  assert.equal(
+    refTxHashes.size,
+    1,
+    `all seven reference inputs must name the same publish transaction; got ` +
+      `${[...refTxHashes].join(", ")}`
+  );
+  for (const [name, ref] of refInputs) {
     assert.match(ref.txHash, /^[0-9a-f]{64}$/, `${name} reference input needs a real tx hash`);
   }
+  // And seven DISTINCT output indices. Two fields sharing an index means one
+  // script was published and the other's reference input points at the wrong
+  // body — which does not fail loudly, it fails at evaluation naming neither.
+  assert.equal(
+    new Set(refInputs.map(([, v]) => v.outputIndex)).size,
+    7,
+    `the seven reference inputs must have pairwise distinct output indices; got ` +
+      refInputs.map(([k, v]) => `${k}=${v.outputIndex}`).join(", ")
+  );
 });
