@@ -46,9 +46,23 @@
  *     a handover can never begin inside a transaction that presents itself as a
  *     parameter change, and a promotion can never carry one.
  *
- * ⚠ This fixture implements `ProtocolUpgrade` end to end. `NominateAuthority`
- * and `PromoteAuthority` are reachable through `opts.act` and are exercised on
- * chain by T-F03-3, not here.
+ * ⚠ All three arms are implemented end to end and all three are exercised on
+ * chain by `test/devnet/upgrade.test.ts`. `nominateAuthority` and
+ * `promoteAuthority` are thin entry points onto `upgradeProtocol`, deliberately:
+ * ONE transaction builder, ONE authorisation router, ONE
+ * `protocolParamsRedeemer` call site. Forking a second authorisation path for
+ * the promotion is the mistake this shape exists to prevent.
+ *
+ * ⛔ AND THEY ARE TWO ENTRY POINTS, NOT ONE `handover()`. There is deliberately
+ * no wrapper that nominates and then promotes. Each phase takes CHAIN STATE as
+ * its input — `promoteAuthority` reads the nominee out of the datum, not from
+ * an argument — so a run that dies between the two is resumed by calling the
+ * second one, never by starting over. WORKLOG S-12 is why that is a requirement
+ * rather than a preference: a three-step preview deployment failed at step
+ * three against a lagging indexer and could not be re-run, because step one had
+ * spent one-shot seeds. **Every step after the first irreversible one must be
+ * separately runnable**, and phase one of a handover is irreversible in the only
+ * sense that matters — it is on chain.
  */
 
 import {
@@ -73,6 +87,8 @@ import {
   scriptAddress,
   buildEvoScript,
   createStandardScripts,
+  minUtxoAtLeast,
+  type Cip113Credential,
   type DeploymentParams,
   type PlutusBlueprint,
   type ProtocolParamsData,
@@ -201,6 +217,31 @@ export interface UpgradeOptions {
   readonly act: keyof typeof ProtocolParamsAct;
   /** Mutate the current params into the desired new params. */
   readonly change: (current: ProtocolParamsData) => ProtocolParamsData;
+  /**
+   * WHOSE withdraw-0 authorises this spend, chosen from the CURRENT (spent)
+   * datum. Defaults to the sitting authority, `upgrade_cred`.
+   *
+   * ⛔ THE ONE ASYMMETRY IN THIS VALIDATOR, AND THE ONLY REASON THIS HOOK
+   * EXISTS. Two of the three arms — `protocol_upgrade` and `nominate_authority`
+   * — call `sitting_authority_approves`, which is
+   * `pairs.has_key(withdrawals, old.upgrade_cred)`. `promote_authority` does
+   * NOT: it calls `pairs.has_key(withdrawals, nominee)` where the nominee is
+   * `old.pending_upgrade_cred`, and the sitting authority does not appear in a
+   * promotion at all.
+   *
+   * ⚠ THE WRONG IMPLEMENTATION IS SILENT ON THE BUILD SIDE. Adding the sitting
+   * authority's withdrawal to a promotion is not refused for being extra — it
+   * is simply not what the rule reads, so the transaction is refused for
+   * MISSING the nominee's, and a reader who assumed symmetry sees a puzzling
+   * 3012 rather than their own mistake. Mutation P1 is what proves this branch
+   * was implemented rather than assumed.
+   *
+   * ⚑ IT TAKES THE DATUM, NOT A CREDENTIAL. A credential passed in by a caller
+   * and a credential on chain are two facts that can disagree, and only the
+   * on-chain one decides — so the value that ends up in the withdrawals map is
+   * read from the same datum the validator reads.
+   */
+  readonly authoriseAs?: (current: ProtocolParamsData) => Cip113Credential;
   /** Omit the upgrade authority's whole authorisation — for proving the rail bites. */
   readonly omitAuthority?: boolean;
   /**
@@ -248,31 +289,76 @@ export async function upgradeProtocol(
   // STRICTLY equal, so reassembling the multi-asset by hand would be a
   // needless opportunity to drop the NFT; addLovelace touches only the ADA leg,
   // which alpha.4 leaves unconstrained.
-  const outAssets = opts.extraLovelace
+  const carried = opts.extraLovelace
     ? EvoAssets.addLovelace(utxo.assets, opts.extraLovelace)
     : utxo.assets;
+  const nextDatum = protocolParamsDatum(next);
+
+  // ⛔ THE ADA LEG MUST BE RE-FLOORED, BECAUSE THE DATUM CAN GROW. min-UTxO
+  // scales with the SERIALISED OUTPUT SIZE, and `pending_upgrade_cred` is the
+  // one field of this datum whose size changes: `None` is 3 bytes of CBOR,
+  // `Some(Credential)` is ~40. So a NOMINATION widens the continuing output
+  // past the floor the genesis output was funded to, while every other upgrade
+  // leaves it exactly where it was.
+  //
+  // MEASURED on devnet 2026-09-10, before this line existed: carrying the
+  // input's 2,000,000 lovelace through a nomination was rejected at SUBMISSION
+  // with ledger code **3125**, `minimumRequiredValue 2,012,770`. ⚠ AND EVOLUTION
+  // DOES NOT RESCUE AN UNDER-FUNDED `payToAddress` — it applies its own
+  // min-UTxO arithmetic to CHANGE outputs only, so an explicit amount is passed
+  // through verbatim and the shortfall survives to the ledger, which reports
+  // "insufficient Ada" and NEVER "your datum grew". Nothing offline notices.
+  //
+  // `minUtxoAtLeast` takes the current lovelace as its FLOOR, so this only ever
+  // raises: a promotion, which SHRINKS the datum back to `None`, leaves the
+  // output funded where it was rather than clawing ADA back. Legitimate on
+  // alpha.4 precisely because the one-way ADA ratchet is gone — lovelace is
+  // unconstrained relative to the input in both directions.
+  //
+  // The address is rebuilt rather than read off `utxo.address` because
+  // `minUtxoForOutput` takes bech32; it is the same address by construction —
+  // `readCoordination` found this UTxO by querying exactly it.
+  const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
+  const outAssets = EvoAssets.withLovelace(
+    carried,
+    minUtxoAtLeast(EvoAssets.lovelaceOf(carried), {
+      address: scriptAddress(networkId, deployment.protocolParams.policyId),
+      assets: carried,
+      datum: nextDatum,
+      coinsPerUtxoByte,
+    })
+  );
+
   tx = tx.payToAddress({
     address: utxo.address,
     assets: outAssets,
-    datum: new InlineDatum.InlineDatum({ data: protocolParamsDatum(next) }),
+    datum: new InlineDatum.InlineDatum({ data: nextDatum }),
   });
 
-  // The trampoline: the CURRENT datum's authority must produce a withdraw-0.
+  // The trampoline: a withdraw-0 from the credential this arm demands.
   //
   // ⚑ ROUTED ON THE DATUM'S CREDENTIAL, NEVER ON `deployment.upgradeAuthority`.
   // The datum is the source of truth for who may authorise this spend — the
-  // deployment record is a record, and a promotion (T-F03-3) moves the datum
-  // without moving the record.
+  // deployment record is a record, and a promotion moves the datum without
+  // moving the record.
+  //
+  // WHICH credential is the arm's business, not this router's: two arms want
+  // the sitting authority (the default below) and `promote_authority` wants the
+  // standing nominee. See `UpgradeOptions.authoriseAs`.
+  const authCred: Cip113Credential = opts.authoriseAs
+    ? opts.authoriseAs(params)
+    : params.upgradeCred;
+
   if (!opts.omitAuthority) {
-    if (params.upgradeCred.type === "script") {
-      if (params.upgradeCred.hash !== deployment.upgradeMultisig.scriptHash) {
+    if (authCred.type === "script") {
+      if (authCred.hash !== deployment.upgradeMultisig.scriptHash) {
         throw new Error(
-          `The datum names a SCRIPT upgrade authority ${params.upgradeCred.hash}, which is not ` +
-            `this deployment's upgrade_multisig (${deployment.upgradeMultisig.scriptHash}). This ` +
-            `fixture can satisfy only two authorities: a KEY credential the wallet holds, or the ` +
-            `upgrade_multisig whose config UTxO and script body it can reconstruct. An unrelated ` +
-            `script credential needs its own witness and its own satisfaction argument, neither ` +
-            `of which DeploymentParams records.`
+          `This transaction must be authorised by the SCRIPT credential ${authCred.hash}, which ` +
+            `is not this deployment's upgrade_multisig (${deployment.upgradeMultisig.scriptHash}). ` +
+            `This fixture can satisfy only two authorities: a KEY credential the wallet holds, or ` +
+            `the upgrade_multisig whose config UTxO and script body it can reconstruct. An ` +
+            `unrelated script credential needs its own witness and its own satisfaction argument, ` +
+            `neither of which DeploymentParams records.`
         );
       }
 
@@ -292,7 +378,7 @@ export async function upgradeProtocol(
       const configUtxo = await readUpgradeMultisigConfig(client, deployment);
 
       tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(Bytes.fromHex(params.upgradeCred.hash)),
+        stakeCredential: Credential.makeScriptHash(Bytes.fromHex(authCred.hash)),
         amount: 0n,
         // The withdraw handler ignores its redeemer entirely; a script-witnessed
         // withdrawal still REQUIRES one to be present.
@@ -320,19 +406,19 @@ export async function upgradeProtocol(
       // where adminPkh is the bootstrapping wallet's PAYMENT credential.
       const adminPkh = paymentCredentialHash(EvoAddress.toBech32(addressObj));
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(adminPkh) });
-    } else if (params.upgradeCred.type === "key") {
+    } else if (authCred.type === "key") {
       // withdraw-0: the entry's PRESENCE is the authorisation; the amount is
       // irrelevant to protocol_params, which only does has_key_or_fail. A key
       // credential carries no script and so needs no witness and no redeemer.
       tx = tx.withdraw({
-        stakeCredential: Credential.makeKeyHash(Bytes.fromHex(params.upgradeCred.hash)),
+        stakeCredential: Credential.makeKeyHash(Bytes.fromHex(authCred.hash)),
         amount: 0n,
       });
-      tx = tx.addSigner({ keyHash: KeyHash.fromHex(params.upgradeCred.hash) });
+      tx = tx.addSigner({ keyHash: KeyHash.fromHex(authCred.hash) });
     } else {
       throw new Error(
-        `The datum's upgrade_cred is neither a key nor a script credential: ` +
-          `${JSON.stringify(params.upgradeCred)}. This fixture can satisfy a KEY credential the ` +
+        `The credential this transaction must authorise as is neither a key nor a script ` +
+          `credential: ${JSON.stringify(authCred)}. This fixture can satisfy a KEY credential the ` +
           `wallet holds, or the SCRIPT credential of this deployment's upgrade_multisig ` +
           `(${deployment.upgradeMultisig.scriptHash}) — and nothing else.`
       );
@@ -356,4 +442,162 @@ export async function upgradeProtocol(
   const hash = typeof res === "string" ? res : EvoTransactionHash.toHex(res);
   await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
   return hash;
+}
+
+// ---------------------------------------------------------------------------
+// The two-phase authority handover
+//
+// Upstream (issue #125) refused the single-step form on purpose. A direct
+// rewrite of `upgrade_cred` reinstates the one-way brick: a typo, or the hash of
+// a script nobody ever deployed, becomes the authority and nothing can move it
+// back. What the two phases demand instead is EVIDENCE THAT THE INCOMING
+// AUTHORITY EXISTS, RUNS AND CONSENTS — which is exactly what a withdraw-0 from
+// the nominee's own credential is. The co-signature form drafted in #125 was
+// rejected because it would require the nominee to appear inside a transaction
+// built by someone else, which no governance action and no slowly-assembled
+// quorum can promise.
+// ---------------------------------------------------------------------------
+
+/**
+ * PHASE ONE. The SITTING authority nominates `nominee`, writing
+ * `pending_upgrade_cred = Some(nominee)`. Returns the transaction hash.
+ *
+ * Nothing takes effect. `upgrade_cred` is untouched and the nominee holds no
+ * power whatsoever until it activates itself in phase two — which is also why
+ * a nomination is revocable by another nomination (`None` revokes).
+ *
+ * ⚑ IT READS EVERYTHING EXCEPT THE NOMINEE FROM CHAIN, so it is runnable on its
+ * own against a protocol in any state. That is the property, not a convenience:
+ * a handover that half-happened is completed by calling the next phase, never by
+ * replaying this one from a variable some caller was holding (WORKLOG S-12).
+ *
+ * The authorisation is the DEFAULT branch — `sitting_authority_approves`, i.e.
+ * `pairs.has_key(withdrawals, old.upgrade_cred)`, the same rule `protocol_upgrade`
+ * uses. Only the promotion below departs from it.
+ */
+export async function nominateAuthority(
+  blueprint: PlutusBlueprint,
+  deployment: DeploymentParams,
+  nominee: Cip113Credential
+): Promise<string> {
+  return upgradeProtocol(blueprint, deployment, {
+    // `Constr(1, [])` — a value `voidData()` cannot represent, which is why
+    // this arm landing on chain is half of the proof that the single
+    // `protocolParamsRedeemer` call site really encodes the act it is given.
+    act: "NOMINATE_AUTHORITY",
+    // `nominate_authority` is ONE RECORD EQUALITY over everything else, so this
+    // spread must change exactly one field. Adding a second here is what test
+    // "REFUSED: a parameter change cannot ride inside a NominateAuthority"
+    // exists to catch.
+    change: (current) => ({ ...current, pendingUpgradeCred: nominee }),
+  });
+}
+
+export interface PromoteOptions {
+  /**
+   * Drop the nominee's authorisation entirely — no withdrawal, no signer.
+   * For the refusal test only: it is what makes
+   * `pairs.has_key(withdrawals, nominee)` the rail under observation.
+   */
+  readonly omitNomineeWithdrawal?: boolean;
+  /**
+   * Perturb the continuing datum AFTER the promotion has been applied to it.
+   * For the refusal test only.
+   *
+   * ⚑ APPLIED LAST, ON PURPOSE, so the transaction differs from a VALID
+   * promotion by exactly one variable — the smuggled field — and the record
+   * equality is the only rail that can be answering. A negative built by
+   * hand-assembling a different datum would violate several rails at once and
+   * could not say which one fired.
+   */
+  readonly smuggleChange?: (promoted: ProtocolParamsData) => ProtocolParamsData;
+}
+
+/**
+ * PHASE TWO. The standing NOMINEE promotes itself: `upgrade_cred` becomes the
+ * nomination and `pending_upgrade_cred` is cleared. Returns the transaction
+ * hash.
+ *
+ * ⛔⛔ THE SITTING AUTHORITY DOES NOT APPEAR IN THIS TRANSACTION AT ALL. Every
+ * OTHER arm of this validator is authorised by `old.upgrade_cred`;
+ * `promote_authority` is authorised by `old.pending_upgrade_cred` and by
+ * nothing else. A reader who assumes symmetry will add the sitting authority's
+ * withdrawal here and never notice the mistake, because an extra withdrawal is
+ * not REFUSED — it is simply not what the rule reads, so the failure names the
+ * missing nominee withdrawal instead. Mutation P1 (authorise with the sitting
+ * authority instead) is what proves this asymmetry was implemented rather than
+ * assumed; it is refused on chain.
+ *
+ * ⚑ THE NOMINEE IS READ FROM THE DATUM, NEVER FROM AN ARGUMENT — which is why
+ * this function takes none. A nominee passed in by a caller and a nominee on
+ * chain are two facts that can disagree, and only the on-chain one decides:
+ * the validator reads the datum, so the withdrawal this builds must be keyed on
+ * the same value the validator will read.
+ */
+export async function promoteAuthority(
+  blueprint: PlutusBlueprint,
+  deployment: DeploymentParams,
+  opts: PromoteOptions = {}
+): Promise<string> {
+  // ⛔ THE CLIENT-SIDE REFUSAL, AND IT FIRES BEFORE ANYTHING IS BUILT OR SPENT.
+  // On chain, promoting with no standing nomination dies on
+  // `expect Some(nominee) = old.pending_upgrade_cred` — an `expect` failure,
+  // which produces an evaluation error with an EMPTY TRACE LIST naming nothing.
+  // A check that fires before the expensive, irreversible half has already won
+  // (verification-harness §16b), and this one additionally converts a message
+  // that names nothing into one that names the protocol, the field and the
+  // remedy. MEASURED as mutation P4: deleting this guard and calling the
+  // function on a protocol with `pending = null` produces exactly that
+  // uninformative on-chain failure.
+  const client: any = await makeClient();
+  const { params } = await readCoordination(client, deployment);
+  if (params.pendingUpgradeCred === null) {
+    throw new Error(
+      `promoteAuthority: there is no standing nomination on this protocol — ` +
+        `pending_upgrade_cred is None, and promote_authority has nothing to promote. ` +
+        `The sitting authority (${params.upgradeCred.type} ${params.upgradeCred.hash}) must ` +
+        `run nominateAuthority() first; a promotion is phase TWO of two and cannot be the ` +
+        `first transaction of a handover.`
+    );
+  }
+
+  /**
+   * Re-read the nominee from the datum `upgradeProtocol` itself fetched. The
+   * pre-read above is the guard; THIS is the value that reaches the
+   * transaction, so the two cannot drift apart if the chain moves between them.
+   */
+  const requireNominee = (current: ProtocolParamsData): Cip113Credential => {
+    const nominee = current.pendingUpgradeCred;
+    if (nominee === null) {
+      throw new Error(
+        `promoteAuthority: the nomination disappeared between the pre-flight read and the ` +
+          `build — pending_upgrade_cred is now None. The sitting authority revoked it; ` +
+          `nominate again before promoting.`
+      );
+    }
+    return nominee;
+  };
+
+  return upgradeProtocol(blueprint, deployment, {
+    // `Constr(2, [])` — the other value `voidData()` cannot represent.
+    act: "PROMOTE_AUTHORITY",
+    change: (current) => {
+      // `promote_authority` is a PURE RECORD EQUALITY: `new == old` with
+      // `upgrade_cred: nominee` and `pending_upgrade_cred: None`, and nothing
+      // else. Written as a spread from `current` so a field added to the datum
+      // later is carried through automatically rather than silently dropped —
+      // the same reason upstream wrote the rail as one equality instead of
+      // field by field.
+      const promoted: ProtocolParamsData = {
+        ...current,
+        upgradeCred: requireNominee(current),
+        pendingUpgradeCred: null,
+      };
+      return opts.smuggleChange ? opts.smuggleChange(promoted) : promoted;
+    },
+    // ⛔ THE NOMINEE'S WITHDRAWAL, NOT THE SITTING AUTHORITY'S. See the block
+    // comment above; this one line is the whole asymmetry.
+    authoriseAs: requireNominee,
+    omitAuthority: opts.omitNomineeWithdrawal === true,
+  });
 }

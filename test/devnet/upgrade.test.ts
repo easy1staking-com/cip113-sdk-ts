@@ -21,26 +21,53 @@
  * regression". Read it as such, and keep this qualifier inside the acceptance
  * rather than beside it.
  *
- * ⛔ AND WHAT THE ACT PARAMETER DOES **NOT** SETTLE. Every test here passes
- * `act:` explicitly, and `upgradeProtocol` routes it through one
- * `protocolParamsRedeemer(...)` call site. That proves the redeemer FIELD is
- * load-bearing on chain — mutating `act` to "NOMINATE_AUTHORITY" in test 1
- * makes the validator refuse (see the mutation record in the slice audit). It
- * CANNOT prove that arm 0's bytes were produced by `protocolParamsRedeemer`
- * rather than by the `voidData()` it replaced: `ProtocolUpgrade` encodes as
- * `Constr(0, [])` and so does `voidData()`, and no decoder on chain or off can
- * tell the two apart. That half is discharged only when arms 1 and 2 —
- * `Constr(1, [])` / `Constr(2, [])`, which `voidData()` cannot represent —
- * travel through the same call site on chain, which is T-F03-3's
- * nominate/promote pair, not this file's.
+ * ⚠⚠ AND SO ARE THE HANDOVER TESTS — `nominateAuthority` AND `promoteAuthority`
+ * ARE FIRST-EVER EXECUTIONS TOO. `NominateAuthority` and `PromoteAuthority` had
+ * never been submitted by anything, anywhere, before the tests below. There is
+ * no prior working state, so "no regression" is not the success criterion here
+ * either: each is ONE OBSERVATION. That qualifier is part of the acceptance,
+ * not a footnote to it.
+ *
+ * ⛔ WHAT THE ACT PARAMETER SETTLES, AND WHAT REMAINS TRUE BY CONSTRUCTION.
+ * Every test here passes `act:` explicitly, and `upgradeProtocol` routes all
+ * three arms through ONE `protocolParamsRedeemer(...)` call site.
+ *
+ *   * SETTLED, on chain, by the handover tests below. `NominateAuthority` and
+ *     `PromoteAuthority` encode as `Constr(1, [])` and `Constr(2, [])` — two
+ *     values `voidData()` (which is `Constr(0, [])`) CANNOT PRODUCE. A green
+ *     nominate and a green promote therefore prove that that single call site
+ *     genuinely encodes the arm it is given, because had it been emitting
+ *     `voidData()` the validator would have run `protocol_upgrade` against a
+ *     datum whose `upgrade_cred`/`pending_upgrade_cred` had moved, and refused.
+ *     Mutations P2 and P3 (swapping the two arms) are the negative half of the
+ *     same proof: both are refused on chain.
+ *   * NOT SETTLED, AND NEVER WILL BE. Arm 0's bytes are byte-identical to
+ *     `voidData()`'s, so no decoder on chain or off can distinguish a
+ *     `protocolParamsRedeemer("PROTOCOL_UPGRADE")` caller from a stale
+ *     `voidData()` one. ⇒ **That residue is closed BY CONSTRUCTION — one call
+ *     site, no default on `act` — NOT BY DEMONSTRATION**, and no devnet run can
+ *     ever close it. Whoever changes `UpgradeOptions.act` or that call site is
+ *     removing the only guarantee arm 0 has.
  */
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { requireDevnet, makeClient } from "../harness/yaci.mjs";
+import { requireDevnet, makeClient, settleWallet, waitFor } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
-import { readCoordination, upgradeProtocol } from "../harness/upgrade.js";
+import {
+  readCoordination,
+  upgradeProtocol,
+  nominateAuthority,
+  promoteAuthority,
+} from "../harness/upgrade.js";
+import {
+  stakingCredentialHash,
+  EvoAddress,
+  EvoTransactionHash,
+  type Cip113Credential,
+  type DeploymentParams,
+} from "../../dist/index.js";
 
 /** Which Ogmios validator purpose, and which numeric error, a negative expects. */
 interface ExpectedRefusal {
@@ -153,6 +180,66 @@ function assertRejectedByTheValidator(expected: ExpectedRefusal = {}) {
     }
     return true;
   };
+}
+
+/**
+ * The nominee K: the bootstrapping wallet's own stake KEY, as a CIP-113
+ * credential. Read from the wallet, not hardcoded, so it is the same credential
+ * `bootstrap.ts` registered.
+ *
+ * ⛔ HAZARD 3 — A KEY WITHDRAW-0 NEEDS A FOURTH THING. A script withdraw-0
+ * needs the withdrawal entry, a script witness and a registered stake
+ * credential. A KEY one needs a **DRep delegation** on top: Conway rejects a
+ * withdrawal from a credential that does not engage in on-chain governance with
+ * code **3150**, *"credentials that do not engage in on-chain governance"*, EVEN
+ * FOR A ZERO WITHDRAWAL. `bootstrap.ts` tx3/tx4 registers AND `AlwaysAbstain`-
+ * delegates this exact key so a promotion can present it.
+ *
+ * ⇒ If a promotion below ever fails with 3150, the defect is in the bootstrap's
+ * idempotence (a key registered by an earlier run and never delegated), NOT in
+ * these tests or in `promoteAuthority`.
+ */
+async function nomineeKey(client: any): Promise<Cip113Credential> {
+  const bech32 = EvoAddress.toBech32(await client.address());
+  return { type: "key", hash: stakingCredentialHash(bech32) };
+}
+
+/**
+ * Wait until the provider agrees the protocol-params UTxO is the one `txHash`
+ * produced, then let the wallet view settle too.
+ *
+ * ⚠ REQUIRED BETWEEN CHAINED PHASES, and it is not decoration. Kupo trails the
+ * node: immediately after a confirmed spend of the params UTxO, `getUtxos`
+ * still reports the SPENT one. The next phase would then build against a UTxO
+ * the node knows is gone and be rejected with code 3117, "unknown UTxO
+ * references as inputs" — an error that names a UTxO and reads like a builder
+ * defect. The bootstrap settles at its own entry and exit; a test chaining
+ * nominate → promote → upgrade owns the gaps in between (yaci.mjs
+ * `settleWallet`'s own note).
+ *
+ * ⚑ It waits on the UTxO's PRODUCING TRANSACTION, never on the datum content.
+ * Waiting until the datum says what the test is about to assert would make the
+ * assertion circular — it could then only ever time out, never fail with a
+ * value. This waits on a coordinate and leaves every claim about content to the
+ * assertions.
+ */
+async function settleParams(
+  client: any,
+  deployment: DeploymentParams,
+  txHash: string
+): Promise<void> {
+  await waitFor(
+    async () => {
+      const { utxo } = await readCoordination(client, deployment);
+      return EvoTransactionHash.toHex(utxo.transactionId) === txHash;
+    },
+    {
+      timeoutMs: 90_000,
+      intervalMs: 1_000,
+      what: `the protocol-params UTxO to be the output of ${txHash}`,
+    }
+  );
+  await settleWallet(client, await client.address());
 }
 
 before(async () => {
@@ -337,4 +424,343 @@ test("REFUSED: a mutable credential that is not 28 bytes — the one-way brick",
 
   const after = (await readCoordination(client, deployment)).params;
   assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "authority unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// The two-phase authority handover (T-F03-3)
+//
+// Upstream splits a handover into two transactions on purpose: a direct rewrite
+// of `upgrade_cred` would reinstate the one-way brick (a typo, or the hash of a
+// script nobody deployed, takes the protocol over and nothing can ever move it
+// back). The evidence the two phases demand instead is that the INCOMING
+// authority exists, runs and consents — which is what the nominee's own
+// withdraw-0 in phase two is.
+//
+// ⛔ THE ASYMMETRY THAT DECIDES EVERY TEST BELOW. `protocol_upgrade` and
+// `nominate_authority` both require the SITTING authority's withdraw-0.
+// `promote_authority` requires the NOMINEE's, and ONLY the nominee's — the
+// sitting authority does not appear in a promotion at all. A reader who assumes
+// symmetry will add the sitting authority's withdrawal and never notice,
+// because an extra withdrawal is not refused; it is simply not what the rule
+// reads. Mutation P1 is what proves this was implemented rather than assumed.
+// ---------------------------------------------------------------------------
+
+test("the upgrade authority is handed over from the multisig to a key — a before/after delta", async () => {
+  // ⚠⚠ A FIRST-EVER EXECUTION, TWICE OVER. Neither `nominate_authority` nor
+  // `promote_authority` had ever been submitted by this repo — or, as far as
+  // this repo knows, by anything — before this test. A green here is ONE
+  // OBSERVATION apiece with nothing behind it: not restored parity, not "no
+  // regression". Both qualifiers are part of what this test asserts.
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const K = await nomineeKey(client);
+
+  // ---- step 1: the sitting state, read from chain -------------------------
+  const genesis = (await readCoordination(client, deployment)).params;
+  assert.equal(genesis.upgradeCred.type, "script", "the bootstrap installs a SCRIPT authority");
+  assert.equal(
+    genesis.upgradeCred.hash,
+    deployment.upgradeMultisig.scriptHash,
+    "and it is THIS deployment's upgrade_multisig — the BEFORE half of the delta"
+  );
+  assert.equal(genesis.pendingUpgradeCred, null, "and no handover is in flight");
+
+  // ---- step 2: NOMINATE — phase one ---------------------------------------
+  // Authorised by the SITTING authority (the multisig), through the routed
+  // branch `upgradeProtocol` already had. Nothing takes effect: the nominee
+  // holds no power at all until it activates itself.
+  const nominateHash = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nominateHash);
+  const nominated = (await readCoordination(client, deployment)).params;
+
+  // ⚑ THE RECORD, NOT THE ABSENCE OF A CHANGE. "nothing else moved" would pass
+  // just as happily if the nomination had silently not been written — a test
+  // that passes because nothing happened cannot tell you WHY nothing happened.
+  // So: the nomination IS `Some`, it IS a key credential, and it names EXACTLY
+  // K.
+  assert.notEqual(nominated.pendingUpgradeCred, null, "a nomination must be standing");
+  assert.equal(nominated.pendingUpgradeCred!.type, "key", "the nominee is a KEY credential");
+  assert.equal(
+    nominated.pendingUpgradeCred!.hash,
+    K.hash,
+    "and it is exactly K — the wallet's own registered, DRep-delegated stake key"
+  );
+  // And `upgrade_cred` has NOT moved. Phase one changes who MAY take over, not
+  // who HAS authority.
+  assert.equal(nominated.upgradeCred.type, "script", "the sitting authority is still a script");
+  assert.equal(
+    nominated.upgradeCred.hash,
+    deployment.upgradeMultisig.scriptHash,
+    "and still the upgrade_multisig — a nomination moves nothing"
+  );
+
+  // ---- step 3: PROMOTE — phase two ----------------------------------------
+  // ⛔ AUTHORISED BY THE NOMINEE, NOT BY THE MULTISIG. See the asymmetry note
+  // above the block. `promoteAuthority` takes no nominee argument: it reads the
+  // nominee out of the datum, because the datum is what the validator reads.
+  const promoteHash = await promoteAuthority(blueprint, deployment);
+  await settleParams(client, deployment, promoteHash);
+  const promoted = (await readCoordination(client, deployment)).params;
+
+  // THE DELTA — the point of the whole slice. Both halves, from chain.
+  assert.equal(promoted.upgradeCred.type, "key", "the authority is now a KEY credential");
+  assert.equal(promoted.upgradeCred.hash, K.hash, "and it is K — the AFTER half of the delta");
+  assert.equal(promoted.pendingUpgradeCred, null, "and the nomination is consumed");
+
+  // `promote_authority` is a PURE RECORD EQUALITY: the only permitted
+  // difference is that the nomination became the authority. Asserted from
+  // chain, field by field, against the state read after phase one.
+  assert.equal(promoted.plgCred.hash, nominated.plgCred.hash, "dispatcher unmoved by the promotion");
+  assert.equal(
+    promoted.issuanceLogicCred.hash,
+    nominated.issuanceLogicCred.hash,
+    "issuance_logic unmoved — the newest field, and the one a field-order defect would move"
+  );
+  assert.equal(promoted.transferCred.hash, nominated.transferCred.hash, "transfer unmoved");
+  assert.equal(promoted.thirdPartyCred.hash, nominated.thirdPartyCred.hash, "third_party unmoved");
+
+  // ⚑ THE DELTA, PRINTED. Not decoration: the assertions above prove the
+  // handover happened, and this line is what lets a reader of a run log say
+  // WHICH credentials it happened between. A green row records that a
+  // comparison held; only the values record what was compared.
+  console.error(
+    `  [handover] upgrade_cred: ${genesis.upgradeCred.type}/${genesis.upgradeCred.hash}` +
+      ` -> ${promoted.upgradeCred.type}/${promoted.upgradeCred.hash}`
+  );
+
+  // ---- step 4: the new authority actually AUTHORISES ----------------------
+  // ⛔ THIS IS THE STEP THAT PROVES THE HANDOVER IS REAL rather than merely
+  // written. A datum naming K is a claim; K spending the params UTxO is the
+  // fact. `upgradeProtocol` routes on the DATUM's credential, so this upgrade
+  // takes the KEY branch of that router.
+  //
+  // ⚑ AND IT REVIVES A BRANCH THAT WAS DEAD IN COVERAGE (T-F03-2 audit F-5):
+  // every devnet test installs a SCRIPT authority, so nothing anywhere
+  // executed `upgradeProtocol`'s key path. After this promotion it does.
+  //
+  // ⚠ A SYNTHETIC 28-BYTE HASH IS ADMISSIBLE HERE and it is a deliberate scope
+  // limit, not laziness. The claim under test is "K can authorise a parameter
+  // change", and `protocol_params` requires of `transfer_cred` only that it be
+  // 28 bytes — it never dereferences it. This step therefore says NOTHING about
+  // whether the resulting protocol can still transfer a token; it is the last
+  // step against a throwaway fixture and it is not asked to.
+  const newTransferCred = "5e".repeat(28);
+  assert.notEqual(
+    newTransferCred,
+    promoted.transferCred.hash,
+    "the swap must actually change something"
+  );
+  const upgradeHash = await upgradeProtocol(blueprint, deployment, {
+    act: "PROTOCOL_UPGRADE",
+    change: (p) => ({ ...p, transferCred: { type: "script", hash: newTransferCred } }),
+  });
+  await settleParams(client, deployment, upgradeHash);
+  const underK = (await readCoordination(client, deployment)).params;
+
+  assert.equal(underK.transferCred.hash, newTransferCred, "K authorised a real parameter change");
+  assert.notEqual(
+    underK.transferCred.hash,
+    promoted.transferCred.hash,
+    "and the credential genuinely moved"
+  );
+  assert.equal(underK.upgradeCred.type, "key", "K is still the authority afterwards");
+  assert.equal(underK.upgradeCred.hash, K.hash, "and still exactly K");
+  assert.equal(underK.pendingUpgradeCred, null, "and a ProtocolUpgrade started no new handover");
+});
+
+/**
+ * R-5, direction one. `protocol_upgrade` requires
+ * `new.pending_upgrade_cred == old.pending_upgrade_cred`, so a handover can
+ * never BEGIN inside a transaction presenting itself as a parameter change.
+ *
+ * ⚑ POSITIVE CONTROL, ONE VARIABLE APART: the same nomination submitted under
+ * `act: "NOMINATE_AUTHORITY"` is exactly step 2 of test 1, and must have
+ * succeeded in this same run. Without that neighbour this test would prove the
+ * validator refuses things, not that it refuses the right thing.
+ */
+test("REFUSED: a nomination cannot ride inside a ProtocolUpgrade", async () => {
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const K = await nomineeKey(client);
+  const before = (await readCoordination(client, deployment)).params;
+  assert.equal(before.pendingUpgradeCred, null, "fixture precondition: nothing nominated yet");
+
+  await assert.rejects(
+    () =>
+      upgradeProtocol(blueprint, deployment, {
+        // The sitting authority's withdrawal IS present and IS valid — this
+        // transaction is refused for its SHAPE, not for its authorisation.
+        act: "PROTOCOL_UPGRADE",
+        change: (p) => ({ ...p, pendingUpgradeCred: K }),
+      }),
+    // `spend` is `protocol_params`, where this rail lives. `3012` is a
+    // validator verdict; `3011` would be a malformed transaction, and the two
+    // are not interchangeable evidence.
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
+    "a ProtocolUpgrade that writes a nomination must be rejected"
+  );
+
+  const after = (await readCoordination(client, deployment)).params;
+  assert.equal(after.pendingUpgradeCred, null, "no nomination was written");
+  assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "and the authority did not move");
+});
+
+/**
+ * R-5, direction two. `nominate_authority` is ONE RECORD EQUALITY over
+ * everything except the nomination, so a parameter change can never ride
+ * inside a handover's first phase.
+ *
+ * ⚑ POSITIVE CONTROL, ONE VARIABLE APART: remove the `transferCred` line below
+ * and this is test 1's step 2 verbatim, which succeeded in this same run. The
+ * single variable between the green and the red is the smuggled parameter.
+ */
+test("REFUSED: a parameter change cannot ride inside a NominateAuthority", async () => {
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const K = await nomineeKey(client);
+  const before = (await readCoordination(client, deployment)).params;
+
+  await assert.rejects(
+    () =>
+      upgradeProtocol(blueprint, deployment, {
+        act: "NOMINATE_AUTHORITY",
+        change: (p) => ({
+          ...p,
+          pendingUpgradeCred: K,
+          transferCred: { type: "script", hash: "cd".repeat(28) },
+        }),
+      }),
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
+    "a NominateAuthority carrying a parameter change must be rejected"
+  );
+
+  const after = (await readCoordination(client, deployment)).params;
+  assert.equal(after.pendingUpgradeCred, null, "the nomination did not land either");
+  assert.equal(after.transferCred.hash, before.transferCred.hash, "and transfer did not move");
+});
+
+/**
+ * The rail: `pairs.has_key(withdrawals, nominee)` inside `promote_authority`.
+ * This is the evidence upstream demands — that the incoming authority exists,
+ * runs and consents — and it is the ONLY thing standing between a nomination
+ * and a takeover.
+ */
+test("REFUSED: a promotion without the nominee's own withdraw-0", async () => {
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const K = await nomineeKey(client);
+
+  const nominateHash = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nominateHash);
+  const before = (await readCoordination(client, deployment)).params;
+  assert.equal(before.pendingUpgradeCred!.hash, K.hash, "precondition: K is the standing nominee");
+
+  await assert.rejects(
+    () => promoteAuthority(blueprint, deployment, { omitNomineeWithdrawal: true }),
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
+    "a promotion with no withdrawal from the nominee must be rejected"
+  );
+
+  // ⚑ A REJECTED TRANSACTION THAT MOVED SOMETHING WOULD BE WORSE THAN ONE THAT
+  // SUCCEEDED. Both halves of the state, asserted as records.
+  const after = (await readCoordination(client, deployment)).params;
+  assert.equal(after.upgradeCred.type, "script", "the authority is still the multisig");
+  assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "and did not move");
+  assert.notEqual(after.pendingUpgradeCred, null, "and the nomination is STILL standing");
+  assert.equal(after.pendingUpgradeCred!.hash, K.hash, "and still names exactly K");
+});
+
+/**
+ * The rail: `promote_authority`'s record equality — the only permitted
+ * difference is that the nomination became the authority.
+ *
+ * Upstream's reason, which is the whole argument for splitting the phases:
+ * nomination and revocation RACE BY CONSTRUCTION. If the nominee wins that
+ * race, the outcome must be the handover the sitting authority already
+ * consented to — never that handover PLUS an arbitrary protocol change
+ * smuggled into the very transaction the sitting authority was trying to
+ * abort.
+ *
+ * ⚑ POSITIVE CONTROL, ONE VARIABLE APART: drop `smuggleChange` and this is
+ * test 1's step 3, which succeeded in this same run.
+ */
+test("REFUSED: a promotion cannot smuggle a parameter change", async () => {
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const K = await nomineeKey(client);
+
+  const nominateHash = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nominateHash);
+  const before = (await readCoordination(client, deployment)).params;
+  assert.equal(before.pendingUpgradeCred!.hash, K.hash, "precondition: K is the standing nominee");
+
+  await assert.rejects(
+    () =>
+      promoteAuthority(blueprint, deployment, {
+        // The nominee's withdrawal IS present and IS valid. The single variable
+        // is the extra field in the continuing datum.
+        smuggleChange: (p) => ({
+          ...p,
+          thirdPartyCred: { type: "script", hash: "ef".repeat(28) },
+        }),
+      }),
+    assertRejectedByTheValidator({ purpose: "spend", code: 3012 }),
+    "a promotion carrying a parameter change must be rejected"
+  );
+
+  const after = (await readCoordination(client, deployment)).params;
+  assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "the authority did not move");
+  assert.equal(after.thirdPartyCred.hash, before.thirdPartyCred.hash, "third_party did not move");
+  assert.equal(after.pendingUpgradeCred!.hash, K.hash, "and the nomination is still standing");
+});
+
+/**
+ * The CLIENT-SIDE veto, and the one refusal in this file that is deliberately
+ * NOT asserted through `assertRejectedByTheValidator` — because the whole point
+ * is that it never reaches a validator.
+ *
+ * ⛔ MEASURED, mutation P4 (2026-09-10, this devnet): delete this guard, make
+ * `requireNominee` fall back to the sitting authority so the transaction is
+ * actually built, and promote a protocol whose `pending_upgrade_cred` is
+ * `None`. The result is an ON-CHAIN refusal from
+ * `expect Some(nominee) = old.pending_upgrade_cred`, reported by Ogmios as:
+ *
+ *     code 3012, validationError "An error has occurred: The machine
+ *     terminated because of an error, either from a built-in function or from
+ *     an explicit use of 'error'", **traces: []**
+ *
+ * ⇒ THAT MESSAGE NAMES NOTHING. Not the field, not the protocol, not the
+ * remedy — and it is byte-indistinguishable from the four legitimate refusals
+ * above. A check that fires before anything is built or spent has already won
+ * (verification-harness §16b), and here it additionally converts a bare 3012
+ * into a sentence a caller can act on.
+ *
+ * This test costs nothing on chain: it asserts the guard fires BEFORE any
+ * transaction exists, which is the property.
+ */
+test("REFUSED, client-side: promoting a protocol with no standing nomination", async () => {
+  const blueprint = loadStandardBlueprint();
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const before = (await readCoordination(client, deployment)).params;
+  assert.equal(before.pendingUpgradeCred, null, "fixture precondition: nothing is nominated");
+
+  await assert.rejects(
+    () => promoteAuthority(blueprint, deployment),
+    // ⚑ THE MESSAGE IS THE ASSERTION. `assert.rejects(fn)` alone passes on ANY
+    // rejection, including the very on-chain 3012 this guard exists to
+    // pre-empt — so the pattern below is what distinguishes "refused early, by
+    // name" from "refused late, by nothing".
+    /no standing nomination.*pending_upgrade_cred is None/s,
+    "promoteAuthority must refuse by name, client-side, before building anything"
+  );
+
+  const after = (await readCoordination(client, deployment)).params;
+  assert.equal(after.pendingUpgradeCred, null, "and nothing was submitted");
+  assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "and the authority did not move");
 });
