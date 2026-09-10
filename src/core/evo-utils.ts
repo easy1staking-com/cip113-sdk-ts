@@ -1267,6 +1267,80 @@ export function buildCIP68FTDatum(meta: CIP68MetadataInput): Data.Data {
 }
 
 // ---------------------------------------------------------------------------
+// The inline-datum bound
+// ---------------------------------------------------------------------------
+
+/**
+ * Serialised size, in bytes, of an inline datum.
+ *
+ * The on-chain counterpart is `bytearray.length(builtin.serialise_data(d))`
+ * inside `is_seizable_output_shape_bounded` (upstream `lib/assets.ak`), which
+ * every script that creates a programmable-logic-base output applies as
+ * `... <= max_inline_datum_bytes`. Since alpha.4 that includes `issuance_logic`,
+ * so a CIP-68 mint datum is bounded at BIRTH — the old issuance exemption is
+ * expired, and CIP-68 reference tokens carrying data-URI logos were the
+ * standing example of the kilobyte datum it now refuses.
+ *
+ * TWO ENCODERS, AND ONLY ONE DIRECTION IS SAFE. This measures with Evolution's
+ * `Data.toCBORBytes`; the chain measures with Plutus's `serialise_data`. They
+ * are different implementations and no offline instrument can prove they agree.
+ * The SDK must measure GREATER THAN OR EQUAL TO the chain: if it ever measures
+ * fewer bytes than the ledger does, it accepts a record the ledger then
+ * refuses, which is precisely the failure the bound exists to prevent.
+ *
+ * That direction is NOT settled here, and nothing in `test/cip68-bound.test.mjs`
+ * establishes it — every figure in that file comes from this same encoder. It
+ * is settled by the devnet at-bound SUCCESS in T-F04-4: a datum measuring
+ * exactly `maxInlineDatumBytes` by this function, accepted by a real ledger.
+ * Until that test is green, the agreement of the two encoders is an ASSUMPTION.
+ */
+export function inlineDatumBytes(datum: Data.Data): number {
+  return Data.toCBORBytes(datum).length;
+}
+
+/**
+ * Refuse an inline datum larger than `maxInlineDatumBytes`, naming the bound,
+ * the measured size and the parameter the caller would have to change.
+ *
+ * THE COMPARISON IS `<=`, MATCHING THE CHAIN. A datum measuring EXACTLY
+ * `maxInlineDatumBytes` is legal and MUST be accepted. A `<` here would read as
+ * prudence and would instead remove CIP-68 registration from this SDK for the
+ * boundary case: the caller sees a refusal, concludes the feature does not
+ * work, and there is no incident, no log and no corruption for anyone to
+ * investigate. `test/cip68-bound.test.mjs` pins both directions one byte apart
+ * for that reason.
+ *
+ * `datum` is a `Data.Data` and NOT a `CIP68MetadataInput` on purpose: the thing
+ * the chain bounds is the serialised datum, so a helper taking metadata would
+ * be measuring a different object one step removed from the rule it mirrors.
+ *
+ * @param datum   the inline datum that will be attached to the output
+ * @param maxInlineDatumBytes  the deployment's bound (`DeploymentParams`)
+ * @param what    what is being measured, for the refusal message
+ */
+export function assertInlineDatumWithinBound(
+  datum: Data.Data,
+  maxInlineDatumBytes: number,
+  what: string,
+): void {
+  const size = inlineDatumBytes(datum);
+  if (size <= maxInlineDatumBytes) return;
+
+  throw new Error(
+    `${what}: inline datum is ${size} bytes, which exceeds this deployment's ` +
+      `maxInlineDatumBytes of ${maxInlineDatumBytes}. The scripts that create ` +
+      `programmable-token outputs refuse a datum over the bound, so this ` +
+      `transaction would be rejected on chain. Remedy: shorten the metadata — ` +
+      `an embedded data-URI logo is almost always the cause, since a record ` +
+      `with every field at a documented cap is only 419 bytes — or use a ` +
+      `deployment whose maxInlineDatumBytes is larger. Note that the bound is ` +
+      `baked into four script hashes (transfer, third_party, unfracking, ` +
+      `issuance_logic), so raising it produces a DIFFERENT protocol instance ` +
+      `rather than a configuration change.`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Re-exports for convenience
 // ---------------------------------------------------------------------------
 
