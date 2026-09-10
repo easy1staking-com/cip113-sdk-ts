@@ -237,9 +237,35 @@ export async function settleWallet(client, addressObj, { attempts = 20, interval
  * Ogmios method) — hence "Kupmios" and "getProtocolParameters failed" as the
  * two named shapes, plus the generic connection/timeout shapes a transient
  * network read can surface as.
+ *
+ * ⛔ THE KUPMIOS SHAPE IS ENUMERATED, NOT WILDCARDED, AND THAT IS THE WHOLE
+ * POINT. Evolution wraps its provider operations as
+ *
+ *   node_modules/@evolution-sdk/evolution/src/sdk/provider/internal/KupmiosEffects.ts
+ *   const wrapError = (operation) => (cause) =>
+ *     Effect.fail(new Provider.ProviderError({ message: `Kupmios ${operation} failed`, cause }))
+ *
+ * — the LEDGER'S REASON GOES IN `cause`; the MESSAGE gets the operation name
+ * and nothing else. So a script refusal raised during `build()` arrives as the
+ * bare string `"Provider evaluation failed: Kupmios evaluateTx failed"`, which
+ * a `Kupmios .*failed` wildcard matches and LEDGER_VERDICT cannot see, because
+ * no code is present in the message at all. That combination RETRIED A LEDGER
+ * VERDICT three times (T-D19 round 1, MEASURED).
+ *
+ * The ten wrapped operations are, exhaustively: evaluateTx, getDatum,
+ * getDelegation, getProtocolParameters, getScript, getUtxoByUnit, getUtxos,
+ * getUtxosByOutRef, getUtxosWithUnit, retrieveDatum. `evaluateTx` is the only
+ * one that can carry a ledger verdict, so the nine READ-ONLY operations are
+ * listed here and `evaluateTx` is not. (`submitTx` does not use this wrapper
+ * at all; it interpolates its own reason.)
+ *
+ * ⛔ A POSITIVE list, deliberately — NOT a negative lookahead excluding
+ * `evaluateTx`. If Evolution adds an operation, an unknown name is NOT
+ * retried: this fails CLOSED, which is the safe direction, and it is the
+ * design this comment has claimed since round 1.
  */
 const TRANSIENT_SIGNATURE =
-  /getProtocolParameters failed|Kupmios .*failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i;
+  /getProtocolParameters failed|Kupmios (getProtocolParameters|getUtxos|getUtxosWithUnit|getUtxoByUnit|getUtxosByOutRef|getDatum|retrieveDatum|getScript|getDelegation) failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i;
 
 /**
  * Ledger verdicts a transient retry must NEVER catch — checked FIRST and wins
@@ -252,6 +278,52 @@ const TRANSIENT_SIGNATURE =
  * defect behind a false "it just needed a retry".
  */
 const LEDGER_VERDICT = /\b(3010|3011|3012|3117|3125|3145|3150)\b/;
+
+/**
+ * The text of an error AND of every `cause` beneath it, joined.
+ *
+ * ⛔ THE BACKSTOP FOR THE WHOLE CLASS. Evolution puts the operation name in
+ * `message` and the ledger's reason in `cause` (see TRANSIENT_SIGNATURE), so a
+ * predicate that reads only `err.message` is an instrument pointed away from
+ * its subject: it returns a clean, plausible "no verdict here" for every
+ * refusal the provider wraps. LEDGER_VERDICT is tested against THIS instead.
+ *
+ * `TRANSIENT_SIGNATURE` deliberately stays on the message ONLY — a verdict
+ * nested in a cause must not be resurrected as transient by a transport-ish
+ * phrase deeper in the chain.
+ *
+ * A false positive here means "do not retry", which is fail-safe; that is the
+ * direction to prefer whenever the two guards disagree.
+ *
+ * This is `.mjs` and cannot import the `.ts` explain-error helper, hence the
+ * local walk. Bounded by depth and by a seen-set, so a cyclic `cause` (Effect
+ * wrappers do produce them) terminates instead of hanging.
+ */
+function errorChainText(err, maxDepth = 8) {
+  const parts = [];
+  const seen = new Set();
+  let node = err;
+  for (let depth = 0; depth <= maxDepth && node != null; depth++) {
+    if (typeof node === "object" || typeof node === "function") {
+      if (seen.has(node)) break;
+      seen.add(node);
+      if (typeof node.message === "string") parts.push(node.message);
+      // Ogmios reports its verdict as a NUMERIC `code` field beside the prose,
+      // so the code is frequently absent from every message in the chain.
+      if (node.code !== undefined) parts.push(`code ${String(node.code)}`);
+      try {
+        parts.push(JSON.stringify(node).slice(0, 4000));
+      } catch {
+        // cyclic or non-serialisable — the message/code above still counted
+      }
+      node = node.cause;
+    } else {
+      parts.push(String(node));
+      break;
+    }
+  }
+  return parts.join(" | ");
+}
 
 /**
  * Retry `fn` a bounded number of times, but ONLY on a provider/transport
@@ -282,7 +354,10 @@ export async function retryTransient(fn, { attempts = 3, delayMs = 1500, label =
       return result;
     } catch (err) {
       const msg = String(err?.message ?? err);
-      if (LEDGER_VERDICT.test(msg) || !TRANSIENT_SIGNATURE.test(msg)) throw err;
+      // LEDGER_VERDICT reads the whole cause chain, TRANSIENT_SIGNATURE reads
+      // the message only — see errorChainText for why the asymmetry is load-
+      // bearing rather than an oversight.
+      if (LEDGER_VERDICT.test(errorChainText(err)) || !TRANSIENT_SIGNATURE.test(msg)) throw err;
       lastErr = err;
       if (attempt === attempts) {
         console.error(

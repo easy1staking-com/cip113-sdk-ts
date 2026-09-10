@@ -1079,14 +1079,21 @@ export async function bootstrapProtocol(
     // decides, on the SAME predicate, whether to rethrow or fall through to
     // delegateOnly() — narrowness is unchanged, only the log line is.
     await submitAndWait(built, "tx3-key-register-delegate", {
-      tolerate: (msg) => msg.includes("already known credential") || msg.includes("3145"),
+      // ⛔ \b3145\b, NOT includes("3145"): the real message is a full Ogmios
+      // JSON body carrying tx hashes, policy ids and lovelace figures, so an
+      // unanchored "3145" matches a substring of an unrelated number at a
+      // percent-level rate — and a false positive here prints a FALSE
+      // explanation ("credential already registered … expected") in place of
+      // the full dump, which is strictly worse than the loud output it replaced.
+      tolerate: (msg) => msg.includes("already known credential") || /\b3145\b/.test(msg),
       tolerateNote:
         "credential already registered on this devnet — expected, delegateOnly() runs next",
     });
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);
+    // Same predicate as `tolerate` above, and anchored for the same reason.
     const alreadyRegistered =
-      msg.includes("already known credential") || msg.includes("3145");
+      msg.includes("already known credential") || /\b3145\b/.test(msg);
     if (!alreadyRegistered) throw err;
     // Registered by an earlier bootstrap on this devnet. The DELEGATION still
     // has to exist for the withdraw-0 to be accepted, and re-delegating an

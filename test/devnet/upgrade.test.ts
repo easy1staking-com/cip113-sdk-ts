@@ -53,7 +53,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { requireDevnet, makeClient, settleWallet, waitFor, retryTransient } from "../harness/yaci.mjs";
+import { requireDevnet, makeClient, settleWallet, waitFor } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import {
   readCoordination,
@@ -933,77 +933,10 @@ test("withdrawalCredentials reads back a TWO-entry withdrawal set in full — no
   );
 });
 
-/**
- * T-D19 guard, offline — the retry predicate.
- *
- * ⛔ M-A's target: `retryTransient` must NEVER retry a ledger verdict, even
- * one whose text happens to brush a transient-looking phrase. This is the
- * negative half of the pair below and it is the one the invariant actually
- * rests on — "no ledger verdict is ever retried" is a claim about THIS
- * function, checkable with no chain at all.
- */
-test("retryTransient: a ledger verdict (e.g. 3012) fails on the first attempt, never retried", async () => {
-  let calls = 0;
-  const alwaysRefused = async () => {
-    calls++;
-    // Deliberately ALSO brushes a transient-looking word, to prove the
-    // ledger-verdict check wins over the transient-signature match rather
-    // than the two merely not colliding by luck in the happy case.
-    throw new Error(
-      "code 3012, validationError: script refused (Kupmios getProtocolParameters failed, incidentally)"
-    );
-  };
-
-  await assert.rejects(
-    () => retryTransient(alwaysRefused, { attempts: 3, delayMs: 1, label: "test-ledger-verdict" }),
-    /3012/,
-    "the ledger verdict must propagate, not be swallowed by a retry"
-  );
-  assert.equal(calls, 1, "a ledger verdict must fail on the FIRST attempt, exactly as with no retry at all");
-});
-
-/**
- * T-D19 guard, offline — the retry's positive case AND its visibility.
- *
- * ⛔ M-C's target: task 2 required every retry that fires to be VISIBLE in
- * the log, naming the attempt and the matched signature — this pins that.
- * Removing the log call in `retryTransient` (M-C) reddens this test; it does
- * not touch the ledger-verdict guard above, which is why the two mutations
- * (M-A, M-C) need two separate tests to tell apart.
- */
-test("retryTransient: a transient provider signature IS retried, and the retry is logged", async () => {
-  let calls = 0;
-  const failsOnceThenSucceeds = async () => {
-    calls++;
-    if (calls === 1) throw new Error("Failed to fetch protocol parameters: Kupmios getProtocolParameters failed");
-    return "ok";
-  };
-
-  const originalError = console.error;
-  const lines: string[] = [];
-  console.error = (...args: unknown[]) => {
-    lines.push(args.map(String).join(" "));
-  };
-  let result: string;
-  try {
-    result = await retryTransient(failsOnceThenSucceeds, {
-      attempts: 3,
-      delayMs: 1,
-      label: "test-transient",
-    });
-  } finally {
-    console.error = originalError;
-  }
-
-  assert.equal(result, "ok", "the operation must eventually succeed once the transient clears");
-  assert.equal(calls, 2, "it must have been retried exactly once — attempt 1 failed, attempt 2 succeeded");
-  // ⇒ THE DISTINGUISHING SIGNAL: an auditor tells "succeeded on attempt 2"
-  // apart from "succeeded on attempt 1" by the PRESENCE of this line, not by
-  // re-running the fixture. Remove the log call (M-C) and this goes red while
-  // `calls === 2` still holds — proving the assertion is on the log, not the
-  // retry mechanics.
-  const retryLine = lines.find((l) => l.includes("[retry]") && l.includes("test-transient"));
-  assert.ok(retryLine, "a retry that fires must log a [retry] line naming the label");
-  assert.match(retryLine!, /attempt 1\/3/, "the log must name WHICH attempt failed");
-  assert.match(retryLine!, /getProtocolParameters failed|Kupmios/, "the log must name the matched signature");
-});
+// ⛔ The two `retryTransient` guards that stood here in round 1 have MOVED to
+// `test/retry.test.mjs`. They were pure offline logic gated behind this file's
+// `before(requireDevnet)`, so the invariant "no ledger verdict is ever retried"
+// was defended only on a machine with a live devnet — and CI does not run
+// test:devnet. `npm test` globs `test/*.test.mjs`, so they now run on every
+// push. The withdrawalCredentials reader above stays here: it belongs with the
+// upgrade harness (T-F03-3 residue R-1).
