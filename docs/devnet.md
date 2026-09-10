@@ -71,9 +71,18 @@ kills existing yaci-cli processes *before* parsing arguments. It then leaves an 
 port 10000, which makes the next `up` fail with `BindException: Address already in use`. Do not
 run `--help` against a devnet you care about.
 
-**`yaci-devkit`'s exit code cannot be trusted.** The npx wrapper exits **0** while the underlying
-yaci-cli exits 1. A CI step that only checks the exit code will report a green devnet that never
-started. Health-check the ports instead.
+**`yaci-devkit`'s exit code cannot be trusted — IN BOTH DIRECTIONS.** The npx wrapper exits **0**
+while the underlying yaci-cli exits 1, so a CI step that only checks the exit code will report a
+green devnet that never started. **And the same masking hides the opposite event: it cannot tell you
+the devnet was KILLED.** MEASURED 2026-09-10 — a `timeout` firing on a running devnet should surface
+as **124** and came back as **0**. One masking, two questions, and this page only ever asked the
+first one. Health-check the services, not the exit code, and not only at startup.
+
+> ⚑ **A trap you have written down is not a trap you have internalised.** The engineer who hit the
+> kill-side of this masking had read and quoted the start-side of it, from this very page, three
+> hours earlier. Writing a hazard down buys you nothing at the moment you are inside it; only a
+> mechanism that fails loudly does — which is why the entries here prescribe commands rather than
+> vigilance.
 
 **⛔ `--tail false` DOES NOT DAEMONIZE — and this is the biggest trap on the page.** It stops the
 wrapper *streaming logs*; it does **not** detach anything. Every component stays a CHILD of the
