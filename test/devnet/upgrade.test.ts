@@ -11,6 +11,28 @@
  * The negatives matter more than the positive. protocol_params' whole job
  * is refusing bad upgrades — a positive-only suite would confirm that it lets
  * things through, which is the half that cannot brick a protocol.
+ *
+ * ⚠⚠ THESE ARE NOT REGRESSION TESTS — THE POSITIVE IS A FIRST-EVER EXECUTION.
+ * Every upgrade this repo has ever performed was authorised by a KEY credential.
+ * On alpha.4 the bootstrap installs `upgrade_cred = Script(upgrade_multisig)`,
+ * so test 1 below is the first time in this repo's history that a
+ * `MultisigScript` has authorised ANYTHING on chain. A green here is ONE
+ * OBSERVATION with nothing behind it — not restored parity, not "no
+ * regression". Read it as such, and keep this qualifier inside the acceptance
+ * rather than beside it.
+ *
+ * ⛔ AND WHAT THE ACT PARAMETER DOES **NOT** SETTLE. Every test here passes
+ * `act:` explicitly, and `upgradeProtocol` routes it through one
+ * `protocolParamsRedeemer(...)` call site. That proves the redeemer FIELD is
+ * load-bearing on chain — mutating `act` to "NOMINATE_AUTHORITY" in test 1
+ * makes the validator refuse (see the mutation record in the slice audit). It
+ * CANNOT prove that arm 0's bytes were produced by `protocolParamsRedeemer`
+ * rather than by the `voidData()` it replaced: `ProtocolUpgrade` encodes as
+ * `Constr(0, [])` and so does `voidData()`, and no decoder on chain or off can
+ * tell the two apart. That half is discharged only when arms 1 and 2 —
+ * `Constr(1, [])` / `Constr(2, [])`, which `voidData()` cannot represent —
+ * travel through the same call site on chain, which is T-F03-3's
+ * nominate/promote pair, not this file's.
  */
 
 import { test, before } from "node:test";
@@ -60,6 +82,11 @@ test("an upgrade rewrites the live wiring in place — proven as a before/after 
   assert.notEqual(newTransferCred, before.transferCred.hash, "the swap must actually change something");
 
   await upgradeProtocol(blueprint, deployment, {
+    // ⛔ THE ACT IS DECLARED, NOT DEFAULTED. `protocol_upgrade` is the only arm
+    // that permits rewriting a mutable credential; it also FREEZES both
+    // `upgrade_cred` and `pending_upgrade_cred`, which is what the untouched
+    // block below then verifies from the chain rather than from this call.
+    act: "PROTOCOL_UPGRADE",
     change: (p) => ({ ...p, transferCred: { type: "script", hash: newTransferCred } }),
   });
 
@@ -72,14 +99,54 @@ test("an upgrade rewrites the live wiring in place — proven as a before/after 
   // Everything else must be untouched. An upgrade that quietly rewrites a
   // neighbouring field is indistinguishable from a correct one if you only
   // assert the field you meant to change.
+  // ⚠ ALL FIVE REMAINING FIELDS OF THE SIX-FIELD alpha.4 DATUM, NAMED. A list
+  // of "these must be unmoved" only ever detects removals and decays into a
+  // stale subset — and the member it stops noticing is the NEWEST one, which is
+  // the one least likely to be covered anywhere else. Here that is
+  // `issuanceLogicCred`, added in alpha.4, which DISPLACED `transferCred` from
+  // datum index 1: a field-order defect would move exactly this pair.
   assert.equal(after.plgCred.hash, before.plgCred.hash, "dispatcher untouched");
+  assert.equal(
+    after.issuanceLogicCred.hash,
+    before.issuanceLogicCred.hash,
+    "issuance_logic untouched — the newest field, and the one adjacent to the one we moved"
+  );
   assert.equal(after.thirdPartyCred.hash, before.thirdPartyCred.hash, "third_party untouched");
+
+  // The two the ARM itself freezes. `protocol_upgrade` requires
+  // `new.upgrade_cred == old.upgrade_cred` AND
+  // `new.pending_upgrade_cred == old.pending_upgrade_cred`, so asserting these
+  // from the chain is what tests the arm rather than our own `change` function.
   assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "upgrade authority untouched");
+  assert.equal(after.upgradeCred.type, before.upgradeCred.type, "and still the same KIND of credential");
+  // ⚑ THE AUTHORITY THAT JUST AUTHORISED THIS IS A SCRIPT. Asserted positively,
+  // not merely "unchanged": this is the first-ever on-chain satisfaction of a
+  // MultisigScript in this repo, and "unchanged" would pass just as happily on
+  // the old KEY-authority fixture.
+  assert.equal(after.upgradeCred.type, "script", "the upgrade authority is the upgrade_multisig SCRIPT");
+  assert.equal(
+    after.upgradeCred.hash,
+    deployment.upgradeMultisig.scriptHash,
+    "and it is THIS deployment's upgrade_multisig"
+  );
+  // ⚑ AN IDENTITY, NOT AN ABSENCE. `protocol_upgrade` freezes the nomination,
+  // and that freeze is untested from any other direction — a handover must not
+  // be able to begin inside a transaction presenting itself as a parameter
+  // change.
+  assert.equal(before.pendingUpgradeCred, null, "no handover was in flight before");
+  assert.equal(after.pendingUpgradeCred, null, "and protocol_upgrade did not start one");
 
   // ⚠ unfracking_cred and max_inline_datum_bytes are NOT asserted here because
   // they are no longer datum fields — see the designed-out block below.
 });
 
+/**
+ * The rail: `sitting_authority_approves` is
+ * `pairs.has_key(withdrawals, old.upgrade_cred)`, and on alpha.4
+ * `old.upgrade_cred` is a SCRIPT credential — the upgrade_multisig. So this now
+ * proves the trampoline bites against a script authority, which is a different
+ * lookup in the withdrawals map from the key credential it used to exercise.
+ */
 test("REFUSED: an upgrade without the authority's withdraw-0", async () => {
   const blueprint = loadStandardBlueprint();
   const deployment = await bootstrapProtocol();
@@ -89,6 +156,11 @@ test("REFUSED: an upgrade without the authority's withdraw-0", async () => {
   await assert.rejects(
     () =>
       upgradeProtocol(blueprint, deployment, {
+        act: "PROTOCOL_UPGRADE",
+        // ⛔ `omitAuthority` drops the WHOLE authorisation, on both branches —
+        // no withdrawal, no script witness, no reference input, no signer. It
+        // must stay that way: dropping only the withdrawal would quietly turn
+        // this into a test of a narrower thing while still going red.
         omitAuthority: true,
         change: (p) => ({ ...p, transferCred: { type: "script", hash: "ab".repeat(28) } }),
       }),
@@ -133,6 +205,17 @@ test("REFUSED: a mutable credential that is not 28 bytes — the one-way brick",
   // unsatisfiable, with no repair path." A reward account is a header byte plus
   // a 28-byte hash, so a wrong-length credential can never appear in
   // tx.withdrawals and the protocol can never be upgraded again.
+  //
+  // ⚠ ON alpha.4 THIS NOW VIOLATES TWO RULES AT ONCE, and it matters which one
+  // answers. `params_wellformed` refuses the 20-byte hash on BOTH handlers, and
+  // `protocol_upgrade` separately freezes `upgrade_cred` (`new.upgrade_cred ==
+  // old.upgrade_cred`), which this change also breaks. Both live inside the
+  // same script evaluation, so both surface identically as Ogmios 3010 and the
+  // test stands either way — but the two rails are not interchangeable
+  // evidence, and a future reader must not read a green here as proof that the
+  // well-formedness rail specifically fired. OBSERVED on devnet 2026-09-10:
+  // Ogmios 3010 wrapping 3012 at `validator {index, purpose: "spend"}`, with no
+  // traces, which is the shape both rails produce.
   const blueprint = loadStandardBlueprint();
   const deployment = await bootstrapProtocol();
   const client: any = await makeClient();
@@ -141,6 +224,7 @@ test("REFUSED: a mutable credential that is not 28 bytes — the one-way brick",
   await assert.rejects(
     () =>
       upgradeProtocol(blueprint, deployment, {
+        act: "PROTOCOL_UPGRADE",
         change: (p) => ({ ...p, upgradeCred: { type: "key", hash: "ab".repeat(20) } }),
       }),
     assertRejectedByTheValidator,
