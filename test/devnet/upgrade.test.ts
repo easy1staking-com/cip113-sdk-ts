@@ -60,6 +60,7 @@ import {
   upgradeProtocol,
   nominateAuthority,
   promoteAuthority,
+  withdrawalCredentials,
 } from "../harness/upgrade.js";
 import {
   stakingCredentialHash,
@@ -69,6 +70,12 @@ import {
   type Cip113Credential,
   type DeploymentParams,
 } from "../../dist/index.js";
+import {
+  Withdrawals as EvoWithdrawals,
+  RewardAccount as EvoRewardAccount,
+  Credential as EvoCredential,
+  Bytes as EvoBytes,
+} from "@evolution-sdk/evolution";
 
 /** Which Ogmios validator purpose, and which numeric error, a negative expects. */
 interface ExpectedRefusal {
@@ -875,3 +882,61 @@ test("REFUSED, client-side: promoting a protocol with no standing nomination", a
   assert.equal(after.pendingUpgradeCred, null, "and nothing was submitted");
   assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "and the authority did not move");
 });
+
+/**
+ * R-1 (T-F03-3 audit residue) — `withdrawalCredentials`'s multi-entry path.
+ *
+ * PURE OFFLINE, NO CHAIN. Every transaction the rest of this suite builds
+ * carries exactly one withdrawal, so a mutant that truncates the reader to
+ * its first entry changes nothing observable anywhere else in this file —
+ * that survivor is the auditor's N5. This test constructs its own two-entry
+ * `Withdrawals` (one `makeScriptHash`, one `makeKeyHash`) and reads it back,
+ * so the property is pinned on the reader itself rather than on anything the
+ * ledger decides. It is gated behind this file's `before(requireDevnet)` like
+ * every test here — it needs no chain, but it runs with the devnet subset.
+ *
+ * Order asserted: `Withdrawals` is backed by a JS `Map`, `fromEntries` builds
+ * that map from the array given (`new Map(entries)`, insertion order), and
+ * `Withdrawals.entries()` is `Array.from(map.entries())` — so the order out
+ * is the order given to `fromEntries`, here [script, key].
+ */
+test("withdrawalCredentials reads back a TWO-entry withdrawal set in full — not truncated to the first", () => {
+  const scriptHashHex = "aa".repeat(28);
+  const keyHashHex = "bb".repeat(28);
+
+  const scriptAccount = new EvoRewardAccount.RewardAccount({
+    networkId: 0,
+    stakeCredential: EvoCredential.makeScriptHash(EvoBytes.fromHex(scriptHashHex)),
+  });
+  const keyAccount = new EvoRewardAccount.RewardAccount({
+    networkId: 0,
+    stakeCredential: EvoCredential.makeKeyHash(EvoBytes.fromHex(keyHashHex)),
+  });
+  const withdrawals = EvoWithdrawals.fromEntries([
+    [scriptAccount, 0n],
+    [keyAccount, 0n],
+  ]);
+  const fakeBuiltTx = { body: { withdrawals } } as any;
+
+  const creds = withdrawalCredentials(fakeBuiltTx);
+
+  // The N5 mutant (truncate to withdrawals.entries[0] only) leaves this at
+  // length 1, missing the key entry entirely — `deepEqual` on the full,
+  // ordered array is what kills it; a length-only assertion would not.
+  assert.deepEqual(
+    creds,
+    [
+      { type: "script", hash: scriptHashHex },
+      { type: "key", hash: keyHashHex },
+    ],
+    "both entries must come back, in the order they were given, with the right tags"
+  );
+});
+
+// ⛔ The two `retryTransient` guards that stood here in round 1 have MOVED to
+// `test/retry.test.mjs`. They were pure offline logic gated behind this file's
+// `before(requireDevnet)`, so the invariant "no ledger verdict is ever retried"
+// was defended only on a machine with a live devnet — and CI does not run
+// test:devnet. `npm test` globs `test/*.test.mjs`, so they now run on every
+// push. The withdrawalCredentials reader above stays here: it belongs with the
+// upgrade harness (T-F03-3 residue R-1).

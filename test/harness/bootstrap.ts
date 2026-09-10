@@ -82,7 +82,7 @@ import {
   type TxInput,
 } from "../../dist/index.js";
 
-import { makeClient, topupAddress } from "./yaci.mjs";
+import { makeClient, topupAddress, retryTransient } from "./yaci.mjs";
 import { createOgmiosEvaluator } from "./ogmios-evaluator.js";
 import { buildDeploymentRecord } from "./cip171-record.js";
 import { explainError } from "./explain-error.js";
@@ -636,7 +636,15 @@ export async function bootstrapProtocol(
    */
   const spendable = (all: EvoUTxO.UTxO[]) => all.filter((u: any) => !u.scriptRef);
 
-  const submitAndWait = async (built: { signAndSubmit: () => Promise<unknown> }, label = "?") => {
+  const submitAndWait = async (
+    built: { signAndSubmit: () => Promise<unknown> },
+    label = "?",
+    // ⛔ T-D20: an EXPECTED submit failure (see the tx3 call site) must not
+    // print as a defect in exactly the region a real one would appear. This
+    // narrows what gets the loud [submit error] treatment; it changes NOTHING
+    // about what is rethrown — `tolerate` only picks which line logs it.
+    submitOpts?: { tolerate?: (msg: string) => boolean; tolerateNote?: string }
+  ) => {
     if (process.env.TX_SIZE_DIAG) {
       try {
         const cbor = EvoTx.toCBORHex(await (built as any).toTransaction());
@@ -649,6 +657,17 @@ export async function bootstrapProtocol(
     try {
       res = await built.signAndSubmit();
     } catch (err: any) {
+      const msg = String((err as Error)?.message ?? err);
+      if (submitOpts?.tolerate?.(msg)) {
+        // Reclassified, not deleted (T-D20, §19 polarity): this is an
+        // expected outcome on this chain, not a defect, so it gets one quiet
+        // line instead of the ~10-line [submit error] block. Still rethrown —
+        // the tx3 call site's own catch decides what happens next, unchanged.
+        console.error(
+          `  [expected] ${label}: ${submitOpts.tolerateNote ?? "tolerated outcome"} — ${msg.slice(0, 200)}`
+        );
+        throw err;
+      }
       // Effect wraps the provider error; the ledger's reason is nested. Walk it.
       const parts: string[] = [];
       const walk = (o: any, d = 0) => {
@@ -995,19 +1014,28 @@ export async function bootstrapProtocol(
   // would hide exactly the publish-purpose failure this fixture exists to
   // surface.
   const upgradeStakeAddr = rewardAddressFromKeyHash(networkId, upgradeStakeKeyHash);
+  // ⛔ T-D19: MEASURED, the transient this repo has actually hit fires inside
+  // Evolution's OWN Stake.ts:64 — its `getProtocolParameters()`, called while
+  // BUILDING a stake certificate, not at either of our two explicit call
+  // sites. So the retry wraps `.build()` itself (side-effect-free: nothing is
+  // submitted until submitAndWait runs), not submitAndWait's signAndSubmit —
+  // see test/harness/yaci.mjs's retryTransient for the predicate and why.
   const delegateOnly = async () => {
-    const delegateTx = client.newTx().delegateToDRep({
-      stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
-      drep: new DRep.AlwaysAbstainDRep({}),
-    });
-    await submitAndWait(
-      await delegateTx.build({
-        changeAddress: addressObj,
-        evaluator,
-        availableUtxos: spendable(await client.getUtxos(addressObj)),
-      }),
-      "tx4-delegate"
+    const built = await retryTransient(
+      async () => {
+        const delegateTx = client.newTx().delegateToDRep({
+          stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
+          drep: new DRep.AlwaysAbstainDRep({}),
+        });
+        return delegateTx.build({
+          changeAddress: addressObj,
+          evaluator,
+          availableUtxos: spendable(await client.getUtxos(addressObj)),
+        });
+      },
+      { label: "tx4-delegate build" }
     );
+    await submitAndWait(built, "tx4-delegate");
   };
   const alreadyRegisteredUpfront = opts.isStakeRegistered
     ? await opts.isStakeRegistered(upgradeStakeAddr)
@@ -1026,24 +1054,46 @@ export async function bootstrapProtocol(
     // delegation the upgrade path is unusable even though the credential is
     // registered. Delegating to AlwaysAbstain is the neutral choice: it engages
     // with governance without casting an opinion.
-    const keyRegTx = client
-      .newTx()
-      .registerAndDelegateTo({
-        stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
-        drep: new DRep.AlwaysAbstainDRep({}),
-      });
-    await submitAndWait(
-      await keyRegTx.build({
-        changeAddress: addressObj,
-        evaluator,
-        availableUtxos: spendable(await client.getUtxos(addressObj)),
-      }),
-      "tx3-key-register-delegate"
+    const built = await retryTransient(
+      async () => {
+        const keyRegTx = client
+          .newTx()
+          .registerAndDelegateTo({
+            stakeCredential: Credential.makeKeyHash(Bytes.fromHex(upgradeStakeKeyHash)),
+            drep: new DRep.AlwaysAbstainDRep({}),
+          });
+        return keyRegTx.build({
+          changeAddress: addressObj,
+          evaluator,
+          availableUtxos: spendable(await client.getUtxos(addressObj)),
+        });
+      },
+      { label: "tx3-key-register-delegate build" }
     );
+    // ⛔ T-D20: on every devnet run after the first bootstrap this key is
+    // ALREADY registered (it is the wallet's, and survives across
+    // bootstraps — see the block comment above), so this submission is
+    // EXPECTED to fail with Conway 3145 on every run but the first. `tolerate`
+    // labels that one outcome as [expected] instead of the loud [submit
+    // error] block, without changing what is rethrown: the catch below still
+    // decides, on the SAME predicate, whether to rethrow or fall through to
+    // delegateOnly() — narrowness is unchanged, only the log line is.
+    await submitAndWait(built, "tx3-key-register-delegate", {
+      // ⛔ \b3145\b, NOT includes("3145"): the real message is a full Ogmios
+      // JSON body carrying tx hashes, policy ids and lovelace figures, so an
+      // unanchored "3145" matches a substring of an unrelated number at a
+      // percent-level rate — and a false positive here prints a FALSE
+      // explanation ("credential already registered … expected") in place of
+      // the full dump, which is strictly worse than the loud output it replaced.
+      tolerate: (msg) => msg.includes("already known credential") || /\b3145\b/.test(msg),
+      tolerateNote:
+        "credential already registered on this devnet — expected, delegateOnly() runs next",
+    });
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);
+    // Same predicate as `tolerate` above, and anchored for the same reason.
     const alreadyRegistered =
-      msg.includes("already known credential") || msg.includes("3145");
+      msg.includes("already known credential") || /\b3145\b/.test(msg);
     if (!alreadyRegistered) throw err;
     // Registered by an earlier bootstrap on this devnet. The DELEGATION still
     // has to exist for the withdraw-0 to be accepted, and re-delegating an
@@ -1079,22 +1129,35 @@ export async function bootstrapProtocol(
   // here by oversight: a script withdraw-0 needs three things — a script
   // witness, a registration, and the withdrawal itself. The DRep delegation is
   // the FOURTH thing a KEY credential needs, and a script cannot have one.
-  let regTx = client.newTx();
-  for (const delegate of [plg, transfer, thirdParty, unfracking, issuanceLogic, upgradeMultisig]) {
-    regTx = regTx.registerStake({
-      stakeCredential: Credential.makeScriptHash(Bytes.fromHex(delegate.hash)),
-      redeemer: voidData(),
-    });
-    regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
-  }
-  await submitAndWait(
-    await regTx.build({
-      changeAddress: addressObj,
-      evaluator,
-      availableUtxos: spendable(await client.getUtxos(addressObj)),
-    }),
-    "tx5-script-stake-register"
+  // ⛔ T-D19, MEASURED DURING THIS SLICE'S OWN VERIFICATION RUN (2026-09-10):
+  // the contract's MEASURED note named only `delegateToDRep` (~999) and
+  // `registerAndDelegateTo` (~1031) as sites preceding no `getProtocolParameters()`
+  // call of our own. THIS `registerStake` op is a THIRD one, and it fired the
+  // identical signature LIVE in this slice's own devnet subset run —
+  // `Failed to fetch protocol parameters: Kupmios getProtocolParameters failed`
+  // at Evolution's `Stake.ts:64`, the exact line `createRegisterStakeProgram`
+  // (not the other two programs) raises from. Wrapped the same way, for the
+  // same reason: it is a stake op's `build()`, side-effect-free until
+  // submitAndWait runs.
+  const regBuilt = await retryTransient(
+    async () => {
+      let regTx = client.newTx();
+      for (const delegate of [plg, transfer, thirdParty, unfracking, issuanceLogic, upgradeMultisig]) {
+        regTx = regTx.registerStake({
+          stakeCredential: Credential.makeScriptHash(Bytes.fromHex(delegate.hash)),
+          redeemer: voidData(),
+        });
+        regTx = regTx.attachScript({ script: buildEvoScript(delegate.compiledCode) });
+      }
+      return regTx.build({
+        changeAddress: addressObj,
+        evaluator,
+        availableUtxos: spendable(await client.getUtxos(addressObj)),
+      });
+    },
+    { label: "tx5-script-stake-register build" }
   );
+  await submitAndWait(regBuilt, "tx5-script-stake-register");
 
   // The caller will immediately build against this wallet, and the indexer is
   // still catching up with the three transactions above. Settling here rather

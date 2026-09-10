@@ -220,3 +220,158 @@ export async function settleWallet(client, addressObj, { attempts = 20, interval
     previous = current;
   }
 }
+
+/**
+ * A provider/transport failure text worth retrying. POSITIVE allowlist, not a
+ * ledger-code exclusion list: an error must match one of THESE shapes to be
+ * retried at all, so an error this repo has never seen fails on the first
+ * attempt by default, same as today.
+ *
+ * MEASURED (T-D19, PLAN.md 2026-09-10 13:01:18Z): a devnet run went 5/6 red on
+ * bytes byte-identical to a green run — `Kupmios getProtocolParameters
+ * failed`, raised inside Evolution's OWN `Stake.ts:64` while building a
+ * bootstrap's stake registration/delegation (`registerAndDelegateTo` /
+ * `delegateToDRep`), i.e. outside this repo's code entirely. Kupo's own log
+ * for that window carries zero Error/Warning severities, so the hiccup is
+ * Ogmios-side or transport (`queryLedgerState/protocolParameters` is an
+ * Ogmios method) — hence "Kupmios" and "getProtocolParameters failed" as the
+ * two named shapes, plus the generic connection/timeout shapes a transient
+ * network read can surface as.
+ *
+ * ⛔ THE KUPMIOS SHAPE IS ENUMERATED, NOT WILDCARDED, AND THAT IS THE WHOLE
+ * POINT. Evolution wraps its provider operations as
+ *
+ *   node_modules/@evolution-sdk/evolution/src/sdk/provider/internal/KupmiosEffects.ts
+ *   const wrapError = (operation) => (cause) =>
+ *     Effect.fail(new Provider.ProviderError({ message: `Kupmios ${operation} failed`, cause }))
+ *
+ * — the LEDGER'S REASON GOES IN `cause`; the MESSAGE gets the operation name
+ * and nothing else. So a script refusal raised during `build()` arrives as the
+ * bare string `"Provider evaluation failed: Kupmios evaluateTx failed"`, which
+ * a `Kupmios .*failed` wildcard matches and LEDGER_VERDICT cannot see, because
+ * no code is present in the message at all. That combination RETRIED A LEDGER
+ * VERDICT three times (T-D19 round 1, MEASURED).
+ *
+ * The ten wrapped operations are, exhaustively: evaluateTx, getDatum,
+ * getDelegation, getProtocolParameters, getScript, getUtxoByUnit, getUtxos,
+ * getUtxosByOutRef, getUtxosWithUnit, retrieveDatum. `evaluateTx` is the only
+ * one that can carry a ledger verdict, so the nine READ-ONLY operations are
+ * listed here and `evaluateTx` is not. (`submitTx` does not use this wrapper
+ * at all; it interpolates its own reason.)
+ *
+ * ⛔ A POSITIVE list, deliberately — NOT a negative lookahead excluding
+ * `evaluateTx`. If Evolution adds an operation, an unknown name is NOT
+ * retried: this fails CLOSED, which is the safe direction, and it is the
+ * design this comment has claimed since round 1.
+ */
+const TRANSIENT_SIGNATURE =
+  /getProtocolParameters failed|Kupmios (getProtocolParameters|getUtxos|getUtxosWithUnit|getUtxoByUnit|getUtxosByOutRef|getDatum|retrieveDatum|getScript|getDelegation) failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i;
+
+/**
+ * Ledger verdicts a transient retry must NEVER catch — checked FIRST and wins
+ * over TRANSIENT_SIGNATURE even if a verdict's text incidentally brushes a
+ * transient-looking phrase. A script refusal (3010/3012), a missing witness
+ * (3011), a stale-UTxO-view rejection (3117), insufficient Ada (3125), an
+ * already-registered credential (3145 — bootstrap.ts tolerates this one on
+ * purpose, elsewhere) and an undelegated-credential withdrawal (3150) are the
+ * ledger's own answer, not a provider hiccup; retrying one would hide a real
+ * defect behind a false "it just needed a retry".
+ */
+const LEDGER_VERDICT = /\b(3010|3011|3012|3117|3125|3145|3150)\b/;
+
+/**
+ * The text of an error AND of every `cause` beneath it, joined.
+ *
+ * ⛔ THE BACKSTOP FOR THE WHOLE CLASS. Evolution puts the operation name in
+ * `message` and the ledger's reason in `cause` (see TRANSIENT_SIGNATURE), so a
+ * predicate that reads only `err.message` is an instrument pointed away from
+ * its subject: it returns a clean, plausible "no verdict here" for every
+ * refusal the provider wraps. LEDGER_VERDICT is tested against THIS instead.
+ *
+ * `TRANSIENT_SIGNATURE` deliberately stays on the message ONLY — a verdict
+ * nested in a cause must not be resurrected as transient by a transport-ish
+ * phrase deeper in the chain.
+ *
+ * A false positive here means "do not retry", which is fail-safe; that is the
+ * direction to prefer whenever the two guards disagree.
+ *
+ * This is `.mjs` and cannot import the `.ts` explain-error helper, hence the
+ * local walk. Bounded by depth and by a seen-set, so a cyclic `cause` (Effect
+ * wrappers do produce them) terminates instead of hanging.
+ */
+function errorChainText(err, maxDepth = 8) {
+  const parts = [];
+  const seen = new Set();
+  let node = err;
+  for (let depth = 0; depth <= maxDepth && node != null; depth++) {
+    if (typeof node === "object" || typeof node === "function") {
+      if (seen.has(node)) break;
+      seen.add(node);
+      if (typeof node.message === "string") parts.push(node.message);
+      // Ogmios reports its verdict as a NUMERIC `code` field beside the prose,
+      // so the code is frequently absent from every message in the chain.
+      if (node.code !== undefined) parts.push(`code ${String(node.code)}`);
+      try {
+        parts.push(JSON.stringify(node).slice(0, 4000));
+      } catch {
+        // cyclic or non-serialisable — the message/code above still counted
+      }
+      node = node.cause;
+    } else {
+      parts.push(String(node));
+      break;
+    }
+  }
+  return parts.join(" | ");
+}
+
+/**
+ * Retry `fn` a bounded number of times, but ONLY on a provider/transport
+ * signature — see TRANSIENT_SIGNATURE/LEDGER_VERDICT above for the exact
+ * predicate and why each excluded code is excluded. Exists to wrap the
+ * OPERATION that actually failed in the MEASURED transient (a stake op's
+ * `build()`), not our explicit `getProtocolParameters()` call sites — those
+ * are not on that path (see PLAN.md T-D19).
+ *
+ * VISIBILITY: every retry that fires logs one line naming the attempt and the
+ * matched signature, so a run that succeeded on attempt 2 is distinguishable
+ * from one that succeeded on attempt 1 from the log alone. A silent retry is
+ * an instrument that hides its own activity.
+ *
+ * ⚠ UNMEASURED whether this actually intercepts the real transient: it has
+ * occurred 3 times in ~80 devnet runs today and not once in the last 21. This
+ * slice cannot prove it works against the live transient — only that it does
+ * not retry what it must never retry (a ledger verdict).
+ */
+export async function retryTransient(fn, { attempts = 3, delayMs = 1500, label = "operation" } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await fn();
+      if (attempt > 1) {
+        console.error(`  [retry] ${label}: succeeded on attempt ${attempt}/${attempts}`);
+      }
+      return result;
+    } catch (err) {
+      const msg = String(err?.message ?? err);
+      // LEDGER_VERDICT reads the whole cause chain, TRANSIENT_SIGNATURE reads
+      // the message only — see errorChainText for why the asymmetry is load-
+      // bearing rather than an oversight.
+      if (LEDGER_VERDICT.test(errorChainText(err)) || !TRANSIENT_SIGNATURE.test(msg)) throw err;
+      lastErr = err;
+      if (attempt === attempts) {
+        console.error(
+          `  [retry] ${label}: exhausted ${attempts} attempts on transient signature — giving up`
+        );
+        throw err;
+      }
+      const matched = TRANSIENT_SIGNATURE.exec(msg)?.[0] ?? "?";
+      console.error(
+        `  [retry] ${label}: attempt ${attempt}/${attempts} failed on transient signature ` +
+          `"${matched}" — retrying in ${delayMs}ms`
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
