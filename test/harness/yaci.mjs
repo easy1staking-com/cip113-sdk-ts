@@ -220,3 +220,83 @@ export async function settleWallet(client, addressObj, { attempts = 20, interval
     previous = current;
   }
 }
+
+/**
+ * A provider/transport failure text worth retrying. POSITIVE allowlist, not a
+ * ledger-code exclusion list: an error must match one of THESE shapes to be
+ * retried at all, so an error this repo has never seen fails on the first
+ * attempt by default, same as today.
+ *
+ * MEASURED (T-D19, PLAN.md 2026-09-10 13:01:18Z): a devnet run went 5/6 red on
+ * bytes byte-identical to a green run — `Kupmios getProtocolParameters
+ * failed`, raised inside Evolution's OWN `Stake.ts:64` while building a
+ * bootstrap's stake registration/delegation (`registerAndDelegateTo` /
+ * `delegateToDRep`), i.e. outside this repo's code entirely. Kupo's own log
+ * for that window carries zero Error/Warning severities, so the hiccup is
+ * Ogmios-side or transport (`queryLedgerState/protocolParameters` is an
+ * Ogmios method) — hence "Kupmios" and "getProtocolParameters failed" as the
+ * two named shapes, plus the generic connection/timeout shapes a transient
+ * network read can surface as.
+ */
+const TRANSIENT_SIGNATURE =
+  /getProtocolParameters failed|Kupmios .*failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|fetch failed|socket hang up/i;
+
+/**
+ * Ledger verdicts a transient retry must NEVER catch — checked FIRST and wins
+ * over TRANSIENT_SIGNATURE even if a verdict's text incidentally brushes a
+ * transient-looking phrase. A script refusal (3010/3012), a missing witness
+ * (3011), a stale-UTxO-view rejection (3117), insufficient Ada (3125), an
+ * already-registered credential (3145 — bootstrap.ts tolerates this one on
+ * purpose, elsewhere) and an undelegated-credential withdrawal (3150) are the
+ * ledger's own answer, not a provider hiccup; retrying one would hide a real
+ * defect behind a false "it just needed a retry".
+ */
+const LEDGER_VERDICT = /\b(3010|3011|3012|3117|3125|3145|3150)\b/;
+
+/**
+ * Retry `fn` a bounded number of times, but ONLY on a provider/transport
+ * signature — see TRANSIENT_SIGNATURE/LEDGER_VERDICT above for the exact
+ * predicate and why each excluded code is excluded. Exists to wrap the
+ * OPERATION that actually failed in the MEASURED transient (a stake op's
+ * `build()`), not our explicit `getProtocolParameters()` call sites — those
+ * are not on that path (see PLAN.md T-D19).
+ *
+ * VISIBILITY: every retry that fires logs one line naming the attempt and the
+ * matched signature, so a run that succeeded on attempt 2 is distinguishable
+ * from one that succeeded on attempt 1 from the log alone. A silent retry is
+ * an instrument that hides its own activity.
+ *
+ * ⚠ UNMEASURED whether this actually intercepts the real transient: it has
+ * occurred 3 times in ~80 devnet runs today and not once in the last 21. This
+ * slice cannot prove it works against the live transient — only that it does
+ * not retry what it must never retry (a ledger verdict).
+ */
+export async function retryTransient(fn, { attempts = 3, delayMs = 1500, label = "operation" } = {}) {
+  let lastErr;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await fn();
+      if (attempt > 1) {
+        console.error(`  [retry] ${label}: succeeded on attempt ${attempt}/${attempts}`);
+      }
+      return result;
+    } catch (err) {
+      const msg = String(err?.message ?? err);
+      if (LEDGER_VERDICT.test(msg) || !TRANSIENT_SIGNATURE.test(msg)) throw err;
+      lastErr = err;
+      if (attempt === attempts) {
+        console.error(
+          `  [retry] ${label}: exhausted ${attempts} attempts on transient signature — giving up`
+        );
+        throw err;
+      }
+      const matched = TRANSIENT_SIGNATURE.exec(msg)?.[0] ?? "?";
+      console.error(
+        `  [retry] ${label}: attempt ${attempt}/${attempts} failed on transient signature ` +
+          `"${matched}" — retrying in ${delayMs}ms`
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}

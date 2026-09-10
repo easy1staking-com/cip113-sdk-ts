@@ -210,8 +210,15 @@ export async function readUpgradeMultisigConfig(
  * here would make a script withdrawal INVISIBLE to the exclusivity assertion in
  * the devnet test — an instrument returning a plausible, wrong, quiet answer,
  * which is precisely the reading that assertion exists to make impossible.
+ *
+ * EXPORTED for R-1 (T-F03-3 audit residue): every transaction the green suite
+ * builds carries exactly one withdrawal, so a mutant that truncates this
+ * reader to its first entry survived undetected. `test/devnet/upgrade.test.ts`
+ * unit-tests the multi-entry path offline, against a hand-built `Withdrawals`
+ * — no chain needed, because the property being pinned is about THIS
+ * function's read, not about anything the ledger decides.
  */
-function withdrawalCredentials(tx: EvoTransaction.Transaction): Cip113Credential[] {
+export function withdrawalCredentials(tx: EvoTransaction.Transaction): Cip113Credential[] {
   const withdrawals = tx.body.withdrawals;
   if (!withdrawals) return [];
   return EvoWithdrawals.entries(withdrawals).map(([account]) => {

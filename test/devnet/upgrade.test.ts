@@ -53,13 +53,14 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { requireDevnet, makeClient, settleWallet, waitFor } from "../harness/yaci.mjs";
+import { requireDevnet, makeClient, settleWallet, waitFor, retryTransient } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import {
   readCoordination,
   upgradeProtocol,
   nominateAuthority,
   promoteAuthority,
+  withdrawalCredentials,
 } from "../harness/upgrade.js";
 import {
   stakingCredentialHash,
@@ -69,6 +70,12 @@ import {
   type Cip113Credential,
   type DeploymentParams,
 } from "../../dist/index.js";
+import {
+  Withdrawals as EvoWithdrawals,
+  RewardAccount as EvoRewardAccount,
+  Credential as EvoCredential,
+  Bytes as EvoBytes,
+} from "@evolution-sdk/evolution";
 
 /** Which Ogmios validator purpose, and which numeric error, a negative expects. */
 interface ExpectedRefusal {
@@ -874,4 +881,129 @@ test("REFUSED, client-side: promoting a protocol with no standing nomination", a
   const after = (await readCoordination(client, deployment)).params;
   assert.equal(after.pendingUpgradeCred, null, "and nothing was submitted");
   assert.equal(after.upgradeCred.hash, before.upgradeCred.hash, "and the authority did not move");
+});
+
+/**
+ * R-1 (T-F03-3 audit residue) — `withdrawalCredentials`'s multi-entry path.
+ *
+ * PURE OFFLINE, NO CHAIN. Every transaction the rest of this suite builds
+ * carries exactly one withdrawal, so a mutant that truncates the reader to
+ * its first entry changes nothing observable anywhere else in this file —
+ * that survivor is the auditor's N5. This test constructs its own two-entry
+ * `Withdrawals` (one `makeScriptHash`, one `makeKeyHash`) and reads it back,
+ * so the property is pinned on the reader itself rather than on anything the
+ * ledger decides. It is gated behind this file's `before(requireDevnet)` like
+ * every test here — it needs no chain, but it runs with the devnet subset.
+ *
+ * Order asserted: `Withdrawals` is backed by a JS `Map`, `fromEntries` builds
+ * that map from the array given (`new Map(entries)`, insertion order), and
+ * `Withdrawals.entries()` is `Array.from(map.entries())` — so the order out
+ * is the order given to `fromEntries`, here [script, key].
+ */
+test("withdrawalCredentials reads back a TWO-entry withdrawal set in full — not truncated to the first", () => {
+  const scriptHashHex = "aa".repeat(28);
+  const keyHashHex = "bb".repeat(28);
+
+  const scriptAccount = new EvoRewardAccount.RewardAccount({
+    networkId: 0,
+    stakeCredential: EvoCredential.makeScriptHash(EvoBytes.fromHex(scriptHashHex)),
+  });
+  const keyAccount = new EvoRewardAccount.RewardAccount({
+    networkId: 0,
+    stakeCredential: EvoCredential.makeKeyHash(EvoBytes.fromHex(keyHashHex)),
+  });
+  const withdrawals = EvoWithdrawals.fromEntries([
+    [scriptAccount, 0n],
+    [keyAccount, 0n],
+  ]);
+  const fakeBuiltTx = { body: { withdrawals } } as any;
+
+  const creds = withdrawalCredentials(fakeBuiltTx);
+
+  // The N5 mutant (truncate to withdrawals.entries[0] only) leaves this at
+  // length 1, missing the key entry entirely — `deepEqual` on the full,
+  // ordered array is what kills it; a length-only assertion would not.
+  assert.deepEqual(
+    creds,
+    [
+      { type: "script", hash: scriptHashHex },
+      { type: "key", hash: keyHashHex },
+    ],
+    "both entries must come back, in the order they were given, with the right tags"
+  );
+});
+
+/**
+ * T-D19 guard, offline — the retry predicate.
+ *
+ * ⛔ M-A's target: `retryTransient` must NEVER retry a ledger verdict, even
+ * one whose text happens to brush a transient-looking phrase. This is the
+ * negative half of the pair below and it is the one the invariant actually
+ * rests on — "no ledger verdict is ever retried" is a claim about THIS
+ * function, checkable with no chain at all.
+ */
+test("retryTransient: a ledger verdict (e.g. 3012) fails on the first attempt, never retried", async () => {
+  let calls = 0;
+  const alwaysRefused = async () => {
+    calls++;
+    // Deliberately ALSO brushes a transient-looking word, to prove the
+    // ledger-verdict check wins over the transient-signature match rather
+    // than the two merely not colliding by luck in the happy case.
+    throw new Error(
+      "code 3012, validationError: script refused (Kupmios getProtocolParameters failed, incidentally)"
+    );
+  };
+
+  await assert.rejects(
+    () => retryTransient(alwaysRefused, { attempts: 3, delayMs: 1, label: "test-ledger-verdict" }),
+    /3012/,
+    "the ledger verdict must propagate, not be swallowed by a retry"
+  );
+  assert.equal(calls, 1, "a ledger verdict must fail on the FIRST attempt, exactly as with no retry at all");
+});
+
+/**
+ * T-D19 guard, offline — the retry's positive case AND its visibility.
+ *
+ * ⛔ M-C's target: task 2 required every retry that fires to be VISIBLE in
+ * the log, naming the attempt and the matched signature — this pins that.
+ * Removing the log call in `retryTransient` (M-C) reddens this test; it does
+ * not touch the ledger-verdict guard above, which is why the two mutations
+ * (M-A, M-C) need two separate tests to tell apart.
+ */
+test("retryTransient: a transient provider signature IS retried, and the retry is logged", async () => {
+  let calls = 0;
+  const failsOnceThenSucceeds = async () => {
+    calls++;
+    if (calls === 1) throw new Error("Failed to fetch protocol parameters: Kupmios getProtocolParameters failed");
+    return "ok";
+  };
+
+  const originalError = console.error;
+  const lines: string[] = [];
+  console.error = (...args: unknown[]) => {
+    lines.push(args.map(String).join(" "));
+  };
+  let result: string;
+  try {
+    result = await retryTransient(failsOnceThenSucceeds, {
+      attempts: 3,
+      delayMs: 1,
+      label: "test-transient",
+    });
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(result, "ok", "the operation must eventually succeed once the transient clears");
+  assert.equal(calls, 2, "it must have been retried exactly once — attempt 1 failed, attempt 2 succeeded");
+  // ⇒ THE DISTINGUISHING SIGNAL: an auditor tells "succeeded on attempt 2"
+  // apart from "succeeded on attempt 1" by the PRESENCE of this line, not by
+  // re-running the fixture. Remove the log call (M-C) and this goes red while
+  // `calls === 2` still holds — proving the assertion is on the log, not the
+  // retry mechanics.
+  const retryLine = lines.find((l) => l.includes("[retry]") && l.includes("test-transient"));
+  assert.ok(retryLine, "a retry that fires must log a [retry] line naming the label");
+  assert.match(retryLine!, /attempt 1\/3/, "the log must name WHICH attempt failed");
+  assert.match(retryLine!, /getProtocolParameters failed|Kupmios/, "the log must name the matched signature");
 });
