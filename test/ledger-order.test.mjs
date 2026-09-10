@@ -52,8 +52,15 @@ import {
   unfrackingRedeemer,
   programmableLogicGlobalRedeemer,
   plbWithdrawalPlan,
+  issuancePlan,
 } from "../dist/core/ledger-order.js";
 import { sortTxInputs } from "../dist/core/registry.js";
+import {
+  issuanceRedeemer,
+  issuanceLogicRedeemer,
+  mintingProofRefInput,
+  mintingProofOutputIndex,
+} from "../dist/core/evo-utils.js";
 
 const S = (h) => ({ hash: h, isScript: true });
 const K = (h) => ({ hash: h, isScript: false });
@@ -363,4 +370,422 @@ test("plbWithdrawalPlan refuses a duplicated credential", () => {
     () => plbWithdrawalPlan({ plgHash: H, others: [{ hash: H, isScript: true }] }),
     /duplicate withdrawal credential/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The issuance plan — one object owns the withdrawals, the reference inputs
+// and the outputs of a transaction that mints or burns (T-F04)
+// ---------------------------------------------------------------------------
+//
+// alpha.4 split issuance (upstream #129). `issuance_mint`'s redeemer became
+// `IssuanceRedeemer { params_idx }`, and the registry proof travels as a VALUE
+// inside `issuance_logic`'s withdraw-0 map, keyed by policy id. That turns one
+// index into three interdependent sets, and every one of them is a plain
+// integer that typechecks, encodes, balances and fails only on chain.
+//
+// ⚠ EXPECTED INDICES BELOW ARE HAND-DERIVED LITERALS, with the derivation in a
+// comment beside each. Comparing `plan.withdrawalIndexOf(x)` against
+// `withdrawalIndexOf(plan.withdrawals, x)` would be a tautology: both descend
+// from the same sort, so the comparison can never fail (harness §9a-ii, sixth
+// form — the COMMON ANCESTOR).
+
+// Withdrawal credentials. All four are SCRIPT credentials, so script-before-key
+// never bites and the ordering below is purely bytewise.
+const ISSUANCE_LOGIC = "11".repeat(28);
+const PLG_HASH = "aa".repeat(28);
+const ISSUER_ADMIN = "bb".repeat(28);
+const THIRD_PARTY_H = "cc".repeat(28);
+
+const TX = (b, i) => ({ txHash: b.repeat(32), outputIndex: i });
+
+// The "calm" reference-input fixture. Deliberately built so that dropping the
+// LAST CONSTRUCTED entry moves no index: P_TAIL sorts last as well as being
+// constructed last. That isolates mutation N2 to the tests that are about
+// reference-input completeness (3 and 4) instead of every test in the file.
+const P_PARAMS = TX("11", 0); // sorts 0
+const P_NODE = TX("22", 0); // sorts 1
+const P_TAIL = TX("ff", 0); // sorts 2, constructed last
+const CALM_REFS = [P_PARAMS, P_NODE, P_TAIL];
+
+const POLICY_A = "d1".repeat(28);
+const POLICY_B = "d2".repeat(28);
+const POLICY_C = "d3".repeat(28);
+
+/**
+ * Pull one policy's proof back out of the `Pairs<PolicyId, MintingRegistryProof>`
+ * map. `Data.map` is a JS Map keyed by Uint8Array IDENTITY, so `.get()` cannot
+ * find anything — the key must be matched on its BYTES.
+ */
+const proofFor = (map, policyId) => {
+  for (const [k, v] of map) {
+    if (hex(k) === policyId.toLowerCase()) return v;
+  }
+  throw new Error(`no map entry for policy ${policyId}`);
+};
+
+const cbor = (d) => hex(Data.toCBORBytes(d));
+
+test("⛔ omitting the issuance_logic withdrawal shifts plgIdx — the synthetic four-withdrawal set", () => {
+  const plan = issuancePlan({
+    issuanceLogicHash: ISSUANCE_LOGIC,
+    plgHash: PLG_HASH,
+    otherWithdrawals: [S(ISSUER_ADMIN), S(THIRD_PARTY_H)],
+    referenceInputs: CALM_REFS,
+    paramsRefInput: P_PARAMS,
+    issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: P_NODE } }],
+  });
+
+  assert.equal(
+    plan.withdrawals.length,
+    4,
+    "issuance_logic, the dispatcher and both delegates — a count alone would also accept three plus a duplicate"
+  );
+
+  // DERIVATION (harness §7d — assert the IDENTITY at each slot, not just the
+  // count). Every credential here is a script credential, so the script-before-key
+  // rule is inert and the order is bytewise on the hash:
+  //     11… < aa… < bb… < cc…
+  assert.equal(plan.withdrawalIndexOf(S(ISSUANCE_LOGIC)), 0, "11… sorts first");
+  assert.equal(plan.withdrawalIndexOf(S(PLG_HASH)), 1, "aa… second");
+  assert.equal(plan.withdrawalIndexOf(S(ISSUER_ADMIN)), 2, "bb… third");
+  assert.equal(plan.withdrawalIndexOf(S(THIRD_PARTY_H)), 3, "cc… fourth");
+
+  assert.deepEqual(plan.issuanceLogicKey, S(ISSUANCE_LOGIC));
+  assert.equal(plan.plgIdx(), 1, "the dispatcher's slot, over the COMPLETE four-member set");
+
+  // ⚑ THE POINT. A builder that computes the dispatcher's index over the THREE
+  // withdrawals it knows about — omitting issuance_logic, which alpha.4 added —
+  // gets 0. On chain that resolves to the wrong credential and fails an equality
+  // check naming nothing: `covered_by` does not report a missing withdrawal, it
+  // simply returns False.
+  assert.notEqual(
+    withdrawalIndexOf([S(PLG_HASH), S(ISSUER_ADMIN), S(THIRD_PARTY_H)], S(PLG_HASH)),
+    plan.plgIdx(),
+    "0 vs 1 — the exact wrongness this object exists to prevent"
+  );
+});
+
+test("a pure mint has no dispatcher, and asking for plgIdx says so", () => {
+  const plan = issuancePlan({
+    issuanceLogicHash: ISSUANCE_LOGIC,
+    otherWithdrawals: [S(ISSUER_ADMIN), S(THIRD_PARTY_H)],
+    referenceInputs: CALM_REFS,
+    paramsRefInput: P_PARAMS,
+    issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: P_NODE } }],
+  });
+
+  // Asserted FIRST on purpose: mutation N1 removes issuance_logic from the set,
+  // which must NOT reach this refusal. With the throws first, a red anywhere
+  // below is positive evidence that the refusal itself survived.
+  assert.throws(
+    () => plan.plgIdx(),
+    /plgHash/,
+    "register and mint spend no programmable_logic_base input, so there is no dispatcher withdrawal to index — and a plan that silently returned 0 would be the same defect wearing the opposite sign"
+  );
+
+  assert.equal(plan.withdrawals.length, 3);
+  // 11… < bb… < cc…, all script credentials.
+  assert.equal(plan.withdrawalIndexOf(S(ISSUANCE_LOGIC)), 0);
+  assert.equal(plan.withdrawalIndexOf(S(ISSUER_ADMIN)), 1);
+  assert.equal(plan.withdrawalIndexOf(S(THIRD_PARTY_H)), 2);
+});
+
+// Reference inputs whose LEDGER order is not their CONSTRUCTION order, so the
+// sort demonstrably moves them: constructed cc#0, 33#2, 33#0.
+const R_LATE = TX("cc", 0); // sorts 2
+const R_PARAMS = TX("33", 2); // sorts 1
+const R_EARLY = TX("33", 0); // sorts 0
+const SHUFFLED_REFS = [R_LATE, R_PARAMS, R_EARLY];
+
+test("the reference-input set is complete, or params_idx is a hard fail", () => {
+  const plan = issuancePlan({
+    issuanceLogicHash: ISSUANCE_LOGIC,
+    otherWithdrawals: [],
+    referenceInputs: SHUFFLED_REFS,
+    paramsRefInput: R_PARAMS,
+    issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: R_LATE } }],
+  });
+
+  // DERIVATION: ordered by (tx id bytewise, then output index numerically) —
+  //     33…#0  →  0     (R_EARLY, constructed LAST)
+  //     33…#2  →  1     (R_PARAMS)
+  //     cc…#0  →  2     (R_LATE, constructed FIRST)
+  assert.equal(plan.paramsIdx, 1, "same tx id as R_EARLY, higher output index");
+  assert.equal(plan.referenceInputIndexOf(R_LATE), 2, "cc… sorts after both 33… entries");
+  assert.equal(
+    cbor(proofFor(plan.issuanceLogicRedeemer, POLICY_A)),
+    cbor(mintingProofRefInput(2)),
+    "the proof carries the index into the COMPLETE sorted set, not the construction order"
+  );
+
+  // `issuance_mint` calls params.with_protocol_params_fields, which opens with
+  // `list.expect_at(reference_inputs, params_idx)`. That is a HARD FAIL, not a
+  // scan: there is no fallback and no search, so a params UTxO the builder
+  // forgot to add as a reference input cannot be recovered on chain.
+  assert.throws(
+    () =>
+      issuancePlan({
+        issuanceLogicHash: ISSUANCE_LOGIC,
+        otherWithdrawals: [],
+        referenceInputs: [R_LATE, R_EARLY],
+        paramsRefInput: R_PARAMS,
+        issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: R_LATE } }],
+      }),
+    (err) => {
+      assert.ok(
+        err.message.includes(`${R_PARAMS.txHash}#${R_PARAMS.outputIndex}`),
+        `must name the coordinate, got: ${err.message}`
+      );
+      assert.match(err.message, /expect_at/, "must say why there is no fallback");
+      return true;
+    }
+  );
+});
+
+test("adding a reference input shifts every index computed from it", () => {
+  const mk = (refs) =>
+    issuancePlan({
+      issuanceLogicHash: ISSUANCE_LOGIC,
+      otherWithdrawals: [],
+      referenceInputs: refs,
+      paramsRefInput: R_PARAMS,
+      issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: R_LATE } }],
+    });
+
+  const three = mk(SHUFFLED_REFS);
+  // The extra entry sorts BEFORE the params UTxO — 00…#0 is bytewise first —
+  // and is constructed LAST, so nothing about the caller's ordering hints at it.
+  const four = mk([...SHUFFLED_REFS, TX("00", 0)]);
+
+  // DERIVATION, three: 33#0=0, 33#2=1, cc#0=2        → params_idx 1
+  // DERIVATION, four:  00#0=0, 33#0=1, 33#2=2, cc#0=3 → params_idx 2
+  assert.equal(three.paramsIdx, 1);
+  assert.equal(four.paramsIdx, 2);
+  assert.notEqual(
+    three.paramsIdx,
+    four.paramsIdx,
+    "this is why the plan owns the reference-input set: the issuance_logic script arrives as a reference input on EVERY issuing transaction in alpha.4, and it moves params_idx and the registry-node index underneath a builder that computed them earlier"
+  );
+});
+
+test("an output proof is indexed by TAG, and the CIP-68 output shifts it", () => {
+  const T5_PARAMS = TX("11", 0); // sorts 0
+  const T5_N1 = TX("22", 0); // sorts 1
+  const T5_N2 = TX("33", 0); // sorts 2
+  const T5_TAIL = TX("ff", 0); // sorts 3, constructed last
+  const refs = [T5_PARAMS, T5_N1, T5_N2, T5_TAIL];
+
+  const issued = [
+    { policyId: POLICY_A, proof: { kind: "reference-input", input: T5_N1 } },
+    { policyId: POLICY_B, proof: { kind: "reference-input", input: T5_N2 } },
+    { policyId: POLICY_C, proof: { kind: "output", tag: "new-node" } },
+  ];
+
+  const mk = (outputs) =>
+    issuancePlan({
+      issuanceLogicHash: ISSUANCE_LOGIC,
+      otherWithdrawals: [],
+      referenceInputs: refs,
+      paramsRefInput: T5_PARAMS,
+      outputs,
+      issued,
+    });
+
+  const withoutCip68 = mk(["user-token", "covering-node", "new-node"]);
+  const withCip68 = mk(["user-token", "cip68-reference", "covering-node", "new-node"]);
+
+  // The literal this retires is `registryOutputIndex = hasCIP68 ? 3 : 2` at
+  // src/substandards/freeze-and-seize/index.ts:514 — a ternary over a count
+  // rather than a lookup by name. Its CIP-68 branch has NEVER EXECUTED ON CHAIN.
+  assert.equal(
+    cbor(proofFor(withoutCip68.issuanceLogicRedeemer, POLICY_C)),
+    cbor(mintingProofOutputIndex(2)),
+    "three outputs: new-node is at 2"
+  );
+  assert.equal(
+    cbor(proofFor(withCip68.issuanceLogicRedeemer, POLICY_C)),
+    cbor(mintingProofOutputIndex(3)),
+    "the CIP-68 reference output pushes new-node to 3 — the tag is the same, the index is not"
+  );
+
+  assert.deepEqual(withCip68.declaredOutputs, [
+    "user-token",
+    "cip68-reference",
+    "covering-node",
+    "new-node",
+  ]);
+
+  // The whole map, so the reference-input arms are pinned in the same breath.
+  assert.equal(
+    cbor(withoutCip68.issuanceLogicRedeemer),
+    cbor(
+      issuanceLogicRedeemer([
+        { policyId: POLICY_A, proof: mintingProofRefInput(1) },
+        { policyId: POLICY_B, proof: mintingProofRefInput(2) },
+        { policyId: POLICY_C, proof: mintingProofOutputIndex(2) },
+      ])
+    )
+  );
+});
+
+test("the plan's IssuanceRedeemer carries params_idx over the complete reference-input set", () => {
+  const plan = issuancePlan({
+    issuanceLogicHash: ISSUANCE_LOGIC,
+    otherWithdrawals: [],
+    referenceInputs: SHUFFLED_REFS,
+    paramsRefInput: R_PARAMS,
+    issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: R_LATE } }],
+  });
+
+  assert.equal(cbor(plan.issuanceRedeemer), cbor(issuanceRedeemer(1)));
+  assert.deepEqual(
+    plan.referenceInputs,
+    SHUFFLED_REFS,
+    "handed back COMPLETE and UNSORTED — these are exactly the reference inputs the builder must emit"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// programmableLogicGlobalRedeemer — the Object.prototype hole
+// ---------------------------------------------------------------------------
+
+test("⛔ programmableLogicGlobalRedeemer refuses an inherited Object.prototype key", () => {
+  // HARM ANALYSIS. Before the fix, `PlgAct["valueOf"]` inherits a FUNCTION from
+  // Object.prototype, so `idx === undefined` is false and the function is handed
+  // to Data.constr, which dies inside Evolution's schema with
+  //     Constr (Constructor) └─ ["index"] └─ Data.Constr.Index
+  //     └─ From side refinement failure └─ Expected big
+  // That message names NEITHER the unknown act NOR the three valid ones: it
+  // points the reader at Evolution's schema instead of at their own typo.
+  // TypeScript callers cannot reach it — `PlgActVariant` is `keyof typeof
+  // PlgAct` — but `.mjs` tests and JavaScript consumers can, and this package
+  // ships to JavaScript consumers. Twin of the protocolParamsRedeemer finding
+  // (T-F02-1 audit F-2) in src/core/evo-utils.ts.
+  for (const inherited of ["valueOf", "toString", "constructor"]) {
+    assert.throws(
+      () => programmableLogicGlobalRedeemer(inherited),
+      (err) => {
+        assert.match(err.message, /unknown act/, `${inherited}: must say what went wrong`);
+        assert.match(err.message, /TRANSFER/, `${inherited}: must name the valid acts`);
+        assert.match(err.message, /THIRD_PARTY/, `${inherited}: must name the valid acts`);
+        assert.match(err.message, /UNFRACKING/, `${inherited}: must name the valid acts`);
+        return true;
+      },
+      `${inherited} is inherited from Object.prototype, not a dispatch variant`
+    );
+  }
+
+  // §7f — a guard that refuses everything is not a fixed guard. The three real
+  // acts must still encode to exactly the bytes they encoded to before.
+  assert.equal(cbor(programmableLogicGlobalRedeemer("TRANSFER")), cbor(Data.constr(0n, [])));
+  assert.equal(cbor(programmableLogicGlobalRedeemer("THIRD_PARTY")), cbor(Data.constr(1n, [])));
+  assert.equal(cbor(programmableLogicGlobalRedeemer("UNFRACKING")), cbor(Data.constr(2n, [])));
+});
+
+// ---------------------------------------------------------------------------
+// The ten refusals
+// ---------------------------------------------------------------------------
+
+const validPlan = (over = {}) => ({
+  issuanceLogicHash: ISSUANCE_LOGIC,
+  otherWithdrawals: [S(ISSUER_ADMIN)],
+  referenceInputs: CALM_REFS,
+  paramsRefInput: P_PARAMS,
+  issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: P_NODE } }],
+  ...over,
+});
+
+/**
+ * ⚑ Each entry asserts on the MESSAGE, never merely that something threw: a
+ * suite of bare `throws` cannot tell a working implementation from a gutted one
+ * (harness §9c-i) — every clause aborts, so every test passes.
+ *
+ * The lowercase spelling is listed FIRST in the duplicate-policy case on
+ * purpose, so that mutation N5 (which reddens only the reverse ordering) stays
+ * confined to datum-layout.test.mjs where it is measured.
+ */
+const REFUSALS = [
+  {
+    name: "an empty issued list",
+    build: () => validPlan({ issued: [] }),
+    match: /EMPTY/,
+  },
+  {
+    name: "a duplicate policy id differing only in hex case",
+    build: () =>
+      validPlan({
+        issued: [
+          { policyId: POLICY_A, proof: { kind: "reference-input", input: P_NODE } },
+          { policyId: POLICY_A.toUpperCase(), proof: { kind: "reference-input", input: P_TAIL } },
+        ],
+      }),
+    match: /duplicate policy id/,
+  },
+  {
+    name: "a proof that is not a source — a pre-built MintingRegistryProof",
+    build: () => validPlan({ issued: [{ policyId: POLICY_A, proof: mintingProofRefInput(0) }] }),
+    match: /MintingRegistryProof/,
+  },
+  {
+    name: "paramsRefInput absent from referenceInputs",
+    build: () => validPlan({ paramsRefInput: TX("99", 7) }),
+    match: /99{63}#7/,
+  },
+  {
+    name: "a reference-input proof whose input is absent from referenceInputs",
+    build: () =>
+      validPlan({
+        issued: [{ policyId: POLICY_A, proof: { kind: "reference-input", input: TX("88", 5) } }],
+      }),
+    match: /88{63}#5/,
+  },
+  {
+    name: "an output proof whose tag is absent from outputs",
+    build: () =>
+      validPlan({
+        outputs: ["user-token", "covering-node"],
+        issued: [{ policyId: POLICY_A, proof: { kind: "output", tag: "no-such-tag" } }],
+      }),
+    match: /no-such-tag/,
+  },
+  {
+    name: "an output proof when outputs was not supplied at all",
+    build: () =>
+      validPlan({ issued: [{ policyId: POLICY_A, proof: { kind: "output", tag: "new-node" } }] }),
+    match: /outputs/,
+  },
+  {
+    name: "a duplicate output tag",
+    build: () =>
+      validPlan({
+        outputs: ["covering-node", "covering-node"],
+        issued: [{ policyId: POLICY_A, proof: { kind: "output", tag: "covering-node" } }],
+      }),
+    match: /covering-node/,
+  },
+  {
+    name: "a duplicate reference input",
+    build: () => validPlan({ referenceInputs: [P_PARAMS, P_NODE, P_NODE] }),
+    match: /22{63}#0/,
+  },
+  {
+    name: "a duplicate withdrawal credential",
+    build: () => validPlan({ otherWithdrawals: [S(ISSUER_ADMIN), S(ISSUER_ADMIN)] }),
+    match: /duplicate withdrawal credential/,
+  },
+];
+
+for (const { name, build, match } of REFUSALS) {
+  test(`⚑ issuancePlan refuses: ${name}`, () => {
+    assert.throws(() => issuancePlan(build()), match);
+  });
+}
+
+test("issuancePlan's refusal set has exactly ten members", () => {
+  // §2d — a membership list only ever detects REMOVALS, and the member it stops
+  // noticing is the newest one, which is the one least likely to be covered
+  // anywhere else. Pinning the count is what makes an added-and-untested
+  // refusal, or a quietly deleted one, visible.
+  assert.equal(REFUSALS.length, 10);
+  assert.equal(new Set(REFUSALS.map((r) => r.name)).size, 10, "ten DISTINCT cases, not one listed twice");
 });
