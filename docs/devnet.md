@@ -336,6 +336,32 @@ cannot be green while the SDK is broken:
 curl -sf http://localhost:1442/matches >/dev/null && echo kupo-ok
 ```
 
+### ⚠ AND A THIRD STATE, BETWEEN DEAD AND HEALTHY: answering, correct, and BEHIND
+
+`/matches` returning 200 proves the index is **open**. It does not prove the index is **current**.
+A freshly restarted Kupo answers immediately and then re-indexes from the origin, so for the first
+stretch of its life every query it serves is correct about a chain that has moved on.
+
+That state is the worst of the three to debug, because the failures it produces are **code 3117
+"unknown UTxO references as inputs"** — indistinguishable from a genuine bug in the transaction you
+just built, and identical to the indexer-lag entry further down this page. Dead Kupo fails loudly;
+split-brain Kupo fails on every query; *trailing* Kupo fails on exactly the inputs you created most
+recently, which is to say the ones your test just made.
+
+**⇒ Before depending on a Kupo you did not watch start, compare its checkpoint to the node tip:**
+
+```bash
+curl -sf http://localhost:1442/health | grep kupo_most_recent_checkpoint   # e.g. 1570
+curl -sf -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"queryNetwork/tip","id":null}' \
+  http://localhost:1337 | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["slot"])'
+```
+
+Equal means current. This is the one question `/health` answers well — note the irony, and note that
+it is only trustworthy **alongside** the `/matches` check above, never instead of it: a split-brain
+Kupo also reports a checkpoint equal to the tip, because it is still consuming from Ogmios happily.
+**Two checks, two different failures, neither sufficient alone.**
+
 Diagnose the state in one command — deleted inodes are the signature:
 
 ```bash
