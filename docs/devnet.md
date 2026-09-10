@@ -6,7 +6,8 @@ How to run the devnet-backed tests, and the traps that cost real time getting th
 
 ```bash
 npx --yes @bloxbean/yaci-devkit up --enable-yaci-store --tail false   # node, store, ogmios
-bash ~/.yaci-cli/local-clusters/default/kupo.sh &                      # Kupo — see below
+setsid nohup bash ~/.yaci-cli/local-clusters/default/kupo.sh \
+  >/tmp/kupo.log 2>&1 </dev/null &                                     # Kupo — see below
 npm run test:devnet
 ```
 
@@ -124,6 +125,16 @@ await client.getUtxos(EvoAddress.toBech32(addressObj));   // WRONG — fails opa
 transactions on the same ledger simultaneously, each deploying its own scripts and funding as
 many of its own wallets as it likes. That is what a shared devnet is for.
 
+**⛔ LIFECYCLE IS NOT YOURS TO RUN (ruled by Giovanni, 2026-09-10).** The devnet is
+INFRASTRUCTURE owned by the DevOps role (Steward), not by whichever project session happens to
+need it. It stays **shared for USE** — deploy scripts, fund wallets, submit transactions freely,
+never ask. It is **exclusive for LIFECYCLE**: `up`, `down`, reset, `--help`, and starting or
+stopping Kupo belong to Steward alone, and a session that needs one **asks the Machine Owner,
+who dispatches Steward**. Do not run it yourself and do not brief Steward directly.
+*Why the rule changed: the previous convention — "the session that needs it starts it" — left the
+devnet DOWN for a day and a half with a slice staged behind it, because the session that needed it
+was the one role not permitted to start it.*
+
 **Coordinate before anything destructive** — `up`, `down`, reset, or `--help` (which kills it,
 see above). Those are the operations that are genuinely exclusive, because the machine has
 exactly one cluster: a single `~/.yaci-cli` with one `local-clusters/default` and one node
@@ -132,8 +143,19 @@ use needs no coordination at all.
 
 Two reasons a restart is expensive beyond the coordination:
 
-- **Kupo does not come back.** It is started manually (see above) and nothing restarts it.
+- **Kupo does not come back.** It is started manually (see above) and nothing restarts it — no
+  systemd unit, no cron entry, no container; all three checked 2026-09-10.
+  ⚑ **HALF OF THIS WAS SELF-INFLICTED, and this document taught it.** Until 2026-09-10 the two
+  start snippets here used a bare `&`, which ties Kupo to the launching shell: the shell exits,
+  the process group is torn down, Kupo dies. It was read as "the DevKit does not restart Kupo"
+  for weeks. **Always start it detached** — `setsid nohup … >/tmp/kupo.log 2>&1 </dev/null &` —
+  and do not simplify that back to `&` when copying it somewhere new; the flags ARE the fix, not
+  ceremony. (Found by the DevOps role, 2026-09-10.)
 - **A reset wipes everyone's state**, including any suite mid-run.
+- **It does not survive a reboot, and nothing brings it back.** Assume it is gone rather than
+  assume it is there: run the health checks first, and if it is down, ask (see the ownership rule
+  above). ⚠ **Memory is the binding constraint, not disk** — measured 2026-09-10, ~5.0 GB
+  available of 29.3 GB, because this machine also runs the ryzen k8s cluster.
 
 The distinction matters and is easy to get backwards: a single-instance *lifecycle* constraint
 is not single-tenancy of the *chain*. Treating it as the latter serialises work that never
@@ -219,7 +241,7 @@ remaining test reports `hookFailed`, which is correct behaviour and looks alarmi
 and re-run before investigating anything else:**
 
 ```bash
-bash ~/.yaci-cli/local-clusters/default/kupo.sh &
+setsid nohup bash ~/.yaci-cli/local-clusters/default/kupo.sh >/tmp/kupo.log 2>&1 </dev/null &
 ```
 
 The failures are not a regression in whatever you changed last, and the timing invites believing
