@@ -420,6 +420,14 @@ test("B. the missing twin: EVERY title present, version BELOW the target, refuse
     new RegExp(`blueprints/standard/v${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}/`),
     "must point at the blueprint directory for the target",
   );
+
+  // Same property test A asserts: nothing is missing here, so an empty
+  // "Missing required validator(s):" list would name a defect that is absent.
+  assert.doesNotMatch(
+    msg,
+    /Missing required validator\(s\): \./,
+    "an empty missing-validator list names a defect that is not present",
+  );
 });
 
 test("C. EVERY title present and an UNPARSEABLE version claims no direction", () => {
@@ -429,4 +437,11 @@ test("C. EVERY title present and an UNPARSEABLE version claims no direction", ()
   assert.ok(msg, "a preamble that cannot be read cannot yield a verdict");
   assert.match(msg, /could not be parsed/);
   assert.doesNotMatch(msg, /EARLIER|LATER/, "must not claim a direction it cannot establish");
+
+  // Same property test A asserts.
+  assert.doesNotMatch(
+    msg,
+    /Missing required validator\(s\): \./,
+    "an empty missing-validator list names a defect that is not present",
+  );
 });

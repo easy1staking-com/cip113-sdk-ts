@@ -416,15 +416,75 @@ export class DeploymentMismatchError extends Error {
  * them — a tautology that cannot fail. Do not read a passing assertion inside a
  * bootstrap as evidence that the deployment is correct; assert on LOAD instead.
  */
-export function assertDeploymentScripts(
+/**
+ * Everything one derivation of a deployment produces: the scripts themselves,
+ * the derived-vs-deployed comparisons over them, and the builders they came
+ * from.
+ *
+ * ⛔ INTERNAL, AND IT EXISTS TO MAKE ONE FACT HAVE ONE DERIVATION. Before this,
+ * `assertDeploymentScripts` derived ten scripts and compared them to the record,
+ * and `buildDeploymentScripts` then derived the SAME TEN AGAIN from its own
+ * argument expressions and returned THOSE. The assertion checked the first set;
+ * the second set was what every substandard actually built transactions from,
+ * and nothing compared it to anything.
+ *
+ * ⚠ MEASURED, not feared: swapping `issuance_logic`'s two same-typed PolicyIds
+ * at the resolution site alone, or reading `protocolParams.txInput` where
+ * `upgradeMultisig.txInput` belonged there, left every assertion green and the
+ * whole offline suite passing — while the resolved script was the wrong one.
+ * That is the S-11 defect's exact shape (two derivations of one fact, only one
+ * guarded) at a call site nobody was looking at.
+ *
+ * ⇒ Both public functions now go through here, so the script the assertion
+ * checked IS the object the resolved surface returns — the same reference, not
+ * an equal-looking rebuild.
+ */
+interface DerivedDeployment {
+  /** The builders these scripts came from, so `buildIssuanceMint` reuses them. */
+  builders: StandardScripts;
+  /** `protocol_params`'s hash: the NFT policy AND the params address. */
+  paramsPolicy: PolicyId;
+  /** Every parameterisable standard script, derived exactly once. */
+  scripts: Omit<ResolvedStandardScripts, "buildIssuanceMint">;
+  /** One comparison per script above, in the same order. */
+  checks: ScriptHashCheck[];
+}
+
+function deriveDeploymentScripts(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
-): ScriptHashCheck[] {
+): DerivedDeployment {
   const builders = createStandardScripts(blueprint);
 
   const plb = deployment.programmableLogicBase.scriptHash;
   const registryPolicy = deployment.registry.scriptHash;
+  const paramsPolicy = deployment.protocolParams.policyId;
   const mid = deployment.maxInlineDatumBytes;
+
+  // ⚑ ONE call per script. Every `derived` field below reads a `.hash` off one
+  // of these objects, and `scripts` returns the very same objects — so a wrong
+  // argument here is caught by the check beside it rather than surviving into
+  // the resolved surface.
+  const protocolParams = builders.protocolParams(deployment.protocolParams.txInput);
+  const programmableLogicBase = builders.programmableLogicBase(paramsPolicy);
+  const transfer = builders.transfer(plb, registryPolicy, mid);
+  const thirdParty = builders.thirdParty(plb, registryPolicy, mid);
+  const unfracking = builders.unfracking(plb, registryPolicy, mid);
+  const programmableLogicGlobal = builders.programmableLogicGlobal(
+    deployment.transfer.scriptHash,
+    deployment.thirdParty.scriptHash,
+    deployment.unfracking.scriptHash,
+  );
+  const issuanceCborHexMint = builders.issuanceCborHexMint(
+    deployment.issuance.txInput,
+    deployment.issuance.alwaysFailScriptHash,
+  );
+  const registry = builders.registry(
+    deployment.registry.txInput,
+    deployment.registry.issuanceScriptHash,
+  );
+  const issuanceLogic = builders.issuanceLogic(plb, registryPolicy, paramsPolicy, mid);
+  const upgradeMultisig = builders.upgradeMultisig(deployment.upgradeMultisig.txInput);
 
   const checks: ScriptHashCheck[] = [
     {
@@ -433,27 +493,27 @@ export function assertDeploymentScripts(
       // deriving them separately is not "belt and braces" — it is two chances
       // to disagree about one fact.
       name: "protocol_params (policy == address)",
-      derived: builders.protocolParams(deployment.protocolParams.txInput).hash,
+      derived: protocolParams.hash,
       deployed: deployment.protocolParams.policyId,
     },
     {
       name: "programmable_logic_base",
-      derived: builders.programmableLogicBase(deployment.protocolParams.policyId).hash,
+      derived: programmableLogicBase.hash,
       deployed: plb,
     },
     {
       name: "transfer",
-      derived: builders.transfer(plb, registryPolicy, mid).hash,
+      derived: transfer.hash,
       deployed: deployment.transfer.scriptHash,
     },
     {
       name: "third_party",
-      derived: builders.thirdParty(plb, registryPolicy, mid).hash,
+      derived: thirdParty.hash,
       deployed: deployment.thirdParty.scriptHash,
     },
     {
       name: "unfracking",
-      derived: builders.unfracking(plb, registryPolicy, mid).hash,
+      derived: unfracking.hash,
       deployed: deployment.unfracking.scriptHash,
     },
     {
@@ -464,29 +524,19 @@ export function assertDeploymentScripts(
       // can be caught — and a dispatcher naming stale delegates fails at
       // withdrawal time with an index error, never with "wrong dispatcher".
       name: "programmable_logic_global (dispatcher coherence)",
-      derived: builders.programmableLogicGlobal(
-        deployment.transfer.scriptHash,
-        deployment.thirdParty.scriptHash,
-        deployment.unfracking.scriptHash,
-      ).hash,
+      derived: programmableLogicGlobal.hash,
       deployed: deployment.programmableLogicGlobal.scriptHash,
     },
     {
       name: "issuance_cbor_hex_mint",
-      derived: builders.issuanceCborHexMint(
-        deployment.issuance.txInput,
-        deployment.issuance.alwaysFailScriptHash
-      ).hash,
+      derived: issuanceCborHexMint.hash,
       deployed: deployment.issuance.policyId,
     },
     {
       // ⚑ Also one derivation for what used to be two (registry_mint's policy
       // and registry_spend's address).
       name: "registry (policy == address)",
-      derived: builders.registry(
-        deployment.registry.txInput,
-        deployment.registry.issuanceScriptHash,
-      ).hash,
+      derived: registry.hash,
       deployed: registryPolicy,
     },
     {
@@ -501,12 +551,7 @@ export function assertDeploymentScripts(
       // and deploys — see the adjacent-parameter negative in
       // test/deployment-assertion.test.mjs.
       name: "issuance_logic",
-      derived: builders.issuanceLogic(
-        plb,
-        registryPolicy,
-        deployment.protocolParams.policyId,
-        mid,
-      ).hash,
+      derived: issuanceLogic.hash,
       deployed: deployment.issuanceLogic.scriptHash,
     },
     {
@@ -534,15 +579,44 @@ export function assertDeploymentScripts(
       // never inspects it. Such a check would reject valid deployments — it is
       // the S-11 defect returning under a new name.
       name: "upgrade_multisig",
-      derived: builders.upgradeMultisig(deployment.upgradeMultisig.txInput).hash,
+      derived: upgradeMultisig.hash,
       deployed: deployment.upgradeMultisig.scriptHash,
     },
   ];
 
+  return {
+    builders,
+    paramsPolicy,
+    scripts: {
+      protocolParams,
+      programmableLogicBase,
+      transfer,
+      thirdParty,
+      unfracking,
+      programmableLogicGlobal,
+      issuanceCborHexMint,
+      registry,
+      issuanceLogic,
+      upgradeMultisig,
+    },
+    checks,
+  };
+}
+
+/** Throw if any derived hash disagrees with the deployment record. */
+function refuseOnMismatch(checks: ScriptHashCheck[], blueprintTitle: string): void {
   const mismatches = checks.filter((c) => c.derived !== c.deployed);
   if (mismatches.length > 0) {
-    throw new DeploymentMismatchError(mismatches, blueprint.preamble.title);
+    throw new DeploymentMismatchError(mismatches, blueprintTitle);
   }
+}
+
+export function assertDeploymentScripts(
+  blueprint: PlutusBlueprint,
+  deployment: DeploymentParams,
+): ScriptHashCheck[] {
+  const { checks } = deriveDeploymentScripts(blueprint, deployment);
+  refuseOnMismatch(checks, blueprint.preamble.title);
   return checks;
 }
 
@@ -558,44 +632,30 @@ export function buildDeploymentScripts(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
 ): ResolvedStandardScripts {
-  assertDeploymentScripts(blueprint, deployment);
-
-  const builders = createStandardScripts(blueprint);
-  const paramsPolicy = deployment.protocolParams.policyId;
-
-  const plb = deployment.programmableLogicBase.scriptHash;
-  const registryPolicy = deployment.registry.scriptHash;
-  const mid = deployment.maxInlineDatumBytes;
+  // ⚑ ONE FACT, ONE DERIVATION — and this line is what makes that phrase true
+  // rather than aspirational. The scripts returned below are the SAME OBJECTS
+  // whose hashes were just checked, not a second build from the same arguments.
+  // A second build is a second chance to disagree, and it WAS unguarded here:
+  // see the block on `DerivedDeployment`.
+  const { builders, paramsPolicy, scripts, checks } = deriveDeploymentScripts(
+    blueprint,
+    deployment,
+  );
+  refuseOnMismatch(checks, blueprint.preamble.title);
 
   return {
-    protocolParams: builders.protocolParams(deployment.protocolParams.txInput),
-    programmableLogicBase: builders.programmableLogicBase(paramsPolicy),
-    transfer: builders.transfer(plb, registryPolicy, mid),
-    thirdParty: builders.thirdParty(plb, registryPolicy, mid),
-    unfracking: builders.unfracking(plb, registryPolicy, mid),
-    programmableLogicGlobal: builders.programmableLogicGlobal(
-      deployment.transfer.scriptHash,
-      deployment.thirdParty.scriptHash,
-      deployment.unfracking.scriptHash,
-    ),
-    issuanceCborHexMint: builders.issuanceCborHexMint(
-      deployment.issuance.txInput,
-      deployment.issuance.alwaysFailScriptHash
-    ),
-    registry: builders.registry(
-      deployment.registry.txInput,
-      deployment.registry.issuanceScriptHash,
-    ),
-    issuanceLogic: builders.issuanceLogic(plb, registryPolicy, paramsPolicy, mid),
-    // Resolved HERE from the deployment's own one-shot, so nothing downstream
-    // derives it a second time: one fact, one derivation.
-    upgradeMultisig: builders.upgradeMultisig(deployment.upgradeMultisig.txInput),
+    ...scripts,
     buildIssuanceMint(mintingLogicHash: ScriptHash) {
       // ⚑ ITS SIGNATURE IS UNCHANGED AND ITS RESULT IS NOT. alpha.4 dropped
       // `programmable_logic_base` and `registry_node_cs` from issuance_mint's
       // parameters, so THE POLICY ID CHANGES FOR THE SAME MINTING LOGIC. That
       // is correct, not a bug to fix: an alpha.3 token and an alpha.4 token
       // built from identical issuance logic are different assets.
+      //
+      // ⚠ NOT part of the single-derivation collapse above, and cannot be: it
+      // is parameterised per minting logic, so there is no one hash for
+      // `assertDeploymentScripts` to check. It stays uncovered, as the
+      // assertion's own "Not covered" note says.
       return builders.issuanceMint(mintingLogicHash, paramsPolicy);
     },
   };

@@ -399,6 +399,58 @@ test("registry and protocol_params each expose ONE hash, not a pair", () => {
   }
 });
 
+test("⛔ THE RESOLVED SURFACE reproduces the deployment — every script, not just the checked ones", () => {
+  // ⛔ THE DEFECT THIS EXISTS FOR, and it is S-11's shape at a different call
+  // site. `assertDeploymentScripts` derived ten scripts and compared them to the
+  // record. `buildDeploymentScripts` then derived the SAME ten AGAIN, from its
+  // own argument expressions, and returned THOSE. Nothing compared the second
+  // set to anything.
+  //
+  // ⚠ So a wrong argument at the RESOLUTION site was invisible: swapping
+  // issuance_logic's two PolicyIds there, or reading protocolParams.txInput for
+  // upgrade_multisig there, left the assertion green and the whole suite at
+  // 151/151 — while the object CIP113.init hands to every substandard was the
+  // wrong script. The assertion site was the one under test; the resolution
+  // site was the one that builds transactions.
+  //
+  // ⇒ Two derivations of one fact are two chances to disagree, and only one of
+  // them was guarded. This test guards the other one; the collapse in
+  // scripts.ts is what makes them the same object rather than merely equal.
+  const resolved = scriptsModule.buildDeploymentScripts(blueprint, DEPLOYMENT);
+
+  const expected = [
+    ["protocolParams", DEPLOYMENT.protocolParams.policyId],
+    ["programmableLogicBase", DEPLOYMENT.programmableLogicBase.scriptHash],
+    ["transfer", DEPLOYMENT.transfer.scriptHash],
+    ["thirdParty", DEPLOYMENT.thirdParty.scriptHash],
+    ["unfracking", DEPLOYMENT.unfracking.scriptHash],
+    ["programmableLogicGlobal", DEPLOYMENT.programmableLogicGlobal.scriptHash],
+    ["issuanceCborHexMint", DEPLOYMENT.issuance.policyId],
+    ["registry", DEPLOYMENT.registry.scriptHash],
+    ["issuanceLogic", DEPLOYMENT.issuanceLogic.scriptHash],
+    ["upgradeMultisig", DEPLOYMENT.upgradeMultisig.scriptHash],
+  ];
+
+  // ⚑ TEN, asserted as a COUNT as well as by member. A list of "these must
+  // match" only ever detects a changed hash; it stops noticing the NEWEST
+  // member, which is the one least likely to be covered anywhere else.
+  assert.equal(
+    expected.length,
+    EXPECTED_CHECKS.length,
+    "every script the assertion checks must also be asserted on the resolved surface",
+  );
+
+  for (const [name, deployed] of expected) {
+    assert.ok(resolved[name], `the resolved surface must expose ${name}`);
+    assert.equal(
+      resolved[name].hash,
+      deployed,
+      `resolved.${name} does not reproduce the deployment — the resolution site and the ` +
+        `assertion site disagree, and only the assertion site is checked`,
+    );
+  }
+});
+
 test("NEGATIVE: the WRONG one-shot outref for upgrade_multisig is caught", () => {
   // ⛔ THE ALPHA.4 SUCCESSOR TO THE S-11 TEST, AND ITS HISTORY IS THE REASON IT
   // LOOKS LIKE THIS.
@@ -435,6 +487,63 @@ test("NEGATIVE: the WRONG one-shot outref for upgrade_multisig is caught", () =>
       return true;
     },
     "reading protocolParams.txInput where upgradeMultisig.txInput belongs MUST be caught"
+  );
+
+  // ⛔ AND THE ASSERTION ABOVE CANNOT, ON ITS OWN, TELL YOU WHICH FIELD THE CODE
+  // READ. MEASURED: with the derivation mutated to read
+  // `deployment.protocolParams.txInput`, this test STAYS GREEN — because the
+  // mutated record sets the two fields EQUAL, so the mutant derives from
+  // `PP_TX` while the record still holds a hash derived from `UM_TX`, and that
+  // is still exactly one mismatch named `upgrade_multisig`. The count is right
+  // for the wrong reason.
+  //
+  // ⇒ Same rule as `issuance_logic`'s two PolicyIds, and this is its second
+  // occurrence in one slice: WHEN BOTH OPERANDS OF A COMPARISON COME FROM THE
+  // SAME BUILDER, ASSERT THE APPLIED PARAMETER, NOT THE RESULTING HASH. The
+  // recorder reports what was actually applied; `UM_TX.txHash` is a value fixed
+  // outside the builder.
+  // ⚠ AND IT TAKES TWO ASSERTIONS, NOT ONE, BECAUSE THERE ARE TWO PLACES THE
+  // FIELD CAN BE READ WRONGLY — the BUILDER (does it apply the outref it was
+  // handed?) and the SEAM (is it handed the right field of the record?). A
+  // first draft asserted only the builder, by driving it with an explicit
+  // UM_TX, and the derivation-site mutation walked straight past it: the
+  // assertion never travelled through the code under test. Testing the
+  // mechanism is not testing the wiring.
+  const applied = [];
+  const recording = scriptsModule.createStandardScripts(blueprint, (e) => applied.push(e));
+  const fromUmTx = recording.upgradeMultisig(UM_TX);
+
+  // (i) THE BUILDER — assert the APPLIED PARAMETER, by index, against a value
+  // fixed outside the builder. Same rule as `issuance_logic`'s two PolicyIds,
+  // and this is its second occurrence in one slice.
+  assert.equal(applied.length, 1, "exactly one parameterisation should have been recorded");
+  assert.equal(applied[0].title, "upgrade_multisig.upgrade_multisig.withdraw");
+  const outRef = applied[0].params[0];
+  assert.equal(
+    Buffer.from(outRef.fields[0]).toString("hex"),
+    UM_TX.txHash,
+    "upgrade_multisig must be parameterised by the outref it was handed",
+  );
+  assert.equal(outRef.fields[1], BigInt(UM_TX.outputIndex), "and by its output index");
+
+  // (ii) THE SEAM — assert that the DERIVATION reads `upgradeMultisig.txInput`
+  // and not `protocolParams.txInput`. The check's own `derived` hash is what
+  // the production path produced; both comparands here are parameterised by an
+  // outref this test names explicitly, so the field selection is what is under
+  // test rather than the builder.
+  const derived = assertDeploymentScripts(blueprint, DEPLOYMENT).find(
+    (c) => c.name === "upgrade_multisig",
+  );
+  assert.ok(derived, "the assertion must still perform an upgrade_multisig check");
+  assert.equal(
+    derived.derived,
+    fromUmTx.hash,
+    "the derivation must read upgradeMultisig.txInput — its OWN one-shot",
+  );
+  assert.notEqual(
+    derived.derived,
+    recording.upgradeMultisig(PP_TX).hash,
+    "reading protocolParams.txInput here is the S-11 conflation in a new shape",
   );
 });
 
