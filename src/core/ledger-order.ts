@@ -337,6 +337,23 @@ export function issuancePlan(params: {
   /** Every policy this transaction mints or burns. */
   issued: readonly IssuedPolicy[];
 }): IssuancePlan {
+  // ⛔ `issuanceLogicHash` IS REQUIRED, NOT OPTIONAL — there is no absent case
+  // to confuse it with, so `""` or a non-string value is refused at entry by
+  // name rather than left to build a zero-length credential silently (T-F04-1b,
+  // the twin of the plgHash guard below).
+  if (typeof params.issuanceLogicHash !== "string" || params.issuanceLogicHash.length === 0) {
+    const got =
+      params.issuanceLogicHash === ""
+        ? "an EMPTY STRING"
+        : `a ${typeof params.issuanceLogicHash} (${JSON.stringify(params.issuanceLogicHash)})`;
+    throw new Error(
+      `issuancePlan: issuanceLogicHash must be a non-empty string; got ${got}. This is the ` +
+        `issuance_logic script hash from the protocol-params datum, field 1 — a zero-length ` +
+        `or non-string value is not a credential hash, and it would occupy a withdrawal slot ` +
+        `that no credential can ever match on chain.`
+    );
+  }
+
   const issuanceLogicKey: WithdrawalKey = {
     hash: params.issuanceLogicHash,
     isScript: true,
@@ -350,12 +367,26 @@ export function issuancePlan(params: {
   // falsy-but-present value that some branches read as absent and others as
   // present is how a duplicate-credential scan gets skipped by both halves at
   // once (T-F04-1 audit r1, F-2).
-  if (params.plgHash !== undefined && params.plgHash.length === 0) {
+  //
+  // ⛔ WIDENED, T-F04-1b (audit r2, N-1 + N-3): the check used to be
+  // `params.plgHash.length === 0`, which caught `""` only — `0`, `false`,
+  // `NaN` and `null` all still reached the classification line below unrefused.
+  // It is now `typeof !== "string"`, so EVERY non-string-or-empty value dies
+  // here by name instead of reaching a raw TypeError (N-3) or, with the
+  // classification line's protection removed, the F-2 defect (N-1).
+  if (
+    params.plgHash !== undefined &&
+    (typeof params.plgHash !== "string" || params.plgHash.length === 0)
+  ) {
+    const got =
+      params.plgHash === ""
+        ? "an EMPTY STRING"
+        : `a ${typeof params.plgHash} (${JSON.stringify(params.plgHash)})`;
     throw new Error(
-      `issuancePlan: plgHash was supplied as an EMPTY STRING. Pass the ` +
+      `issuancePlan: plgHash must be a non-empty string; got ${got}. Pass the ` +
         `programmable_logic_global script hash when this transaction spends a ` +
         `programmable_logic_base input, or OMIT plgHash entirely when it does not — a ` +
-        `zero-length credential hash is neither, and it would occupy a withdrawal slot ` +
+        `zero-length or non-string value is neither, and it would occupy a withdrawal slot ` +
         `that no credential can ever match on chain.`
     );
   }
@@ -364,13 +395,23 @@ export function issuancePlan(params: {
   // the dispatcher rule lives in exactly one place — it already adds plgHash and
   // already refuses duplicates over the complete set.
   //
-  // ⚠ PAIRED WITH THE EMPTY-plgHash GUARD ABOVE, and legitimate only because of
-  // it. `!== undefined` rather than truthiness is what makes this branch agree
-  // with the two `=== undefined` tests further down; with the entry guard in
-  // place no falsy-but-present value can reach here, so MUTATING THIS LINE BACK
-  // TO TRUTHINESS REDDENS NOTHING (measured, r3 M-F2b — a deliberate survivor).
-  // If that entry guard is ever removed, this line becomes load-bearing again
-  // and its absence is the F-2 defect: both duplicate scans skipped at once.
+  // ⚠ PAIRED WITH THE plgHash GUARD ABOVE, and legitimate only because of it.
+  // `!== undefined` rather than truthiness is what makes this branch agree with
+  // the two `=== undefined` tests further down. AUDIT r2, N-1: an earlier
+  // version of this comment claimed the entry guard already made this line
+  // redundant ("MUTATING THIS LINE BACK TO TRUTHINESS REDDENS NOTHING") — that
+  // was FALSE. Before T-F04-1b widened the entry guard, it covered `""` alone,
+  // so `!== undefined` here was what forced every OTHER falsy-but-present value
+  // (`0`, `false`, `NaN`) into plbWithdrawalPlan, whose compareHex throws
+  // loudly, instead of into the pure-mint branch below, where BOTH duplicate
+  // scans are skipped and the F-2 defect returns verbatim.
+  //
+  // T-F04-1b's entry guard now refuses `typeof !== "string" || length === 0`,
+  // so every falsy value this line used to have to catch is already refused
+  // before reaching here — this line is UNREACHABLE-BY-CONSTRUCTION again, as
+  // of this slice (T-F04-1b). It stays anyway: if that entry guard is ever
+  // loosened back toward `""`-only, this line becomes load-bearing again
+  // exactly as N-1 describes, and removing it would silently reopen F-2.
   const withOthers = [issuanceLogicKey, ...params.otherWithdrawals];
   const withdrawals = params.plgHash !== undefined
     ? plbWithdrawalPlan({ plgHash: params.plgHash, others: withOthers }).all
