@@ -73,6 +73,8 @@ import {
   KeyHash,
   InlineDatum,
   TransactionHash as EvoTransactionHash,
+  Withdrawals as EvoWithdrawals,
+  type Transaction as EvoTransaction,
   type UTxO as EvoUTxO,
 } from "@evolution-sdk/evolution";
 
@@ -192,6 +194,67 @@ export async function readUpgradeMultisigConfig(
   return candidates[0]!;
 }
 
+/**
+ * Every credential a BUILT transaction withdraws from, as CIP-113 credentials.
+ *
+ * ⛔ READ OFF THE BUILT TRANSACTION, NEVER OFF A BOOKKEEPING ARRAY, AND THAT
+ * DISTINCTION IS THE WHOLE VALUE OF THIS FUNCTION. A list of "credentials we
+ * intended to withdraw from", appended to beside each `withdraw()` call, would
+ * share a blind spot with the code it describes: someone adding a second
+ * `tx.withdraw(...)` and not appending to the list produces a transaction whose
+ * withdrawal set has grown and whose RECORD has not, and every assertion
+ * downstream would go on passing. `built.toTransaction()` is the artefact the
+ * ledger will see, so this cannot disagree with what was actually built.
+ *
+ * ⚠ AN UNKNOWN CREDENTIAL TAG THROWS rather than defaulting to "key". A default
+ * here would make a script withdrawal INVISIBLE to the exclusivity assertion in
+ * the devnet test — an instrument returning a plausible, wrong, quiet answer,
+ * which is precisely the reading that assertion exists to make impossible.
+ */
+function withdrawalCredentials(tx: EvoTransaction.Transaction): Cip113Credential[] {
+  const withdrawals = tx.body.withdrawals;
+  if (!withdrawals) return [];
+  return EvoWithdrawals.entries(withdrawals).map(([account]) => {
+    const cred: any = account.stakeCredential;
+    if (cred._tag !== "ScriptHash" && cred._tag !== "KeyHash") {
+      throw new Error(
+        `withdrawalCredentials: unrecognised stake-credential tag ${JSON.stringify(cred._tag)}. ` +
+          `Refusing to guess: this list is what proves a promotion withdraws from the NOMINEE ` +
+          `and from nobody else, and a credential silently classified as the wrong kind would ` +
+          `make that proof vacuous.`
+      );
+    }
+    return {
+      type: cred._tag === "ScriptHash" ? "script" : "key",
+      hash: Bytes.toHex(cred.hash),
+    };
+  });
+}
+
+/**
+ * What an upgrade-path transaction did, as observable facts rather than a hash.
+ */
+export interface UpgradeResult {
+  /** The submitted transaction's hash. */
+  readonly txHash: string;
+  /**
+   * Every credential the transaction withdrew from, read back off the built
+   * body — see {@link withdrawalCredentials}.
+   *
+   * ⛔ WHY THIS IS RETURNED AT ALL, AND WHAT THE CHAIN CANNOT DO ABOUT IT.
+   * Upstream's promotion rail is `pairs.has_key(withdrawals, nominee)` — an
+   * EXISTENCE check. A promotion that carries the nominee's withdrawal AND the
+   * sitting multisig's is therefore **accepted on chain**. So the property "the
+   * promotion does not need the outgoing authority" is not enforceable by any
+   * on-chain negative, and a devnet suite alone can never see it break.
+   *
+   * ⇒ It has to be asserted OFF-CHAIN, on the transaction we built. That is
+   * what this field is for, and `test/devnet/upgrade.test.ts` asserts the
+   * promotion's list is exactly the nominee's.
+   */
+  readonly withdrewFrom: readonly Cip113Credential[];
+}
+
 export interface UpgradeOptions {
   /**
    * Which of `protocol_params`' three arms this transaction DECLARES itself to
@@ -263,7 +326,7 @@ export async function upgradeProtocol(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
   opts: UpgradeOptions
-): Promise<string> {
+): Promise<UpgradeResult> {
   const client: any = await makeClient();
   const addressObj = await client.address();
   const networkId = client.chain.id;
@@ -315,6 +378,17 @@ export async function upgradeProtocol(
   // alpha.4 precisely because the one-way ADA ratchet is gone — lovelace is
   // unconstrained relative to the input in both directions.
   //
+  // ⛔ THE FLOOR ARGUMENT IS LOAD-BEARING, AND HERE IS THE MUTANT THAT PROVES
+  // IT. Audit r1 M11 replaced this `EvoAssets.lovelaceOf(carried)` with `0n` —
+  // removing the floor, so the amount may FALL — and the whole subset stayed
+  // GREEN. Measured consequence: a promotion shrinks the datum
+  // `Some(Credential)` -> `None`, so this output would be re-set from 2,012,770
+  // down to **1,861,920 lovelace — 150,850 drifting out of the protocol UTxO
+  // into the wallet's change, per promotion**, with the chain permitting it
+  // because alpha.4 leaves lovelace unconstrained. It SURVIVES A, it does NOT
+  // survive B: A = the suite as audited at r1; B = the "never below the input"
+  // assertion the handover test now makes on every phase, which reddens M11.
+  //
   // The address is rebuilt rather than read off `utxo.address` because
   // `minUtxoForOutput` takes bech32; it is the same address by construction —
   // `readCoordination` found this UTxO by querying exactly it.
@@ -336,6 +410,42 @@ export async function upgradeProtocol(
   });
 
   // The trampoline: a withdraw-0 from the credential this arm demands.
+  //
+  // ⛔⛔ EXACTLY ONE WITHDRAWAL, AND THE ARGUMENT IS BY CONSTRUCTION — SO HERE IS
+  // WHAT WOULD BREAK IT, AND WHAT ENFORCES IT.
+  //
+  //   * BY CONSTRUCTION: there is exactly one `tx.withdraw(...)` call per branch
+  //     below, the two branches are mutually exclusive (`authCred.type` is
+  //     "script" xor "key"), and `authoriseAs` is the ONLY thing that selects
+  //     which credential either of them uses. No other code path in this file
+  //     adds a withdrawal.
+  //   * THE EDIT THAT WOULD BREAK IT: adding a second `tx.withdraw(...)` to the
+  //     promote path — most plausibly the SITTING authority's, added by a
+  //     maintainer who reads the P1 note, decides to "be safe", and does not
+  //     realise the two-phase design depends on the nominee being able to act
+  //     ALONE.
+  //   * ⚠ AND THE CHAIN WOULD NOT STOP THEM. Upstream is
+  //     `pairs.has_key(withdrawals, nominee)` — an EXISTENCE check that never
+  //     mentions `old.upgrade_cred`. A promotion carrying BOTH withdrawals is
+  //     ACCEPTED. So no on-chain negative can ever cover this, and a devnet
+  //     suite alone cannot see the property break (audit r1 F-1; the auditor's
+  //     attempt to demonstrate it on chain died at `withdraw@1=3110`,
+  //     "Extraneous (non-required) redeemers" — a malformed transaction of the
+  //     experiment's own making, reported INCONCLUSIVE rather than counted).
+  //   * ⇒ WHAT ENFORCES IT: `UpgradeResult.withdrewFrom`, read off the BUILT
+  //     transaction by {@link withdrawalCredentials}, asserted in
+  //     `test/devnet/upgrade.test.ts` to be exactly the nominee for a promotion
+  //     and exactly the multisig for a nomination. That pair is the positive
+  //     control and the negative in one: the nomination proves the instrument
+  //     can SEE a script withdrawal, which is what makes the promotion's
+  //     "no script withdrawal" a real negative rather than a silent zero.
+  //     Mutation-verified: adding the sitting authority's withdrawal here
+  //     reddens that assertion OFF-CHAIN, at the assertion.
+  //
+  // This is the same standard as the arm-0 / `voidData()` residue note in
+  // `UpgradeOptions.act` — with the difference that this one IS enforced, so it
+  // is a claim with a mutant behind it rather than a claim closed by
+  // construction alone.
   //
   // ⚑ ROUTED ON THE DATUM'S CREDENTIAL, NEVER ON `deployment.upgradeAuthority`.
   // The datum is the source of truth for who may authorise this spend — the
@@ -438,10 +548,17 @@ export async function upgradeProtocol(
     // `spendable()`.
     availableUtxos: (await client.getUtxos(addressObj)).filter((u: any) => !u.scriptRef),
   });
+  // ⛔ READ THE WITHDRAWAL SET OFF THE BUILT BODY, BEFORE SUBMITTING. This is
+  // the artefact the ledger will see — not a note of what this function meant
+  // to do — which is what makes the devnet test's "the promotion withdraws from
+  // the nominee and nobody else" assertion capable of failing. See
+  // {@link UpgradeResult.withdrewFrom} for why the chain cannot cover it.
+  const withdrewFrom = withdrawalCredentials(await built.toTransaction());
+
   const res = await built.signAndSubmit();
-  const hash = typeof res === "string" ? res : EvoTransactionHash.toHex(res);
-  await client.awaitTx(EvoTransactionHash.fromHex(hash), 2_000, 180_000);
-  return hash;
+  const txHash = typeof res === "string" ? res : EvoTransactionHash.toHex(res);
+  await client.awaitTx(EvoTransactionHash.fromHex(txHash), 2_000, 180_000);
+  return { txHash, withdrewFrom };
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +596,7 @@ export async function nominateAuthority(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
   nominee: Cip113Credential
-): Promise<string> {
+): Promise<UpgradeResult> {
   return upgradeProtocol(blueprint, deployment, {
     // `Constr(1, [])` — a value `voidData()` cannot represent, which is why
     // this arm landing on chain is half of the proof that the single
@@ -538,7 +655,7 @@ export async function promoteAuthority(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
   opts: PromoteOptions = {}
-): Promise<string> {
+): Promise<UpgradeResult> {
   // ⛔ THE CLIENT-SIDE REFUSAL, AND IT FIRES BEFORE ANYTHING IS BUILT OR SPENT.
   // On chain, promoting with no standing nomination dies on
   // `expect Some(nominee) = old.pending_upgrade_cred` — an `expect` failure,

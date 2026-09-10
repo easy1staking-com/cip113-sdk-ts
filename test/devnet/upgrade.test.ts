@@ -64,6 +64,7 @@ import {
 import {
   stakingCredentialHash,
   EvoAddress,
+  EvoAssets,
   EvoTransactionHash,
   type Cip113Credential,
   type DeploymentParams,
@@ -240,6 +241,23 @@ async function settleParams(
     }
   );
   await settleWallet(client, await client.address());
+}
+
+/**
+ * Read the protocol-params datum AND the continuing output's ADA leg together.
+ *
+ * ⚑ THE ADA LEG IS READ FROM CHAIN, NOT FROM THE BUILDER'S ARITHMETIC. The
+ * harness computes a min-UTxO floor for the continuing output; asserting that
+ * computation against itself would be a tautology. This reads what the output
+ * actually carries, so the "never below the input" claim is a comparison of two
+ * independent chain observations.
+ */
+async function readParamsAndAda(
+  client: any,
+  deployment: DeploymentParams
+): Promise<{ params: Awaited<ReturnType<typeof readCoordination>>["params"]; lovelace: bigint }> {
+  const { utxo, params } = await readCoordination(client, deployment);
+  return { params, lovelace: EvoAssets.lovelaceOf(utxo.assets) };
 }
 
 before(async () => {
@@ -457,7 +475,8 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
   const K = await nomineeKey(client);
 
   // ---- step 1: the sitting state, read from chain -------------------------
-  const genesis = (await readCoordination(client, deployment)).params;
+  const genesisRead = await readParamsAndAda(client, deployment);
+  const genesis = genesisRead.params;
   assert.equal(genesis.upgradeCred.type, "script", "the bootstrap installs a SCRIPT authority");
   assert.equal(
     genesis.upgradeCred.hash,
@@ -470,9 +489,10 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
   // Authorised by the SITTING authority (the multisig), through the routed
   // branch `upgradeProtocol` already had. Nothing takes effect: the nominee
   // holds no power at all until it activates itself.
-  const nominateHash = await nominateAuthority(blueprint, deployment, K);
-  await settleParams(client, deployment, nominateHash);
-  const nominated = (await readCoordination(client, deployment)).params;
+  const nomination = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nomination.txHash);
+  const nominatedRead = await readParamsAndAda(client, deployment);
+  const nominated = nominatedRead.params;
 
   // ⚑ THE RECORD, NOT THE ABSENCE OF A CHANGE. "nothing else moved" would pass
   // just as happily if the nomination had silently not been written — a test
@@ -495,13 +515,35 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
     "and still the upgrade_multisig — a nomination moves nothing"
   );
 
+  // ⚑⚑ THE POSITIVE CONTROL FOR THE EXCLUSIVITY ASSERTION BELOW, and without it
+  // that assertion could pass on an instrument that simply cannot see script
+  // withdrawals. Before believing a zero, produce a known non-zero THROUGH THE
+  // SAME INSTRUMENT: a nomination is authorised by the SITTING authority, so
+  // `withdrewFrom` here must be exactly the multisig's SCRIPT credential.
+  assert.deepEqual(
+    [...nomination.withdrewFrom],
+    [{ type: "script", hash: deployment.upgradeMultisig.scriptHash }],
+    "a nomination withdraws from the sitting authority — and this run proves the withdrawal " +
+      "reader can SEE a script credential, which is what makes the promotion's 'no script " +
+      "withdrawal' below a real negative rather than a silent empty list"
+  );
+
+  // The ADA leg never falls. See the promote step for why this is asserted at
+  // every phase rather than only where the datum shrinks.
+  assert.ok(
+    nominatedRead.lovelace >= genesisRead.lovelace,
+    `a nomination must never lower the protocol UTxO's ADA: ${genesisRead.lovelace} -> ` +
+      `${nominatedRead.lovelace}`
+  );
+
   // ---- step 3: PROMOTE — phase two ----------------------------------------
   // ⛔ AUTHORISED BY THE NOMINEE, NOT BY THE MULTISIG. See the asymmetry note
   // above the block. `promoteAuthority` takes no nominee argument: it reads the
   // nominee out of the datum, because the datum is what the validator reads.
-  const promoteHash = await promoteAuthority(blueprint, deployment);
-  await settleParams(client, deployment, promoteHash);
-  const promoted = (await readCoordination(client, deployment)).params;
+  const promotion = await promoteAuthority(blueprint, deployment);
+  await settleParams(client, deployment, promotion.txHash);
+  const promotedRead = await readParamsAndAda(client, deployment);
+  const promoted = promotedRead.params;
 
   // THE DELTA — the point of the whole slice. Both halves, from chain.
   assert.equal(promoted.upgradeCred.type, "key", "the authority is now a KEY credential");
@@ -519,6 +561,60 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
   );
   assert.equal(promoted.transferCred.hash, nominated.transferCred.hash, "transfer unmoved");
   assert.equal(promoted.thirdPartyCred.hash, nominated.thirdPartyCred.hash, "third_party unmoved");
+
+  // ⛔⛔ THE PROMOTION WITHDREW FROM THE NOMINEE AND FROM NOBODY ELSE — AND THIS
+  // IS THE ONE PROPERTY IN THIS FILE THAT NO ON-CHAIN NEGATIVE CAN EVER COVER.
+  //
+  // Upstream's rail is `pairs.has_key(withdrawals, nominee)`: an EXISTENCE
+  // check that never mentions `old.upgrade_cred`. A promotion carrying the
+  // nominee's withdrawal AND the sitting multisig's is therefore ACCEPTED on
+  // chain. Mutation P1 proves the nominee's withdrawal is NECESSARY; it says
+  // nothing about the multisig's being ABSENT, and that too-broad direction is
+  // the one nobody runs.
+  //
+  // ⚠ WHY IT MATTERS, in one sentence: a promotion that also carries the
+  // outgoing authority's withdraw-0 REQUIRES THE OUTGOING AUTHORITY'S
+  // COOPERATION — destroying the exact property the two-phase design exists to
+  // provide, which is that a nominee can activate itself when the sitting
+  // multisig is unavailable, has lost quorum, or is hostile. A maintainer
+  // "being safe" would introduce it, and every on-chain test would stay green.
+  //
+  // ⚑ ASSERTED OFF-CHAIN, ON THE BUILT TRANSACTION. `withdrewFrom` is read from
+  // `built.toTransaction()`, not from a note of what the builder intended — see
+  // `withdrawalCredentials` in the harness. The auditor's attempt to demonstrate
+  // this on chain was INCONCLUSIVE (`withdraw@1=3110`, "Extraneous
+  // (non-required) redeemers" — a malformed transaction of the experiment's own
+  // making), which is itself the argument for asserting it here.
+  assert.deepEqual(
+    [...promotion.withdrewFrom],
+    [K],
+    "the promotion must withdraw from the nominee K and from nobody else"
+  );
+  // ⚠ NOT REDUNDANT WITH THE deepEqual ABOVE, and deliberately kept separate:
+  // this one names the specific credential whose presence is the harm, so it
+  // still fires — and still says WHY — if the exact-list assertion is ever
+  // loosened to a length or membership check by someone adding a legitimate
+  // second withdrawal for an unrelated reason.
+  assert.ok(
+    !promotion.withdrewFrom.some((c) => c.hash === deployment.upgradeMultisig.scriptHash),
+    `the promotion must NOT withdraw from the sitting multisig ` +
+      `(${deployment.upgradeMultisig.scriptHash}) — a promotion that needs the outgoing ` +
+      `authority's cooperation is not a promotion. Got: ${JSON.stringify(promotion.withdrewFrom)}`
+  );
+
+  // ⛔ THE ADA LEG NEVER FALLS, AND THE PROMOTION IS THE PHASE THAT COULD MAKE
+  // IT. A promotion SHRINKS the datum `Some(Credential)` -> `None`, so a floor
+  // computed from the new datum alone would re-set this output DOWN. MEASURED,
+  // audit r1 M11: replacing the harness's `minUtxoAtLeast(lovelaceOf(carried),
+  // …)` floor with `0n` drifts 2,012,770 -> 1,861,920 — **150,850 lovelace per
+  // promotion**, out of the protocol UTxO and into the wallet's change — and the
+  // suite was GREEN. alpha.4 leaves lovelace unconstrained, so the chain permits
+  // it. This assertion is what makes M11 redden.
+  assert.ok(
+    promotedRead.lovelace >= nominatedRead.lovelace,
+    `a promotion must never lower the protocol UTxO's ADA, even though the datum shrinks: ` +
+      `${nominatedRead.lovelace} -> ${promotedRead.lovelace}`
+  );
 
   // ⚑ THE DELTA, PRINTED. Not decoration: the assertions above prove the
   // handover happened, and this line is what lets a reader of a run log say
@@ -555,8 +651,9 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
     act: "PROTOCOL_UPGRADE",
     change: (p) => ({ ...p, transferCred: { type: "script", hash: newTransferCred } }),
   });
-  await settleParams(client, deployment, upgradeHash);
-  const underK = (await readCoordination(client, deployment)).params;
+  await settleParams(client, deployment, upgradeHash.txHash);
+  const underKRead = await readParamsAndAda(client, deployment);
+  const underK = underKRead.params;
 
   assert.equal(underK.transferCred.hash, newTransferCred, "K authorised a real parameter change");
   assert.notEqual(
@@ -567,6 +664,20 @@ test("the upgrade authority is handed over from the multisig to a key — a befo
   assert.equal(underK.upgradeCred.type, "key", "K is still the authority afterwards");
   assert.equal(underK.upgradeCred.hash, K.hash, "and still exactly K");
   assert.equal(underK.pendingUpgradeCred, null, "and a ProtocolUpgrade started no new handover");
+
+  // K authorises with its own KEY withdraw-0 and nothing else — the mirror of
+  // the promotion assertion, on the arm that now routes through
+  // `upgradeProtocol`'s revived key branch.
+  assert.deepEqual(
+    [...upgradeHash.withdrewFrom],
+    [K],
+    "an upgrade under K withdraws from K — the multisig is no longer involved in this protocol"
+  );
+  assert.ok(
+    underKRead.lovelace >= promotedRead.lovelace,
+    `an upgrade must never lower the protocol UTxO's ADA: ${promotedRead.lovelace} -> ` +
+      `${underKRead.lovelace}`
+  );
 });
 
 /**
@@ -654,8 +765,8 @@ test("REFUSED: a promotion without the nominee's own withdraw-0", async () => {
   const client: any = await makeClient();
   const K = await nomineeKey(client);
 
-  const nominateHash = await nominateAuthority(blueprint, deployment, K);
-  await settleParams(client, deployment, nominateHash);
+  const nomination = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nomination.txHash);
   const before = (await readCoordination(client, deployment)).params;
   assert.equal(before.pendingUpgradeCred!.hash, K.hash, "precondition: K is the standing nominee");
 
@@ -694,8 +805,8 @@ test("REFUSED: a promotion cannot smuggle a parameter change", async () => {
   const client: any = await makeClient();
   const K = await nomineeKey(client);
 
-  const nominateHash = await nominateAuthority(blueprint, deployment, K);
-  await settleParams(client, deployment, nominateHash);
+  const nomination = await nominateAuthority(blueprint, deployment, K);
+  await settleParams(client, deployment, nomination.txHash);
   const before = (await readCoordination(client, deployment)).params;
   assert.equal(before.pendingUpgradeCred!.hash, K.hash, "precondition: K is the standing nominee");
 
