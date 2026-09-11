@@ -75,6 +75,8 @@ import {
   labeledAssetName,
   hasCIP67Label,
   buildCIP68FTDatum,
+  inlineDatumBytes,
+  assertInlineDatumWithinBound,
   minUtxoAtLeast,
   ceilToWholeAda,
   minUtxoForOutput,
@@ -490,6 +492,24 @@ export function freezeAndSeizeSubstandard(config: {
       const refAssetNameHex = hasCIP68 ? labeledAssetName(100, assetNameHex) : null;
       const refUnit = refAssetNameHex ? scripts.tokenPolicyId + refAssetNameHex : null;
 
+      let cip68Datum: Data.Data | undefined;
+      let cip68DatumBytes: number | undefined;
+      if (hasCIP68) {
+        cip68Datum = buildCIP68FTDatum(params.cip68Metadata!);
+        // alpha.4's issuance_logic `no_escape` now applies
+        // is_seizable_output_shape_bounded to PLB outputs carrying the minted
+        // policy. lib/assets.ak marks CIP-68's former exemption "(expired)": a
+        // data-URI logo over the bound fails on chain with an empty trace.
+        // Refuse before selecting UTxOs or constructing the transaction so the
+        // caller gets the measured, named diagnosis instead.
+        assertInlineDatumWithinBound(
+          cip68Datum,
+          ctx.deployment.maxInlineDatumBytes,
+          "the CIP-68 (100) reference datum"
+        );
+        cip68DatumBytes = inlineDatumBytes(cip68Datum);
+      }
+
       // 1. Find covering registry node
       // ⚑ ONE HASH, TWO ROLES. registry_mint and registry_spend merged (#117), so
       // the node NFT policy id and the node address's payment credential are the
@@ -661,7 +681,6 @@ export function freezeAndSeizeSubstandard(config: {
       // outputTags: "cip68-reference" — optional reference token and metadata.
       if (hasCIP68 && refUnit) {
         const issuerPlbAddr = baseAddress(networkId, plbHash, feePayerAddress);
-        const cip68Datum = buildCIP68FTDatum(params.cip68Metadata!);
         // ⛔ THE ONE OUTPUT SIZED BY USER-SUPPLIED STRINGS. Rounded UP TO A
         // WHOLE ADA deliberately: the reference implementation this SDK is
         // diffed against does the same, and a builder-equivalence check is only
@@ -674,13 +693,13 @@ export function freezeAndSeizeSubstandard(config: {
               minUtxoAtLeast(CIP68_REFERENCE_OUTPUT_FLOOR, {
                 address: issuerPlbAddr,
                 assets: outputAssets(0n, new Map([[refUnit, 1n]])),
-                datum: cip68Datum,
+                datum: cip68Datum!,
                 coinsPerUtxoByte,
               }),
             ),
             new Map([[refUnit, 1n]]),
           ),
-          datum: new InlineDatum.InlineDatum({ data: cip68Datum }),
+          datum: new InlineDatum.InlineDatum({ data: cip68Datum! }),
         });
       }
 
@@ -765,6 +784,7 @@ export function freezeAndSeizeSubstandard(config: {
           },
           ...(hasCIP68 && {
             cip68Enabled: true,
+            cip68DatumBytes,
             userAssetNameHex,
             refAssetNameHex,
           }),
