@@ -139,23 +139,32 @@ test("the README's migration note names the silent redeemer change", () => {
   // The one change a consumer cannot discover by failing: stale bytes decode.
   // If this section is ever trimmed, the trap goes undocumented again.
   const readme = read("README.md");
-  assert.match(readme, /Migrating to 0\.9\.0/);
-  assert.match(readme, /byte-identical/i, "must state that the stale redeemer still decodes");
-  assert.match(readme, /SpendViaTransfer/, "must name the stale constructor");
+  const start = readme.indexOf("## Migrating to");
+  const end = readme.indexOf("\n## ", start + 1);
+  const migration = readme.slice(start, end === -1 ? undefined : end);
+
+  assert.notEqual(start, -1, "must retain one migration section");
+  assert.match(migration, /Migrating to 0\.9\.0/);
+  assert.match(migration, /byte-identical/i, "must state that the stale redeemer still decodes");
+  assert.match(migration, /SpendViaTransfer/, "must name the stale constructor");
   assert.match(
-    readme,
+    migration,
     /stale builder emitting `SpendViaTransfer`/,
     "must preserve the explanation of why the stale constructor is silent",
   );
-  assert.match(readme, /dispatcher/i, "must say where wdrl_idx now points");
   assert.match(
-    readme,
+    migration,
+    /wdrl_idx` now indexes the\s+\*\*dispatcher/,
+    "must say where wdrl_idx now points",
+  );
+  assert.match(
+    migration,
     /Every mint and burn now needs .*issuance_logic.*withdraw-0/i,
     "must name alpha.4's issuance withdrawal obligation",
   );
-  assert.match(readme, /index 1/i, "must name where issuance_logic_cred was inserted");
+  assert.match(migration, /index 1/i, "must name where issuance_logic_cred was inserted");
   assert.match(
-    readme,
+    migration,
     /naming no withdrawal, no policy and no index/i,
     "must say why an omitted issuance_logic withdrawal is silent",
   );

@@ -62,7 +62,7 @@ await client.awaitTx(txHash);
 
 **0.9.0 targets a different protocol version and breaks every published consumer.** It is a
 minor bump because this package is pre-1.0; treat it as major. Version 0.8.0 was never published,
-so the real upgrade path is 0.3.1 (or another 0.7.x release) to 0.9.0 and crosses both the
+so the real upgrade path is 0.3.1, or any later published release up to 0.7.0, to 0.9.0 and crosses both the
 alpha.2-to-alpha.3 and alpha.3-to-alpha.4 boundaries described here.
 
 ⛔ **The alpha.3 change that will not announce itself.** `programmable_logic_base`'s redeemer went
@@ -96,8 +96,8 @@ layout and treat the field names, not their old positions, as the authority.
 ⛔ **Every mint and burn now needs `issuance_logic`'s withdraw-0.** `issuance_mint` does not
 diagnose an omitted withdrawal: `covered_by` scans the transaction redeemers, returns `False` when
 it finds no matching withdrawal, and the mint fails naming no withdrawal, no policy and no index.
-Use the 0.9.0 issuance plan when composing transactions; it adds the withdrawal and its policy-keyed
-redeemer alongside the minting-logic withdrawal.
+Calling `register()`, `mint()`, or `burn()` on a 0.9.0 protocol emits the withdrawal and its
+policy-keyed redeemer alongside the minting-logic withdrawal.
 
 ⚠ **CIP-68 metadata now meets the deployment's inline-datum bound on the issuance path.** At the
 CIP-68 datum shape, the chain's `serialise_data` measurement is exactly 2 bytes fewer than the
@@ -125,8 +125,8 @@ SDK is conservative: it never accepts a record the chain refuses. A caller's usa
 
 ⚠ **Neither an alpha.3 nor an alpha.2 deployment can be represented by this SDK.** A 4-field
 alpha.3 params datum and a 7-field alpha.2 one are rejected outright rather than read
-positionally. Operate an alpha.3 instance with the 0.8.x source line (which was never published),
-and point an alpha.2 instance at a published 0.7.x release.
+positionally. No published release of this SDK operates an alpha.3 instance; its 0.8.x source line
+must be built from git. Point an alpha.2 instance at a published 0.7.x release.
 
 ## Examples
 

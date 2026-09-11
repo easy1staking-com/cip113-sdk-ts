@@ -164,6 +164,11 @@ On-chain protocol deployment references. Obtained from the bootstrap transaction
 > a `directoryMint`/`directorySpend` pair — and survived the entire 0.3.x → 0.5.0-alpha.2 migration
 > unnoticed, because nothing tests documentation. It is now pinned by
 > `test/docs-drift.test.mjs`, which fails if these field names stop matching the real type.
+>
+> ⚠ **For 0.5.0-alpha.4, this is the six-field deployment shape.** The params datum inserts
+> `issuance_logic_cred` at index 1, shifting the credential-valued slots at indices 1, 2 and 3.
+> Every `register`, `mint`, and `burn` transaction also carries `issuance_logic`'s withdraw-0;
+> omitting it refuses the mint without naming a missing withdrawal, policy, or index.
 
 ```typescript
 interface DeploymentParams {
@@ -184,8 +189,8 @@ interface DeploymentParams {
   // The dispatcher. Every programmable transaction withdraws through it.
   programmableLogicGlobal: { scriptHash: ScriptHash };
 
-  // A deployment CHOICE, not a derivation — baked into all three delegate
-  // hashes and recoverable from none of them.
+  // A deployment CHOICE, not a derivation — baked into transfer, third_party,
+  // unfracking, and issuance_logic hashes and recoverable from none of them.
   maxInlineDatumBytes: number;
 
   // ⚑ ONE hash, THREE roles: scriptHash is the config NFT policy, the config
@@ -316,6 +321,10 @@ the `transfer` reference script at all.
 
 > ⚠ In 0.5.0-alpha.2 the choice lived on `programmable_logic_base`'s own redeemer, as
 > `SpendViaThirdParty`. That constructor no longer exists — see the migration note in the README.
+>
+> ⚠ In 0.5.0-alpha.4, `thirdPartyTransfer` still neither mints nor burns, so it carries no
+> `issuance_logic` withdrawal. Its six-field params datum instead supplies the shifted delegate
+> credentials by their alpha.4 field names.
 
 **The rule that is easy to get backwards**, and which fails with **no diagnostic at all** if you do:
 
