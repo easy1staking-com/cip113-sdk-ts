@@ -341,7 +341,6 @@ test("freeze-and-seize: a CIP-68 register at the datum bound succeeds, and one b
     },
     "a 1025-byte CIP-68 (100) datum must be refused before CBOR is returned"
   );
-  observeRegisterReads = false;
   assert.equal(
     registerUtxoReads,
     0,
@@ -363,10 +362,27 @@ test("freeze-and-seize: a CIP-68 register at the datum bound succeeds, and one b
     quantity: 1_000n,
     cip68Metadata: atBoundMetadata,
   });
+  observeRegisterReads = false;
+  assert.ok(
+    registerUtxoReads > 0,
+    "the register UTxO-read counter must observe reads during a successful register"
+  );
   assert.equal(
     reg.metadata?.cip68DatumBytes,
     1_024,
     "register metadata must publish the SDK's own at-bound datum measurement"
+  );
+
+  const small = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+    cip68Metadata: { name: "Acme Token", ticker: "ACME", decimals: 6 },
+  });
+  assert.equal(
+    small.metadata?.cip68DatumBytes,
+    46,
+    "register metadata must publish the measured small CIP-68 datum size, not echo the bound"
   );
 
   // [tx size] from the returned CBOR, NOT from TX_SIZE_DIAG. That variable
