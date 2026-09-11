@@ -161,9 +161,10 @@ export interface DeploymentParams {
   /**
    * `max_inline_datum_bytes` — a deployment CHOICE, not a derivation.
    *
-   * ⚠ It is a compile-time parameter of all three delegates, so it is baked
-   * into their hashes: two deployments differing only here are different
-   * protocols. Recorded because it cannot be recovered from any hash.
+   * ⚠ It is a compile-time parameter of all four delegates — transfer,
+   * third_party, unfracking and issuance_logic — so it is baked into their
+   * hashes: two deployments differing only here are different protocols.
+   * Recorded because it cannot be recovered from any hash.
    */
   maxInlineDatumBytes: number;
 

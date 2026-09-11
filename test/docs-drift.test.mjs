@@ -139,14 +139,30 @@ test("the README's migration note names the silent redeemer change", () => {
   // The one change a consumer cannot discover by failing: stale bytes decode.
   // If this section is ever trimmed, the trap goes undocumented again.
   const readme = read("README.md");
-  assert.match(readme, /Migrating to 0\.8\.0/);
+  assert.match(readme, /Migrating to 0\.9\.0/);
   assert.match(readme, /byte-identical/i, "must state that the stale redeemer still decodes");
   assert.match(readme, /SpendViaTransfer/, "must name the stale constructor");
+  assert.match(
+    readme,
+    /stale builder emitting `SpendViaTransfer`/,
+    "must preserve the explanation of why the stale constructor is silent",
+  );
   assert.match(readme, /dispatcher/i, "must say where wdrl_idx now points");
+  assert.match(
+    readme,
+    /Every mint and burn now needs .*issuance_logic.*withdraw-0/i,
+    "must name alpha.4's issuance withdrawal obligation",
+  );
+  assert.match(readme, /index 1/i, "must name where issuance_logic_cred was inserted");
+  assert.match(
+    readme,
+    /naming no withdrawal, no policy and no index/i,
+    "must say why an omitted issuance_logic withdrawal is silent",
+  );
 });
 
 test("package version and the migration note agree", () => {
   const pkg = JSON.parse(read("package.json"));
-  assert.equal(pkg.version, "0.8.0");
+  assert.equal(pkg.version, "0.9.0");
   assert.match(read("README.md"), new RegExp(`Migrating to ${pkg.version.replace(/\./g, "\\.")}`));
 });
