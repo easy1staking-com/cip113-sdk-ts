@@ -12,7 +12,7 @@
  * as a supported way to deploy a production protocol. It is not. Do not point
  * this at preprod or mainnet.
  *
- * TARGETS CIP-113 0.5.0-alpha.4 (upstream d37ca8d).
+ * TARGETS CIP-113 0.5.0-alpha.4 (upstream 7e8a631).
  *
  * The topology this fixture stands up, and the three things alpha.4 changed:
  *
@@ -330,7 +330,9 @@ export async function bootstrapProtocol(
   let fragUtxos: EvoUTxO.UTxO[] = [];
   for (let attempt = 0; attempt < 20; attempt++) {
     const after = await client.getUtxos(addressObj);
-    fragUtxos = after.filter((u) => EvoTransactionHash.toHex(u.transactionId) === fragHash);
+    fragUtxos = after.filter(
+      (u: EvoUTxO.UTxO) => EvoTransactionHash.toHex(u.transactionId) === fragHash,
+    );
     if (fragUtxos.length >= 3) break;
     await sleep(1_500);
   }

@@ -55,6 +55,7 @@ import {
   decodeRegistryNode,
   protocolParamsDatum,
   decodeProtocolParams,
+  assertProtocolParamsIssuanceLogic,
   issuanceRedeemer,
   issuanceLogicRedeemer,
   protocolParamsRedeemer,
@@ -249,6 +250,24 @@ test("ProtocolParams: the delegate credentials are NOT interchangeable", () => {
 
 test("ProtocolParams: round-trips, including a standing nomination", () => {
   assert.deepEqual(decodeProtocolParams(protocolParamsDatum(PARAMS)), PARAMS);
+});
+
+test("ProtocolParams: deployment issuance logic is checked against the live datum", () => {
+  const utxo = {
+    datumOption: { _tag: "InlineDatum", data: protocolParamsDatum(PARAMS) },
+  };
+
+  assert.doesNotThrow(() =>
+    assertProtocolParamsIssuanceLogic(utxo, PARAMS.issuanceLogicCred.hash),
+  );
+  assert.throws(
+    () => assertProtocolParamsIssuanceLogic(utxo, "ff".repeat(28)),
+    /does not match.*issuance_logic_cred/s,
+  );
+  assert.throws(
+    () => assertProtocolParamsIssuanceLogic({ datumOption: undefined }, PARAMS.issuanceLogicCred.hash),
+    /has no inline datum/,
+  );
 });
 
 test("⛔ ProtocolParams: the 4-field alpha.3 datum is REFUSED, not read positionally", () => {

@@ -49,8 +49,11 @@ import { createOgmiosEvaluator } from "../harness/ogmios-evaluator.js";
  * reading the test top-to-bottom is guesswork, and guessing which step failed is
  * how the wrong cause gets confirmed.
  */
-async function submitStep(label: string, tx: { _signBuilder: any }): Promise<void> {
+async function submitStep(label: string, tx: { _signBuilder?: any }): Promise<void> {
   try {
+    if (!tx._signBuilder) {
+      throw new Error("transaction was built without a signing builder");
+    }
     await tx._signBuilder.signAndSubmit();
   } catch (err) {
     const msg = String((err as Error)?.message ?? err);

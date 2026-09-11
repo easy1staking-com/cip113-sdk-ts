@@ -7,7 +7,7 @@ import type { PlutusBlueprint, BlueprintValidator, HexString } from "../types.js
 /**
  * Standard validator titles as they appear in the blueprint.
  *
- * Targets CIP-113 0.5.0-alpha.4 (upstream commit d37ca8d). See PLAN.md D-11.
+ * Targets CIP-113 0.5.0-alpha.4 (upstream commit 7e8a631). See PLAN.md D-11.
  *
  * --- What alpha.4 moved --------------------------------------------------
  *
@@ -92,7 +92,7 @@ export const STANDARD_VALIDATORS = {
 export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.4";
 
 /** Upstream commit the target version's blueprint was built from. */
-export const TARGET_PROTOCOL_COMMIT = "d37ca8d";
+export const TARGET_PROTOCOL_COMMIT = "7e8a631";
 
 /**
  * Validator titles that existed in an ADJACENT CIP-113 release and are absent

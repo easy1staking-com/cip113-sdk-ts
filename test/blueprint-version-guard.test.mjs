@@ -299,7 +299,7 @@ test("G. alpha.4 PARAMETER ARITY, read from the artefact", () => {
 
   assert.deepEqual(
     paramsOf("issuance_logic.issuance_logic.withdraw"),
-    ["programmable_logic_base", "registry_node_cs", "params_policy", "max_inline_datum_bytes"],
+    ["programmable_logic_base_cred", "registry_node_cs", "params_policy", "max_inline_datum_bytes"],
     "issuance_logic takes FOUR parameters, and the two adjacent PolicyIds are in THIS order",
   );
   assert.deepEqual(

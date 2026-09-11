@@ -1,7 +1,7 @@
 /**
  * The CIP-68 inline-datum bound, measured — and the half nobody tests.
  *
- * alpha.4 NEWLY bounds the datum of a CIP-68 mint. Upstream at `d37ca8d`,
+ * alpha.4 NEWLY bounds the datum of a CIP-68 mint. Upstream at `7e8a631`,
  * `lib/assets.ak :: is_seizable_output_shape_bounded` reads:
  *
  *     InlineDatum(d) ->

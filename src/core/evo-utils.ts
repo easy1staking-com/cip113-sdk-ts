@@ -605,6 +605,35 @@ export function decodeProtocolParams(d: Data.Data): ProtocolParamsData {
   };
 }
 
+/**
+ * Verify that the deployment record and live protocol-params datum name the
+ * same issuance-logic script. They are independent sources: the record drives
+ * the withdrawal emitted here, while the datum drives the permanent issuance
+ * policy on chain.
+ */
+export function assertProtocolParamsIssuanceLogic(
+  utxo: EvoUTxO.UTxO,
+  expectedScriptHash: string,
+): void {
+  const datum = getInlineDatum(utxo);
+  if (datum === undefined) {
+    throw new Error(
+      `Protocol params UTxO has no inline datum; cannot verify deployment ` +
+        `issuanceLogic.scriptHash ${expectedScriptHash}.`,
+    );
+  }
+
+  const actual = decodeProtocolParams(datum).issuanceLogicCred;
+  if (actual.type !== "script" || actual.hash.toLowerCase() !== expectedScriptHash.toLowerCase()) {
+    throw new Error(
+      `Deployment issuanceLogic.scriptHash ${expectedScriptHash} does not match the live ` +
+        `protocol-params datum's issuance_logic_cred ${actual.type}/${actual.hash}. ` +
+        `Refusing before transaction construction; use the DeploymentParams recorded for ` +
+        `this protocol instance.`,
+    );
+  }
+}
+
 /** Build a BlacklistNode datum */
 export function blacklistNodeDatum(key: HexString, next: HexString): Data.Data {
   return Data.constr(0n, [Data.bytearray(key), Data.bytearray(next)]);

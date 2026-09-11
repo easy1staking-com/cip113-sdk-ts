@@ -87,6 +87,7 @@ import {
   mintAssetsFromMap,
   REGISTRY_NODE_MIN_ADA,
   getInlineDatum,
+  assertProtocolParamsIssuanceLogic,
   utxoUnitQty,
   outputAssets,
   minUtxoAtLeast,
@@ -215,7 +216,9 @@ export function dummySubstandard(config: {
           `the protocol is un-deployed.`
       );
     }
-    return utxos[0]!;
+    const utxo = utxos[0]!;
+    assertProtocolParamsIssuanceLogic(utxo, ctx.deployment.issuanceLogic.scriptHash);
+    return utxo;
   }
 
   /**
@@ -445,23 +448,28 @@ export function dummySubstandard(config: {
 
       tx = tx.collectFrom({ inputs: [covering], redeemer: voidData() });
 
-      // The minting-logic withdraw-0: dummy's `issue` validator, redeemer 100.
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(hexToBytes(issueScript.hash)),
-        amount: 0n,
-        redeemer: Data.int(100n),
-      });
-      // ⛔ THE PROTOCOL'S ISSUANCE-LOGIC withdraw-0. Its script witness comes
-      // from `issuanceLogicRefUtxo` in `readFrom` below — deliberately NOT
-      // attached (code 3104). Its redeemer is the per-policy registry-proof map
-      // that `issuance_mint` scans for this policy id.
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(
-          hexToBytes(ctx.deployment.issuanceLogic.scriptHash)
-        ),
-        amount: 0n,
-        redeemer: plan.issuanceLogicRedeemer,
-      });
+      // The minting-logic and protocol issuance-logic withdrawals. The latter's
+      // script witness comes from `issuanceLogicRefUtxo` in `readFrom` below.
+      const withdrawalSpecs = [
+        { hash: issueScript.hash, redeemer: Data.int(100n) },
+        {
+          hash: ctx.deployment.issuanceLogic.scriptHash,
+          redeemer: plan.issuanceLogicRedeemer,
+        },
+      ];
+      if (withdrawalSpecs.length !== plan.withdrawals.length) {
+        throw new Error(
+          `register: issuance plan declares ${plan.withdrawals.length} withdrawals but ` +
+            `${withdrawalSpecs.length} are emitted`,
+        );
+      }
+      for (const withdrawal of withdrawalSpecs) {
+        tx = tx.withdraw({
+          stakeCredential: Credential.makeScriptHash(hexToBytes(withdrawal.hash)),
+          amount: 0n,
+          redeemer: withdrawal.redeemer,
+        });
+      }
 
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[unit, quantity]])),
@@ -607,18 +615,26 @@ export function dummySubstandard(config: {
       const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
 
       let tx = client.newTx();
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(hexToBytes(issueScript.hash)),
-        amount: 0n,
-        redeemer: Data.int(100n),
-      });
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(
-          hexToBytes(ctx.deployment.issuanceLogic.scriptHash)
-        ),
-        amount: 0n,
-        redeemer: plan.issuanceLogicRedeemer,
-      });
+      const withdrawalSpecs = [
+        { hash: issueScript.hash, redeemer: Data.int(100n) },
+        {
+          hash: ctx.deployment.issuanceLogic.scriptHash,
+          redeemer: plan.issuanceLogicRedeemer,
+        },
+      ];
+      if (withdrawalSpecs.length !== plan.withdrawals.length) {
+        throw new Error(
+          `mint: issuance plan declares ${plan.withdrawals.length} withdrawals but ` +
+            `${withdrawalSpecs.length} are emitted`,
+        );
+      }
+      for (const withdrawal of withdrawalSpecs) {
+        tx = tx.withdraw({
+          stakeCredential: Credential.makeScriptHash(hexToBytes(withdrawal.hash)),
+          amount: 0n,
+          redeemer: withdrawal.redeemer,
+        });
+      }
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[unit, quantity]])),
         redeemer: plan.issuanceRedeemer,
@@ -639,13 +655,8 @@ export function dummySubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
-      // Deliberately no decoded-transaction assertion checks mint's withdrawal
-      // set here. The evaluator runs inside the builder, so such an assertion
-      // could not fire first; test/devnet/ is outside the offline suite, so it
-      // would add no CI coverage either. Upstream issuance_mint.ak's checks are
-      // presence checks, so the chain catches every omission. The declared set
-      // is inert on this path: plan.withdrawals is read by nothing executable
-      // here, so a divergence in the other direction has no on-chain consequence.
+      // The executable count check above prevents the plan and emitted
+      // transaction silently diverging before evaluation.
       return finish(tx, feePayerAddress, { tokenPolicyId, unit });
     },
 

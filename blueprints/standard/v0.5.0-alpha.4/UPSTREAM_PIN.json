@@ -1,6 +1,6 @@
 {
   "artifact": "plutus.json",
-  "sha256": "8136948125d574fa89eda9763a2bc175a526cbda0a087aeb9f61c6eddf40a8c8",
+  "sha256": "5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46",
   "declares": {
     "title": "cardano-foundation/cip113-programmable-tokens",
     "version": "0.5.0-alpha.4",
@@ -9,23 +9,24 @@
   },
   "upstream": {
     "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
-    "commit": "d37ca8dcc08527043d9115710573ea2459958908",
+    "commit": "7e8a63198c5b240135f1aa2f043ce5d7c046b2c4",
     "ref": "main",
-    "note": "PINNED TO THE COMMIT, NOT THE VERSION STRING — same reasoning as v0.5.0-alpha.2 and v0.5.0-alpha.3: upstream publishes NO git tags, so \"0.5.0-alpha.4\" is a `version` field inside plutus.json on a MOVING branch and will eventually name two different programs. Reachability was VERIFIED, not assumed: `git merge-base --is-ancestor d37ca8dcc08527043d9115710573ea2459958908 origin/main` after a fetch. Full 40-char sha recorded deliberately — this repo has twice pinned an abbreviation or an orphan (013c1154, then 2e067fe, which GitHub's squash-merge orphaned the instant it landed)."
+    "note": "PINNED TO THE COMMIT, NOT THE VERSION STRING — same reasoning as v0.5.0-alpha.2 and v0.5.0-alpha.3: upstream publishes NO git tags, so \"0.5.0-alpha.4\" is a `version` field inside plutus.json on a MOVING branch and has already named two different blueprint files. Reachability was VERIFIED, not assumed: local `origin/main` resolved to 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4. Full 40-char sha recorded deliberately — this repo has twice pinned an abbreviation or an orphan (013c1154, then 2e067fe, which GitHub's squash-merge orphaned the instant it landed)."
   },
   "blueprint_reproduced": true,
   "provenance": "VERIFIED",
   "reproduce": {
     "requires": "Aiken v1.1.23+8949565",
-    "command": "git clone https://github.com/cardano-foundation/cip113-programmable-tokens && git checkout d37ca8dcc08527043d9115710573ea2459958908 && aikup install v1.1.23 && aiken build",
+    "command": "git clone https://github.com/cardano-foundation/cip113-programmable-tokens && git checkout 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4 && aikup install v1.1.23 && rm plutus.json && aiken build",
     "note": "`aikup install v1.1.23` with the version explicit, never bare `aikup install`, which follows latest and will stop reproducing this artifact the moment v1.1.24 ships. ⚠ aiken BUILDS ANYWAY on a mismatched compiler, emitting only a warning — check the preamble's compiler field, do not trust the environment."
   },
   "verified": {
     "date": "2026-09-09",
     "method": "REPRODUCED FROM SOURCE",
     "findings": [
-      "OBSERVED: `aiken build` at upstream commit d37ca8dcc08527043d9115710573ea2459958908, with Aiken v1.1.23+8949565, produced a plutus.json BYTE-IDENTICAL to the one upstream commits at that same commit. Both sha256 8136948125d574fa89eda9763a2bc175a526cbda0a087aeb9f61c6eddf40a8c8, both 164212 bytes. The build ran in a THROWAWAY CLONE, and upstream's committed plutus.json was DELETED before the build so it could not be mistaken for output.",
-      "⚠ ONE DEPENDENCY IS A MUTABLE BRANCH, AND THE REPRODUCIBILITY CLAIM IS SCOPED ACCORDINGLY. aiken.toml pins `aiken-lang/stdlib` to the TAG v3.1.0 (immutable), but `aiken-lang/fuzz` to `main` — a BRANCH. aiken.lock's [etags] records the content hash observed at fetch time (9843473958e51725a9274b487d2d4aac0395ec1a2e30f090724fa737226bc127 — the SAME etag observed for the alpha.3 reproduction, i.e. `main` has not moved between the two reproductions). DERIVED, not merely assumed: `fuzz` is a property-testing library imported only by `.test.ak` modules, and test modules are not emitted into plutus.json, so it cannot reach this artifact — which is why the byte-identical result holds despite the mutable pin. A future rebuild could still see a different `fuzz` without that changing this blueprint.",
+      "OBSERVED: `aiken build` at upstream commit 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4, with Aiken v1.1.23+8949565, produced a plutus.json BYTE-IDENTICAL to the one upstream commits at that same commit. Both sha256 5ff5d6d2990d815973e4edcf6d46e7c3d0ff4bf3cb7c17a3e672e091b7ea0b46, both 164444 bytes. The build ran in a THROWAWAY COPY, and upstream's committed plutus.json was DELETED before the build so it could not be mistaken for output.",
+      "⚠ ONE DEPENDENCY IS A MUTABLE BRANCH, AND THE REPRODUCIBILITY CLAIM IS SCOPED ACCORDINGLY. aiken.toml pins `aiken-lang/stdlib` to the TAG v3.1.0 (immutable), but `aiken-lang/fuzz` to `main` — a BRANCH. aiken.lock's [etags] records the fetched content hash. `fuzz` is referenced only from `test` and `bench` definitions and the generators serving them; `aiken build` emits neither, which is why byte-identity holds despite the mutable pin. A future rebuild could still see a different `fuzz` without that changing this blueprint.",
+      "DELTA FROM THE EARLIER alpha.4 PIN d37ca8dcc08527043d9115710573ea2459958908: every validator's compiledCode is byte-identical. Upstream #135 renamed blueprint parameter and type metadata to current design vocabulary; #136 added tests only. The whole-file sha256 changes because a blueprint includes that metadata, while every unparameterised and parameterised script hash remains unchanged for the same deployment parameters.",
       "This is the ONLY 0.5.0-alpha.4 artifact this repository ships, and it supersedes NOTHING: v0.5.0-alpha.2 is retained because a LIVE preview protocol instance runs it, recorded in deployments/preview/alpha2.json, and v0.5.0-alpha.3 is retained because it backs deployments/preview/alpha3.json AND remains this SDK's current target (TARGET_PROTOCOL_VERSION is unchanged by this slice). Deleting either would orphan a running deployment or the SDK's own target.",
       "SURFACE DELTA vs alpha.3, measured by hashing every validator's compiledCode either side (never read from upstream's changelog): 28 → 34 handlers, 11 → 12 distinct validators. ADDED: `issuance_logic` (4 params: programmable_logic_base credential, registry_node_cs, params_policy, max_inline_datum_bytes; withdraw + publish). CHANGED (compiledCode differs): `issuance_mint` (arity 4 → 2: `minting_logic_cred, params_policy` — the registry proof and custody checks that used to live here move to `issuance_logic`, and the per-token policy becomes permanent), `protocol_params` (arity unchanged, but the params datum widens 4 → 6 fields and the spend redeemer becomes the 3-arm `ProtocolParamsRedeemer`), `upgrade_multisig` (arity 2 → 1: `utxo_ref`, and it gains mint/spend/publish handlers on top of withdraw). UNCHANGED bytes (compiledCode identical either side): `always_fail`, `issuance_cbor_hex_mint`, `programmable_logic_base`, `programmable_logic_global`, `registry`, `third_party`, `transfer`, `unfracking` — verified by hashing, not assumed from the title surviving.",
       "⚠ THE PARAMS-DATUM FIELD-ORDER HAZARD: field index 1 was `transfer_cred` in alpha.3; in alpha.4 the SAME index holds `issuance_logic_cred`. Both are `Credential`, so a positional reader built against the alpha.3 shape decodes without error and reads the wrong value. `pending_upgrade_cred: Option<Credential>` is appended at index 5, new in alpha.4. A future migration must read this datum by name, never positionally.",

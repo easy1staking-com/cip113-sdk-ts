@@ -50,6 +50,7 @@ test("FES register reads maxInlineDatumBytes from its deployment at the call sit
     client,
     standardScripts: {
       programmableLogicBase: { hash: H28 },
+      registry: { hash: H28 },
       buildIssuanceMint: () => ({ hash: H28 }),
     },
     deployment: { maxInlineDatumBytes: DEPLOYMENT_BOUND },

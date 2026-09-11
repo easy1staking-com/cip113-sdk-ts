@@ -61,6 +61,7 @@ import {
   extractConstrBytesField,
   extractCredentialField,
   getInlineDatum,
+  assertProtocolParamsIssuanceLogic,
   utxoHasUnit,
   utxoUnitQty,
   utxoLovelace,
@@ -299,7 +300,11 @@ async function findProtocolParamsUtxo(
     scriptAddress(networkId, deployment.protocolParams.policyId)
   );
   const utxos = await client.getUtxosWithUnit(addr, ppUnit);
-  if (utxos.length > 0) return utxos[0];
+  if (utxos.length > 0) {
+    const utxo = utxos[0];
+    assertProtocolParamsIssuanceLogic(utxo, deployment.issuanceLogic.scriptHash);
+    return utxo;
+  }
   throw new Error(`Protocol params UTxO not found (unit: ${ppUnit})`);
 }
 
