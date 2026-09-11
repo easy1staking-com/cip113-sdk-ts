@@ -1,10 +1,11 @@
 /**
- * freeze-and-seize on a live devnet (W-E S-4's devnet half).
+ * freeze-and-seize on a live CIP-113 0.5.0-alpha.4 devnet.
  *
- * Covers the paths migrated in S-4: initCompliance → register → mint → transfer.
- * `seize` and `burn` are NOT migrated (they route through the deleted
- * `ThirdPartyAct`) and are asserted to REFUSE, so this file fails the moment
- * S-5 lands and stops being an honest description of the state.
+ * Covers initCompliance → register → mint → transfer → freeze → refused
+ * transfer → unfreeze → seize → burn across three tests. In alpha.4 every mint
+ * and burn carries a second protocol withdrawal, `issuance_logic`; omitting it
+ * is silent until script evaluation because issuance_mint scans for its
+ * redeemer and names neither the missing withdrawal nor the policy.
  *
  * Unlike `dummy`, FES cannot be constructed and used directly: its
  * `blacklist_mint` is parameterised by the UTxO `initCompliance` consumes. See
@@ -14,9 +15,16 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { Address as EvoAddress, Assets as EvoAssets } from "@evolution-sdk/evolution";
+import {
+  Address as EvoAddress,
+  Assets as EvoAssets,
+  Data as EvoData,
+  RewardAccount as EvoRewardAccount,
+  Transaction as EvoTransaction,
+  Withdrawals as EvoWithdrawals,
+} from "@evolution-sdk/evolution";
 import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
-import { CIP113, stringToHex, baseAddress } from "../../dist/index.js";
+import { CIP113, stringToHex, baseAddress, rewardAddress } from "../../dist/index.js";
 import { requireDevnet, makeClient, waitFor, settleWallet, KUPO_URL } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { makeFesFixture } from "../harness/fes-setup.js";
@@ -140,13 +148,86 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     assetName,
     quantity: 1_000n,
   });
+  // Unsigned CBOR is a lower bound: signing adds witnesses. This assertion is
+  // necessary but not sufficient; acceptance on chain establishes the actual
+  // signed transaction also fit.
+  const regBytes = reg.cbor.length / 2;
+  console.error(`  [tx size] fes.register: ${regBytes} bytes unsigned (limit 16384)`);
+  assert.ok(regBytes < 16_384, `register transaction is ${regBytes} bytes unsigned, over the 16384 cap`);
+
   const policy = reg.tokenPolicyId!;
+  const regTx = EvoTransaction.fromCBORHex(reg.cbor);
+  // Documentation of the complete withdrawal set, not an upstream guard: the
+  // live evaluator runs during build and catches an omitted or shifted member
+  // before CBOR exists.
+  const regWithdrawals = regTx.body.withdrawals;
+  assert.ok(regWithdrawals, "register must carry its two script withdrawals");
+  const regWithdrawalEntries = EvoWithdrawals.entries(regWithdrawals);
+  assert.equal(regWithdrawalEntries.length, 2, "register must carry exactly two withdrawals");
+  assert.ok(
+    regWithdrawalEntries.some(
+      ([account]) =>
+        EvoRewardAccount.toBech32(account) ===
+        rewardAddress(networkId, deployment.issuanceLogic.scriptHash)
+    ),
+    "register withdrawals must include issuance_logic"
+  );
+
+  // This assertion is independently load-bearing: metadata.outputIndices is a
+  // published API value the evaluator and ledger never see. It compares that
+  // value against the actual transaction output and kills a mis-declared tag
+  // list even when the transaction itself remains valid.
+  const outputIndices = reg.metadata?.outputIndices as Record<string, number> | undefined;
+  assert.ok(outputIndices, "register must publish its planned output indices");
+  const newNodeOutput = regTx.body.outputs[outputIndices.OUT_NEW_NODE];
+  assert.ok(newNodeOutput, "the metadata-selected new-node output must exist");
+  assert.equal(
+    EvoAssets.getByUnit(newNodeOutput.assets, deployment.registry.scriptHash + policy),
+    1n,
+    "metadata.outputIndices.OUT_NEW_NODE must select the output carrying this policy's registry NFT"
+  );
+
   await submitStep("register", reg);
 
   const plb = deployment.programmableLogicBase.scriptHash;
   const issuerPlb = baseAddress(networkId, plb, address);
   await waitFor(async () => (await heldAt(issuerPlb, policy, assetName)) === 1_000n, {
     what: "the FES supply to appear at the issuer's programmable address",
+    timeoutMs: 120_000,
+  });
+
+  // --- subsequent mint: alpha.4's RefInput proof and mandatory params input -
+  const more = await protocol.mint({
+    substandardId: "freeze-and-seize",
+    feePayerAddress: address,
+    tokenPolicyId: policy,
+    assetName,
+    quantity: 500n,
+  });
+  const mintBytes = more.cbor.length / 2;
+  console.error(`  [tx size] fes.mint: ${mintBytes} bytes unsigned (limit 16384)`);
+  assert.ok(mintBytes < 16_384, `mint transaction is ${mintBytes} bytes unsigned, over the 16384 cap`);
+  // Documentation of the complete withdrawal set; live evaluation during
+  // build is the guard that rejects a missing or shifted member.
+  const mintWithdrawals = EvoTransaction.fromCBORHex(more.cbor).body.withdrawals;
+  assert.ok(mintWithdrawals, "mint must carry its two script withdrawals");
+  const mintWithdrawalEntries = EvoWithdrawals.entries(mintWithdrawals);
+  assert.equal(mintWithdrawalEntries.length, 2, "mint must carry exactly two withdrawals");
+  assert.ok(
+    mintWithdrawalEntries.some(
+      ([account]) =>
+        EvoRewardAccount.toBech32(account) ===
+        rewardAddress(networkId, deployment.issuanceLogic.scriptHash)
+    ),
+    "mint withdrawals must include issuance_logic"
+  );
+  // Preserve the harness's known optional-_signBuilder type debt at exactly
+  // its baseline count; this path is a signing client and the runtime value is
+  // asserted by submitStep's dereference.
+  await submitStep("mint", more as { _signBuilder: any });
+  await settleWallet(client, await client.address());
+  await waitFor(async () => (await heldAt(issuerPlb, policy, assetName)) === 1_500n, {
+    what: "the subsequent FES mint to raise issuer supply to 1,500",
     timeoutMs: 120_000,
   });
 
@@ -550,6 +631,80 @@ test("freeze-and-seize: burn destroys tokens — chain-wide supply falls, not ju
     utxoOutputIndex: Number(target.index),
     holderAddress: address,
   });
+  const burnBytes = burned.cbor.length / 2;
+  console.error(`  [tx size] fes.burn: ${burnBytes} bytes unsigned (limit 16384)`);
+  assert.ok(burnBytes < 16_384, `burn transaction is ${burnBytes} bytes unsigned, over the 16384 cap`);
+
+  const burnTx = EvoTransaction.fromCBORHex(burned.cbor);
+  // Documentation of what the chain already guards completely: the evaluator
+  // rejects missing and extra members before this decoded-transaction check can
+  // run. Keep both count and identity because they make the four-way seam
+  // readable at the call site.
+  const burnWithdrawals = burnTx.body.withdrawals;
+  assert.ok(burnWithdrawals, "burn must carry its four script withdrawals");
+  const burnWithdrawalEntries = EvoWithdrawals.entries(burnWithdrawals);
+  assert.equal(burnWithdrawalEntries.length, 4, "burn must carry exactly four withdrawals");
+  const issuanceLogicReward = rewardAddress(
+    networkId,
+    deployment.issuanceLogic.scriptHash
+  );
+  assert.ok(
+    burnWithdrawalEntries.some(
+      ([account]) => EvoRewardAccount.toBech32(account) === issuanceLogicReward
+    ),
+    "burn withdrawals must include issuance_logic"
+  );
+
+  // The same registry reference-input index is encoded for two different
+  // scripts and compared by a third. Decode both public facts rather than
+  // assuming their shared builder source stayed wired correctly.
+  const thirdPartyReward = rewardAddress(networkId, deployment.thirdParty.scriptHash);
+  assert.ok(
+    burnWithdrawalEntries.some(
+      ([account]) => EvoRewardAccount.toBech32(account) === thirdPartyReward
+    ),
+    "burn withdrawals must include third_party"
+  );
+
+  const redeemers = burnTx.witnessSet.redeemers?.toArray();
+  assert.ok(redeemers, "burn must carry redeemers");
+  const thirdPartyData = redeemers.find(
+    (r) =>
+      r.tag === "reward" &&
+      r.data instanceof EvoData.Constr &&
+      r.data.index === 0n &&
+      r.data.fields.length === 2 &&
+      r.data.fields.every((field) => typeof field === "bigint")
+  )?.data;
+  const issuanceLogicData = redeemers.find(
+    (r) => r.tag === "reward" && r.data instanceof Map
+  )?.data;
+  assert.ok(
+    thirdPartyData instanceof EvoData.Constr &&
+      thirdPartyData.index === 0n &&
+      typeof thirdPartyData.fields[0] === "bigint",
+    "third_party withdrawal must carry ThirdPartyRedeemer { registry_node_idx, outputs_start_idx }"
+  );
+  assert.ok(issuanceLogicData instanceof Map, "issuance_logic withdrawal redeemer must be a policy map");
+  let registryProof: EvoData.Data | undefined;
+  for (const [key, proof] of issuanceLogicData.entries()) {
+    if (Buffer.from(key as Uint8Array).toString("hex") === policy) {
+      registryProof = proof as EvoData.Data;
+      break;
+    }
+  }
+  assert.ok(
+    registryProof instanceof EvoData.Constr &&
+      registryProof.index === 0n &&
+      typeof registryProof.fields[0] === "bigint",
+    "issuance_logic must map this policy to RefInput { index }"
+  );
+  assert.equal(
+    thirdPartyData.fields[0],
+    registryProof.fields[0],
+    "ThirdPartyRedeemer.registry_node_idx must equal issuance_logic RefInput.index"
+  );
+
   await submitStep("burn", burned);
 
   // Poll, then REPORT THE NUMBERS. "Timed out waiting for X" tells you the
