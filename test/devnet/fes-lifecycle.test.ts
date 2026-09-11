@@ -18,13 +18,21 @@ import assert from "node:assert/strict";
 import {
   Address as EvoAddress,
   Assets as EvoAssets,
+  Bytes as EvoBytes,
   Data as EvoData,
   RewardAccount as EvoRewardAccount,
   Transaction as EvoTransaction,
   Withdrawals as EvoWithdrawals,
 } from "@evolution-sdk/evolution";
 import { freezeAndSeizeSubstandard } from "../../dist/substandards/freeze-and-seize/index.js";
-import { CIP113, stringToHex, baseAddress, rewardAddress } from "../../dist/index.js";
+import {
+  CIP113,
+  stringToHex,
+  baseAddress,
+  rewardAddress,
+  labeledAssetName,
+} from "../../dist/index.js";
+import { getInlineDatum, inlineDatumBytes } from "../../dist/core/evo-utils.js";
 import { requireDevnet, makeClient, waitFor, settleWallet, KUPO_URL } from "../harness/yaci.mjs";
 import { bootstrapProtocol, loadStandardBlueprint } from "../harness/bootstrap.js";
 import { makeFesFixture } from "../harness/fes-setup.js";
@@ -254,6 +262,214 @@ test("freeze-and-seize: the migrated paths work on a live devnet", async () => {
     timeoutMs: 120_000,
   });
 
+});
+
+/**
+ * FIRST-EVER execution of this repository's CIP-68 register path, and of
+ * alpha.4's inline-datum bound on it. A green is one observation, not restored
+ * parity: no earlier test or example here has ever passed `cip68Metadata`.
+ *
+ * The two boundary fixtures differ by one character. The refusal is attempted
+ * first and no transaction returned from it is submitted, so an over-bound
+ * record cannot spend anything before the at-bound control runs.
+ */
+test("freeze-and-seize: a CIP-68 register at the datum bound succeeds, and one byte over is refused", async () => {
+  const deployment = await bootstrapProtocol();
+  const client: any = await makeClient();
+  const networkId = client.chain.id;
+  const address = EvoAddress.toBech32(await client.address());
+  const assetName = stringToHex("C68" + deployment.txHash.slice(0, 6));
+  const plb = deployment.programmableLogicBase.scriptHash;
+
+  const fes = await makeFesFixture(client, address, assetName, plb);
+  let observeRegisterReads = false;
+  let registerUtxoReads = 0;
+  const observedClient = new Proxy(client, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function") return value;
+      if (property === "getUtxos") {
+        return (...args: unknown[]) => {
+          if (observeRegisterReads) registerUtxoReads += 1;
+          return value.apply(target, args);
+        };
+      }
+      return value.bind(target);
+    },
+  });
+  const protocol = CIP113.init({
+    client: observedClient,
+    standard: { blueprint: loadStandardBlueprint(), deployment },
+    substandards: [
+      freezeAndSeizeSubstandard({
+        blueprint: fes.blueprint as never,
+        deployment: fes.deployment as never,
+      }),
+    ],
+    evaluator: createOgmiosEvaluator(process.env.OGMIOS_URL ?? "http://localhost:1337"),
+  });
+
+  const init = await protocol.compliance.init("freeze-and-seize", {
+    feePayerAddress: address,
+    adminAddress: address,
+    assetName,
+  });
+  await submitStep("cip68-initCompliance", init as { _signBuilder: any });
+  await settleWallet(client, await client.address());
+  await registerSubstandardCredentials(fes.withdrawScripts.slice(1));
+
+  const atBoundMetadata = { name: "AtBound", description: "D".repeat(959) };
+  const overBoundMetadata = { name: "AtBound", description: "D".repeat(960) };
+
+  // The over-bound datum would fail phase 2 with an empty trace. The SDK must
+  // refuse it by name before returning CBOR; this attempt comes before the
+  // successful register below, so no transaction from it can be submitted.
+  let refusal: unknown;
+  observeRegisterReads = true;
+  await assert.rejects(
+    async () => {
+      await protocol.register("freeze-and-seize", {
+        feePayerAddress: address,
+        assetName,
+        quantity: 1_000n,
+        cip68Metadata: overBoundMetadata,
+      });
+    },
+    (err: unknown) => {
+      refusal = err;
+      return true;
+    },
+    "a 1025-byte CIP-68 (100) datum must be refused before CBOR is returned"
+  );
+  assert.equal(
+    registerUtxoReads,
+    0,
+    "the over-bound refusal must run before register selects any UTxO"
+  );
+  const refusalText = String((refusal as Error)?.message ?? refusal);
+  console.error(`  [expected] fes.register CIP-68 over-bound refusal: ${refusalText}`);
+  assert.match(
+    refusalText,
+    /maxInlineDatumBytes/,
+    `the over-bound refusal must name maxInlineDatumBytes; got: ${refusalText}`
+  );
+  assert.match(refusalText, /1025/, `the refusal must name the measured size 1025; got: ${refusalText}`);
+  assert.match(refusalText, /1024/, `the refusal must name the bound 1024; got: ${refusalText}`);
+
+  const reg = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+    cip68Metadata: atBoundMetadata,
+  });
+  observeRegisterReads = false;
+  assert.ok(
+    registerUtxoReads > 0,
+    "the register UTxO-read counter must observe reads during a successful register"
+  );
+  assert.equal(
+    reg.metadata?.cip68DatumBytes,
+    1_024,
+    "register metadata must publish the SDK's own at-bound datum measurement"
+  );
+
+  const small = await protocol.register("freeze-and-seize", {
+    feePayerAddress: address,
+    assetName,
+    quantity: 1_000n,
+    cip68Metadata: { name: "Acme Token", ticker: "ACME", decimals: 6 },
+  });
+  assert.equal(
+    small.metadata?.cip68DatumBytes,
+    46,
+    "register metadata must publish the measured small CIP-68 datum size, not echo the bound"
+  );
+
+  // [tx size] from the returned CBOR, NOT from TX_SIZE_DIAG. That variable
+  // instruments bootstrapProtocol's private submit helper and cannot see this
+  // transaction. This unsigned size is a lower bound; chain acceptance below
+  // establishes that the signed transaction also fit.
+  const regBytes = reg.cbor.length / 2;
+  console.error(
+    `  [tx size] fes.register (CIP-68, at-bound datum): ${regBytes} bytes unsigned (limit 16384)`
+  );
+  assert.ok(
+    regBytes < 16_384,
+    `CIP-68 register is ${regBytes} bytes unsigned, over the 16384 cap`
+  );
+
+  const policy = reg.tokenPolicyId!;
+  await submitStep("cip68-register-at-bound", reg as { _signBuilder: any });
+
+  const issuerPlb = baseAddress(networkId, plb, address);
+  const userUnit = policy + labeledAssetName(333, assetName);
+  await waitFor(
+    async () => {
+      const utxos = await client.getUtxos(EvoAddress.fromBech32(issuerPlb));
+      return utxos.some((u: any) => EvoAssets.getByUnit(u.assets, userUnit) === 1_000n);
+    },
+    { what: "the CIP-68 (333) supply to appear at the issuer's programmable address", timeoutMs: 120_000 }
+  );
+
+  const refUnit = policy + labeledAssetName(100, assetName);
+  let referenceUtxo: any;
+  await waitFor(
+    async () => {
+      const utxos = await client.getUtxos(EvoAddress.fromBech32(issuerPlb));
+      referenceUtxo = utxos.find((u: any) => EvoAssets.getByUnit(u.assets, refUnit) === 1n);
+      return referenceUtxo !== undefined;
+    },
+    { what: "the CIP-68 (100) reference output to be readable from chain", timeoutMs: 120_000 }
+  );
+
+  assert.equal(
+    referenceUtxo.address.paymentCredential._tag,
+    "ScriptHash",
+    "the (100) output payment credential must be a script"
+  );
+  assert.equal(
+    EvoBytes.toHex(referenceUtxo.address.paymentCredential.hash),
+    plb,
+    "the (100) output must be locked at programmable_logic_base"
+  );
+  assert.ok(
+    referenceUtxo.address.stakingCredential,
+    "the (100) output must carry an inline stake credential, not an enterprise address"
+  );
+  assert.equal(
+    referenceUtxo.scriptRef,
+    undefined,
+    "is_seizable_output_shape_bounded forbids a reference script on the (100) output"
+  );
+
+  const chainDatum = getInlineDatum(referenceUtxo);
+  assert.ok(
+    chainDatum instanceof EvoData.Constr && chainDatum.index === 0n,
+    "the chain-read (100) datum must decode as the CIP-68 outer constructor"
+  );
+  const chainMetadata = chainDatum.fields[0];
+  assert.ok(chainMetadata instanceof Map, "the chain-read CIP-68 datum must contain a metadata map");
+  const field = (key: string): string | undefined => {
+    for (const [rawKey, rawValue] of chainMetadata.entries()) {
+      if (Buffer.from(rawKey as Uint8Array).toString("utf8") === key) {
+        return Buffer.from(rawValue as Uint8Array).toString("utf8");
+      }
+    }
+    return undefined;
+  };
+  // Expected values come from the TEST INPUT; rebuilding the datum with the
+  // production builder would only prove that the builder agrees with itself.
+  assert.equal(field("name"), atBoundMetadata.name);
+  assert.equal(field("description"), atBoundMetadata.description);
+  assert.equal(deployment.maxInlineDatumBytes, 1_024, "this fixture is contracted at 1024 bytes");
+  assert.ok(
+    inlineDatumBytes(chainDatum) <= 1_024,
+    "the datum read from chain must not exceed maxInlineDatumBytes"
+  );
+
+  // The transaction validated with an SDK-measured 1024-byte datum against a
+  // bound of 1024, so Plutus `serialise_data` measured <= 1024 too. At this
+  // point the observation establishes SDK >= chain — the only safe direction.
 });
 
 /**
