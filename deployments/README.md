@@ -7,7 +7,7 @@ deployed protocol.
 ```
 deployments/preview/alpha2.json    CIP-113 0.5.0-alpha.2   ← the platform points here today
 deployments/preview/alpha3.json    CIP-113 0.5.0-alpha.3   ← retained live instance; its 0.8.x source line must be built from git
-# No alpha.4 instance record exists in deployments/preview/.
+deployments/preview/alpha4-7e8a631.json  CIP-113 0.5.0-alpha.4 ← SDK 0.9.x; current upstream pin
 ```
 
 ## ⛔ These files cannot be regenerated
@@ -48,6 +48,7 @@ slots shifts.
 
 To operate the alpha.2 instance, use a published SDK release from the `0.7.x` line.
 No published release operates alpha.3; its `0.8.x` source line must be built from git.
+The alpha.4 instance is operated by the `0.9.x` source line until that release is published.
 
 ## Usage
 
