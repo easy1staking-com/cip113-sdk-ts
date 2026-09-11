@@ -54,8 +54,6 @@ import {
   registryNodeDatum,
   decodeRegistryNode,
   blacklistNodeDatum,
-  mintingProofOutputIndex,
-  mintingProofRefInput,
   registryInsertRedeemer,
   blacklistInitRedeemer,
   blacklistAddRedeemer,
@@ -87,6 +85,7 @@ import {
   thirdPartyRedeemer,
   withdrawalIndexOf,
   plbWithdrawalPlan,
+  issuancePlan,
   programmableLogicGlobalRedeemer,
   type WithdrawalKey,
 } from "../../core/ledger-order.js";
@@ -210,20 +209,30 @@ function spendableWalletUtxos(
   walletUtxos: EvoUTxO.UTxO[],
   deployment: DeploymentParams
 ): EvoUTxO.UTxO[] {
-  const reserved = new Set(
-    [
+  const reservedRefs = [
       deployment.programmableBaseRefInput,
       // alpha.3: the dispatcher's reference script joined the set the bootstrap
       // publishes. Naming it here keeps the explicit list complete — the general
       // scriptRef rule below already covers it, but a named list that silently
       // omits a live deployment's script invites the next reader to trust it.
+      // alpha.4 adds issuance_logic and upgrade_multisig; the newest member is
+      // exactly the one least likely to be covered anywhere else.
       deployment.programmableLogicGlobalRefInput,
       deployment.transferRefInput,
       deployment.thirdPartyRefInput,
       deployment.unfrackingRefInput,
-    ]
-      .filter(Boolean)
-      .map((r) => `${r.txHash}#${r.outputIndex}`)
+      deployment.issuanceLogicRefInput,
+      deployment.upgradeMultisigRefInput,
+    ].filter(Boolean);
+  if (reservedRefs.length !== 7) {
+    throw new Error(
+      `spendableWalletUtxos: the named deployment reference-script reservation list must ` +
+        `contain exactly 7 entries; got ${reservedRefs.length}. A membership-only list ` +
+        `decays into a stale subset and silently stops protecting its newest member.`
+    );
+  }
+  const reserved = new Set(
+    reservedRefs.map((r) => `${r.txHash}#${r.outputIndex}`)
   );
   return walletUtxos.filter((u) => {
     // ⛔ ANY UTxO CARRYING A REFERENCE SCRIPT IS OFF LIMITS, not merely the four
@@ -305,6 +314,34 @@ async function findIssuanceCborHexUtxo(
   const utxos = await client.getUtxosWithUnit(addr, icUnit);
   if (utxos.length > 0) return utxos[0];
   throw new Error(`Issuance CBOR hex UTxO not found (unit: ${icUnit})`);
+}
+
+/**
+ * The `issuance_logic` reference-script UTxO.
+ *
+ * Its withdraw-0 rides on every mint and burn, making this the most
+ * load-bearing reference-script output in the deployment. Attaching the body
+ * here would hide a spent deployment output instead of naming the breakage.
+ */
+async function findIssuanceLogicRefUtxo(
+  client: EvoClient,
+  deployment: DeploymentParams
+): Promise<EvoUTxO.UTxO> {
+  const { txHash, outputIndex } = deployment.issuanceLogicRefInput;
+  const utxos = await client.getUtxosByOutRef([
+    new EvoTransactionInput.TransactionInput({
+      transactionId: EvoTransactionHash.fromHex(txHash),
+      index: BigInt(outputIndex),
+    }),
+  ]);
+  if (utxos.length === 0) {
+    throw new Error(
+      `issuance_logic reference script not found on-chain at ${txHash}#${outputIndex}. ` +
+        `Deployment reference scripts are load-bearing: if an earlier transaction SPENT this ` +
+        `output, the deployment is broken and must be re-published.`
+    );
+  }
+  return utxos[0]!;
 }
 
 /** Find the NFT unit in a covering node's value that belongs to a given policy */
@@ -471,6 +508,10 @@ export function freezeAndSeizeSubstandard(config: {
       // 2. Get reference inputs
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
       const issuanceCborHexUtxo = await findIssuanceCborHexUtxo(client, networkId, ctx.deployment);
+      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo(client, ctx.deployment);
+      // One array supplies both the plan's index arithmetic and the transaction.
+      // Constructing either set twice would let two valid integer indices drift.
+      const refUtxos = [protocolParamsUtxo, issuanceCborHexUtxo, issuanceLogicRefUtxo];
 
       // 3. Build datums
       // The index-based reads that used to be here (2/3/4) were silently wrong
@@ -510,9 +551,32 @@ export function freezeAndSeizeSubstandard(config: {
         globalStateCs: "",
       });
 
-      // 4. Build redeemers — registry output index shifts when CIP-68 adds an extra output
-      const registryOutputIndex = hasCIP68 ? 3 : 2;
-      const issuanceRedeemer = mintingProofOutputIndex(registryOutputIndex);
+      // The former branch-dependent registry-output literal is gone. The index
+      // now derives from the declared output set, so adding an output shifts it
+      // automatically instead of requiring a second edit in step. Its CIP-68
+      // branch has never executed on chain: no test has passed
+      // `cip68Metadata` yet; T-F04-4 owns that first execution.
+      const outputTags = [
+        "user-token",
+        ...(hasCIP68 ? ["cip68-reference"] : []),
+        "covering-node",
+        "new-node",
+      ];
+      // No plgHash: register spends a registry node and wallet funds, never a
+      // programmable_logic_base input.
+      const plan = issuancePlan({
+        issuanceLogicHash: ctx.deployment.issuanceLogic.scriptHash,
+        otherWithdrawals: [{ hash: scripts.issuerAdmin.hash, isScript: true }],
+        referenceInputs: refUtxos.map(utxoToTxInput),
+        paramsRefInput: utxoToTxInput(protocolParamsUtxo),
+        outputs: outputTags,
+        issued: [
+          {
+            policyId: scripts.tokenPolicyId,
+            proof: { kind: "output", tag: "new-node" },
+          },
+        ],
+      });
       const registryMintRedeemer = registryInsertRedeemer(scripts.issuanceMint.hash, { type: "script", hash: scripts.issuerAdmin.hash });
       const tokenDatum = voidData();
 
@@ -548,13 +612,30 @@ export function freezeAndSeizeSubstandard(config: {
 
       tx = tx.collectFrom({ inputs: [coveringNodeUtxo], redeemer: voidData() });
 
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
-        amount: 0n,
-        redeemer: voidData(),
-      });
+      const withdrawalSpecs = [
+        { hash: scripts.issuerAdmin.hash, redeemer: voidData() },
+        {
+          hash: ctx.deployment.issuanceLogic.scriptHash,
+          redeemer: plan.issuanceLogicRedeemer,
+        },
+      ];
+      if (withdrawalSpecs.length !== plan.withdrawals.length) {
+        throw new Error(
+          `register: issuance plan declares ${plan.withdrawals.length} withdrawals but ` +
+            `${withdrawalSpecs.length} are emitted`
+        );
+      }
+      for (const withdrawal of withdrawalSpecs) {
+        tx = tx.withdraw({
+          stakeCredential: Credential.makeScriptHash(
+            new Uint8Array(Buffer.from(withdrawal.hash, "hex"))
+          ),
+          amount: 0n,
+          redeemer: withdrawal.redeemer,
+        });
+      }
 
-      tx = tx.mintAssets({ assets: tokenAssets, redeemer: issuanceRedeemer });
+      tx = tx.mintAssets({ assets: tokenAssets, redeemer: plan.issuanceRedeemer });
       tx = tx.mintAssets({ assets: registryNftAssets, redeemer: registryMintRedeemer });
 
       // min-UTxO is sized from live protocol parameters, not guessed: `unit`
@@ -562,7 +643,7 @@ export function freezeAndSeizeSubstandard(config: {
       // magnitude, and both widen the serialised output.
       const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
 
-      // Output 0: user token to recipient (with label 333 prefix if CIP-68)
+      // outputTags: "user-token" — minted supply at the recipient's PLB.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
         assets: outputAssets(
@@ -577,7 +658,7 @@ export function freezeAndSeizeSubstandard(config: {
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
 
-      // Output 1 (CIP-68 only): reference token to issuer's PLB address with metadata datum
+      // outputTags: "cip68-reference" — optional reference token and metadata.
       if (hasCIP68 && refUnit) {
         const issuerPlbAddr = baseAddress(networkId, plbHash, feePayerAddress);
         const cip68Datum = buildCIP68FTDatum(params.cip68Metadata!);
@@ -603,7 +684,7 @@ export function freezeAndSeizeSubstandard(config: {
         });
       }
 
-      // Updated covering node (output 1 or 2)
+      // outputTags: "covering-node" — predecessor with its updated link.
       const coveringNodeTokenMap = new Map<string, bigint>();
       if (coveringNftUnit) coveringNodeTokenMap.set(coveringNftUnit, 1n);
       tx = tx.payToAddress({
@@ -612,7 +693,7 @@ export function freezeAndSeizeSubstandard(config: {
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
-      // New registry node (output 2 or 3).
+      // outputTags: "new-node" — the node named by the issuance proof.
       //
       // 3 ADA, not 2: the RegistryNode datum is SEVEN fields in 0.5.x and
       // min-UTxO scales with serialised output size. MEASURED at 2,038,630 for
@@ -649,7 +730,9 @@ export function freezeAndSeizeSubstandard(config: {
       // the guard against that is the input being there, not a test. The saving
       // is one reference input on a once-per-token transaction; the exposure is
       // a silent custody change nobody would see.
-      tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, issuanceCborHexUtxo] });
+      // alpha.4 makes the params reference input mandatory rather than an
+      // optional custody hint: with_protocol_params_fields uses expect_at.
+      tx = tx.readFrom({ referenceInputs: refUtxos });
 
       // Attach scripts
       // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
@@ -677,6 +760,9 @@ export function freezeAndSeizeSubstandard(config: {
         metadata: {
           issuerAdminScriptHash: scripts.issuerAdmin.hash,
           transferScriptHash: scripts.transfer.hash,
+          outputIndices: {
+            OUT_NEW_NODE: plan.outputIndexOf("new-node"),
+          },
           ...(hasCIP68 && {
             cip68Enabled: true,
             userAssetNameHex,
@@ -705,13 +791,26 @@ export function freezeAndSeizeSubstandard(config: {
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
 
-      // 2. Sort reference inputs
-      const regRef = utxoToTxInput(registryUtxo);
-      const sortedRefInputs = sortTxInputs([regRef]);
-      const registryRefIdx = findRefInputIndex(sortedRefInputs, regRef);
+      // 2. Find the two alpha.4 protocol reference inputs. The params input is
+      // NEW here: with_protocol_params_fields begins with a hard expect_at,
+      // and S-7's open mint-vs-burn inconsistency is answered at this site.
+      const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
+      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo(client, ctx.deployment);
+      const refUtxos = [protocolParamsUtxo, registryUtxo, issuanceLogicRefUtxo];
+      const plan = issuancePlan({
+        issuanceLogicHash: ctx.deployment.issuanceLogic.scriptHash,
+        otherWithdrawals: [{ hash: scripts.issuerAdmin.hash, isScript: true }],
+        referenceInputs: refUtxos.map(utxoToTxInput),
+        paramsRefInput: utxoToTxInput(protocolParamsUtxo),
+        issued: [
+          {
+            policyId: tokenPolicyId,
+            proof: { kind: "reference-input", input: utxoToTxInput(registryUtxo) },
+          },
+        ],
+      });
 
       // 3. Build redeemers
-      const issuanceRedeemer = mintingProofRefInput(registryRefIdx);
       const tokenDatum = voidData();
 
       // 4. Build PLB address
@@ -727,12 +826,29 @@ export function freezeAndSeizeSubstandard(config: {
       let tx = client.newTx();
       const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
       tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
-        amount: 0n,
-        redeemer: voidData(),
-      });
-      tx = tx.mintAssets({ assets: tokenAssets, redeemer: issuanceRedeemer });
+      const withdrawalSpecs = [
+        { hash: scripts.issuerAdmin.hash, redeemer: voidData() },
+        {
+          hash: ctx.deployment.issuanceLogic.scriptHash,
+          redeemer: plan.issuanceLogicRedeemer,
+        },
+      ];
+      if (withdrawalSpecs.length !== plan.withdrawals.length) {
+        throw new Error(
+          `mint: issuance plan declares ${plan.withdrawals.length} withdrawals but ` +
+            `${withdrawalSpecs.length} are emitted`
+        );
+      }
+      for (const withdrawal of withdrawalSpecs) {
+        tx = tx.withdraw({
+          stakeCredential: Credential.makeScriptHash(
+            new Uint8Array(Buffer.from(withdrawal.hash, "hex"))
+          ),
+          amount: 0n,
+          redeemer: withdrawal.redeemer,
+        });
+      }
+      tx = tx.mintAssets({ assets: tokenAssets, redeemer: plan.issuanceRedeemer });
       const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
@@ -747,7 +863,7 @@ export function freezeAndSeizeSubstandard(config: {
         ),
         datum: new InlineDatum.InlineDatum({ data: tokenDatum }),
       });
-      tx = tx.readFrom({ referenceInputs: [registryUtxo] });
+      tx = tx.readFrom({ referenceInputs: refUtxos });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuerAdmin.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(scripts.issuanceMint.compiledCode) });
       tx = tx.addSigner({ keyHash: KeyHash.fromHex(config.deployment.adminPkh) });
@@ -788,15 +904,8 @@ export function freezeAndSeizeSubstandard(config: {
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
-
-      // 3. Sort reference inputs
-      const allRefInputRefs = [utxoToTxInput(protocolParamsUtxo), utxoToTxInput(registryUtxo)];
-      const sortedRefInputs = sortTxInputs(allRefInputRefs);
-      const registryIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(registryUtxo));
-
-      // 4. Build redeemers
-      const issuanceRedeemer = mintingProofRefInput(registryIdx);
-      const paramsIdx = findRefInputIndex(sortedRefInputs, utxoToTxInput(protocolParamsUtxo));
+      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo(client, ctx.deployment);
+      const refUtxos = [protocolParamsUtxo, registryUtxo, issuanceLogicRefUtxo];
 
       // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
       // administrative path is now the standalone `third_party` validator, and
@@ -815,12 +924,23 @@ export function freezeAndSeizeSubstandard(config: {
         isScript: true,
       };
       const issuerAuthorityKey: WithdrawalKey = { hash: scripts.issuerAdmin.hash, isScript: true };
-      // alpha.3: the DISPATCHER withdraws on every programmable transaction and
-      // PLB's wdrl_idx points at IT, not at the delegate.
-      const plan = plbWithdrawalPlan({
+      // One plan owns the COMPLETE four-withdrawal and three-reference-input
+      // sets. In particular, adding issuance_logic's reference script can move
+      // every reference-input index that sorts after it.
+      const plan = issuancePlan({
+        issuanceLogicHash: ctx.deployment.issuanceLogic.scriptHash,
         plgHash: ctx.standardScripts.programmableLogicGlobal.hash,
-        others: [thirdPartyKey, issuerAuthorityKey],
+        otherWithdrawals: [thirdPartyKey, issuerAuthorityKey],
+        referenceInputs: refUtxos.map(utxoToTxInput),
+        paramsRefInput: utxoToTxInput(protocolParamsUtxo),
+        issued: [
+          {
+            policyId: tokenPolicyId,
+            proof: { kind: "reference-input", input: utxoToTxInput(registryUtxo) },
+          },
+        ],
       });
+      const registryIdx = plan.referenceInputIndexOf(utxoToTxInput(registryUtxo));
 
       // outputs_start_idx = 0: `third_party` PAIRS each programmable input with
       // the NEXT output (same address, datum and reference script, lovelace
@@ -829,8 +949,12 @@ export function freezeAndSeizeSubstandard(config: {
       // See docs/api-reference.md — getting this backwards fails with an EMPTY
       // TRACE LIST, because it is a structural expect and not a traced check.
       // params_idx dropped: delegates no longer read the params datum.
+      // ThirdPartyRedeemer.registry_node_idx and the issuance map's
+      // RefInput{index} MUST be the same integer: upstream
+      // third_party_covers_own_registry_node compares them. One plan computes
+      // both, so the pair cannot drift when a reference input is added.
       const plgRedeemer = thirdPartyRedeemer(registryIdx, 0);
-      const plbSpendRedeemer = baseSpendRedeemer(paramsIdx, plan.plgIdx);
+      const plbSpendRedeemer = baseSpendRedeemer(plan.paramsIdx, plan.plgIdx());
       const tokenDatum = voidData();
 
       // 5. Compute remaining assets (remove burned token's policy)
@@ -854,27 +978,33 @@ export function freezeAndSeizeSubstandard(config: {
       const spendableUtxos = spendableWalletUtxos(walletUtxos, ctx.deployment);
       tx = tx.collectFrom({ inputs: spendableUtxos.slice(0, 2) });
       tx = tx.collectFrom({ inputs: [utxoToBurn], redeemer: plbSpendRedeemer });
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(new Uint8Array(Buffer.from(scripts.issuerAdmin.hash, "hex"))),
-        amount: 0n,
-        redeemer: voidData(),
-      });
-      // The DISPATCHER's own withdraw-0 — new in alpha.3, required on every
-      // programmable transaction, and the entry PLB's wdrl_idx resolves to.
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(
-          new Uint8Array(Buffer.from(ctx.standardScripts.programmableLogicGlobal.hash, "hex"))
-        ),
-        amount: 0n,
-        redeemer: programmableLogicGlobalRedeemer("THIRD_PARTY"),
-      });
-      tx = tx.withdraw({
-        stakeCredential: Credential.makeScriptHash(
-          new Uint8Array(Buffer.from(ctx.standardScripts.thirdParty.hash, "hex"))
-        ),
-        amount: 0n,
-        redeemer: plgRedeemer,
-      });
+      const withdrawalSpecs = [
+        { hash: scripts.issuerAdmin.hash, redeemer: voidData() },
+        {
+          hash: ctx.standardScripts.programmableLogicGlobal.hash,
+          redeemer: programmableLogicGlobalRedeemer("THIRD_PARTY"),
+        },
+        { hash: ctx.standardScripts.thirdParty.hash, redeemer: plgRedeemer },
+        {
+          hash: ctx.deployment.issuanceLogic.scriptHash,
+          redeemer: plan.issuanceLogicRedeemer,
+        },
+      ];
+      if (withdrawalSpecs.length !== plan.withdrawals.length) {
+        throw new Error(
+          `burn: issuance plan declares ${plan.withdrawals.length} withdrawals but ` +
+            `${withdrawalSpecs.length} are emitted`
+        );
+      }
+      for (const withdrawal of withdrawalSpecs) {
+        tx = tx.withdraw({
+          stakeCredential: Credential.makeScriptHash(
+            new Uint8Array(Buffer.from(withdrawal.hash, "hex"))
+          ),
+          amount: 0n,
+          redeemer: withdrawal.redeemer,
+        });
+      }
       // ⚑ NO min-UTxO COMPUTATION HERE, AND THAT IS CORRECT — do not "fix" it to
       // match the other outputs. This is the PAIRED CONTINUATION: `third_party`
       // requires it to preserve the input's address, datum and reference script
@@ -894,8 +1024,8 @@ export function freezeAndSeizeSubstandard(config: {
         // coincidence rather than a guarantee.
         datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToBurn) ?? tokenDatum }),
       });
-      tx = tx.mintAssets({ assets: burnAssets, redeemer: issuanceRedeemer });
-      tx = tx.readFrom({ referenceInputs: [protocolParamsUtxo, registryUtxo] });
+      tx = tx.mintAssets({ assets: burnAssets, redeemer: plan.issuanceRedeemer });
+      tx = tx.readFrom({ referenceInputs: refUtxos });
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.programmableLogicBase.compiledCode) });
       // ⛔ THE DISPATCHER'S OWN SCRIPT WITNESS. A withdraw-0 needs the script in
       // full, not just a redeemer — alpha.3 added the dispatcher's withdrawal to
