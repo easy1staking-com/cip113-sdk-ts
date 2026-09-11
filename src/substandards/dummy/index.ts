@@ -7,6 +7,25 @@
  *
  * No compliance features, no blacklist.
  * Uses Evolution SDK directly — no adapter abstraction.
+ *
+ * ⛔ alpha.4 SPLIT ISSUANCE (#129), AND IT CHANGED WHAT `register` AND `mint`
+ * MUST CARRY. `issuance_mint` is frozen — its applied hash IS the policy id —
+ * so its redeemer is now `IssuanceRedeemer { params_idx }` and nothing else.
+ * Everything replaceable moved behind `issuance_logic_cred` in the
+ * protocol-params datum, which means EVERY mint and EVERY burn now carries a
+ * SECOND protocol withdrawal: `issuance_logic`'s withdraw-0, whose redeemer is
+ * the per-policy `MintingRegistryProof` map.
+ *
+ * ⚠ Omitting that withdrawal is SILENT. `issuance_mint` calls `covered_by`,
+ * which scans `tx.redeemers` for a `Withdraw(issuance_logic_cred)` purpose;
+ * with the withdrawal absent there is no such redeemer, the scan returns False,
+ * and the mint fails naming neither a withdrawal, nor a policy, nor an index.
+ * That is why `register` and `mint` route every index through `issuancePlan`
+ * and cross-check `plan.withdrawals.length` against their own `withdraw()`
+ * call count: a comment cannot prove a call site exists, a count can.
+ *
+ * `transfer` and `thirdPartyTransfer` neither mint nor burn, so neither needs
+ * `issuance_logic` and both still use `plbWithdrawalPlan`.
  */
 
 import { CIP171_METADATA_LABEL, buildCip171Metadatum } from "../../core/cip171.js";
@@ -16,6 +35,8 @@ import {
   Bytes,
   Data,
   Transaction,
+  TransactionHash as EvoTransactionHash,
+  TransactionInput as EvoTransactionInput,
 } from "@evolution-sdk/evolution";
 
 import type { UTxO as EvoUTxO } from "@evolution-sdk/evolution";
@@ -47,6 +68,7 @@ import {
   referenceInputIndexOf,
   withdrawalIndexOf,
   plbWithdrawalPlan,
+  issuancePlan,
   programmableLogicGlobalRedeemer,
   compareTxInputs,
   type WithdrawalKey,
@@ -62,8 +84,6 @@ import {
   registryNodeDatum,
   decodeRegistryNode,
   registryInsertRedeemer,
-  mintingProofOutputIndex,
-  mintingProofRefInput,
   mintAssetsFromMap,
   REGISTRY_NODE_MIN_ADA,
   getInlineDatum,
@@ -220,6 +240,32 @@ export function dummySubstandard(config: {
     return utxos[0]!;
   }
 
+  /**
+   * The `issuance_logic` reference-script UTxO.
+   *
+   * ⛔ Its withdraw-0 rides on EVERY mint and burn, which makes this the single
+   * most load-bearing reference-script output in the deployment. If an earlier
+   * transaction spent it, the deployment is broken and the script must be
+   * re-published; attaching the body here would hide that infrastructure loss.
+   */
+  async function findIssuanceLogicRefUtxo(): Promise<EvoUTxO.UTxO> {
+    const { txHash, outputIndex } = ctx.deployment.issuanceLogicRefInput;
+    const utxos = await ctx.client.getUtxosByOutRef([
+      new EvoTransactionInput.TransactionInput({
+        transactionId: EvoTransactionHash.fromHex(txHash),
+        index: BigInt(outputIndex),
+      }),
+    ]);
+    if (utxos.length === 0) {
+      throw new Error(
+        `issuance_logic reference script not found on-chain at ${txHash}#${outputIndex}. ` +
+          `Deployment reference scripts are load-bearing: if an earlier transaction SPENT this ` +
+          `output, the deployment is broken and must be re-published.`
+      );
+    }
+    return utxos[0]!;
+  }
+
   /** Build the transaction and shape it into an UnsignedTx. */
   async function finish(
     tx: unknown,
@@ -285,10 +331,13 @@ export function dummySubstandard(config: {
      * node (the one whose key < ours and whose next > ours), spending it to
      * repoint its `next` at us, and minting a new node NFT for our own entry.
      *
-     * Mint and registration are one transaction because `issuance_mint`'s
-     * MintingRegistryProof can name the registry node as an OUTPUT of this very
-     * transaction (ctor 1, OutputIndex) rather than as a reference input — so
-     * the token can be minted before its node exists anywhere else.
+     * Mint and registration are one transaction because the registry proof can
+     * name the new node as an OUTPUT of this very transaction (OutputIndex), so
+     * the token can be minted before its node exists anywhere else. In alpha.4
+     * that proof rides inside `issuance_logic`'s withdraw-0 map, keyed by policy
+     * id; `issuance_mint`'s own redeemer is only `IssuanceRedeemer { params_idx }`.
+     * Register IS a first mint, so it needs that withdrawal, the params reference
+     * input and its map entry exactly as `mint` does.
      */
     async register(params: RegisterParams): Promise<UnsignedTx> {
       const { feePayerAddress, assetName, quantity } = params;
@@ -354,12 +403,35 @@ export function dummySubstandard(config: {
       const registryNftUnit = registryPolicyId + tokenPolicyId;
       const coveringNftUnit = registryPolicyId + coveringNode.key;
 
-      // Output order is the contract: the MintingRegistryProof below names our
-      // registry node by OUTPUT INDEX, so moving these outputs silently changes
-      // which output the validator inspects.
-      const OUT_TOKEN = 0;
-      const OUT_NEW_NODE = 1;
-      const OUT_COVERING = 2;
+      const paramsUtxo = await findParamsUtxo();
+      const issuanceCborUtxo = await findIssuanceCborUtxo();
+      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo();
+
+      // ⛔ ONE ARRAY, TWO USES, DECLARED ONCE. `params_idx` and every other
+      // reference-input index the plan computes are positions in THIS set, and
+      // `readFrom` below is what actually puts that set in the transaction. Two
+      // separately-built lists are two chances to disagree, and a disagreement
+      // here is a valid integer pointing at the wrong UTxO.
+      const refUtxos = [paramsUtxo, issuanceCborUtxo, issuanceLogicRefUtxo];
+
+      // Output order is the contract: `issuance_logic`'s map names our registry
+      // node by OUTPUT INDEX, so moving these outputs silently changes which
+      // output the validator inspects. Balancing change is appended after the
+      // explicit outputs — established by the literals this replaces having
+      // validated on chain, not by reasoning about Evolution.
+      const outputTags = ["user-token", "new-node", "covering-node"];
+
+      // ⛔ EVERY INDEX IN THIS TRANSACTION, COMPUTED IN ONE PLACE OVER THE
+      // COMPLETE SETS. No `plgHash`: register spends the covering registry node
+      // and wallet funds, never a `programmable_logic_base` input.
+      const plan = issuancePlan({
+        issuanceLogicHash: ctx.deployment.issuanceLogic.scriptHash,
+        otherWithdrawals: [{ hash: issueScript.hash, isScript: true }],
+        referenceInputs: refUtxos.map(utxoToTxInput),
+        paramsRefInput: utxoToTxInput(paramsUtxo),
+        outputs: outputTags,
+        issued: [{ policyId: tokenPolicyId, proof: { kind: "output", tag: "new-node" } }],
+      });
 
       let tx = client.newTx();
       // CIP-171 provenance, carried by the transaction that parameterises the
@@ -379,16 +451,28 @@ export function dummySubstandard(config: {
         amount: 0n,
         redeemer: Data.int(100n),
       });
+      // ⛔ THE PROTOCOL'S ISSUANCE-LOGIC withdraw-0. Its script witness comes
+      // from `issuanceLogicRefUtxo` in `readFrom` below — deliberately NOT
+      // attached (code 3104). Its redeemer is the per-policy registry-proof map
+      // that `issuance_mint` scans for this policy id.
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(
+          hexToBytes(ctx.deployment.issuanceLogic.scriptHash)
+        ),
+        amount: 0n,
+        redeemer: plan.issuanceLogicRedeemer,
+      });
 
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[unit, quantity]])),
-        redeemer: mintingProofOutputIndex(OUT_NEW_NODE),
+        redeemer: plan.issuanceRedeemer,
       });
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[registryNftUnit, 1n]])),
         redeemer: registryInsertRedeemer(tokenPolicyId, { type: "script", hash: issueScript.hash }),
       });
 
+      // outputTags[0] — "user-token": the minted supply at the recipient's PLB.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
         assets: outputAssets(
@@ -411,19 +495,19 @@ export function dummySubstandard(config: {
       // Deliberately generous rather than exact: min-UTxO scales with
       // serialised size and with a protocol parameter that can rise.
       const REGISTRY_NODE_ADA = REGISTRY_NODE_MIN_ADA;
+      // outputTags[1] — "new-node": our registry node, named by the proof.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registryAddr),
         assets: outputAssets(REGISTRY_NODE_ADA, new Map([[registryNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: newNodeDatum }),
       });
+      // outputTags[2] — "covering-node": the predecessor with its new link.
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(registryAddr),
         assets: outputAssets(REGISTRY_NODE_ADA, new Map([[coveringNftUnit, 1n]])),
         datum: new InlineDatum.InlineDatum({ data: updatedCoveringDatum }),
       });
 
-      const paramsUtxo = await findParamsUtxo();
-      const issuanceCborUtxo = await findIssuanceCborUtxo();
       // ⛔ THE PROTOCOL-PARAMS REFERENCE INPUT STAYS — and as of S-11 that is a
       // MEASURED decision, not a cautious one.
       //
@@ -444,7 +528,9 @@ export function dummySubstandard(config: {
       // the guard against that is the input being there, not a test. The saving
       // is one reference input on a once-per-token transaction; the exposure is
       // a silent custody change nobody would see.
-      tx = tx.readFrom({ referenceInputs: [paramsUtxo, issuanceCborUtxo] });
+      // alpha.4 makes it mandatory rather than an optional custody hint because
+      // `with_protocol_params_fields` opens with `list.expect_at`.
+      tx = tx.readFrom({ referenceInputs: refUtxos });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       // ⚑ ONE attach, not two. registry_mint and registry_spend merged into a
       // single validator (#117): this transaction both MINTS a node NFT and
@@ -454,7 +540,19 @@ export function dummySubstandard(config: {
       tx = tx.attachScript({ script: buildEvoScript(ctx.standardScripts.registry.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
-      return finish(tx, feePayerAddress, { tokenPolicyId, unit, outputIndices: { OUT_TOKEN, OUT_NEW_NODE, OUT_COVERING } });
+      // Register's withdrawal set is asserted on the decoded transaction at
+      // test/devnet/dummy-lifecycle.test.ts:142-155. It stays there as readable
+      // documentation of the invariant rather than as a guard, because the live
+      // evaluator is upstream of it.
+      return finish(tx, feePayerAddress, {
+        tokenPolicyId,
+        unit,
+        outputIndices: {
+          OUT_TOKEN: plan.outputIndexOf("user-token"),
+          OUT_NEW_NODE: plan.outputIndexOf("new-node"),
+          OUT_COVERING: plan.outputIndexOf("covering-node"),
+        },
+      });
     },
 
     /**
@@ -487,8 +585,23 @@ export function dummySubstandard(config: {
       if (!node) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
 
       const paramsUtxo = await findParamsUtxo();
-      const refs = [paramsUtxo, node];
-      const nodeIdx = referenceInputIndexOf(refs.map(utxoToTxInput), utxoToTxInput(node));
+      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo();
+      // ⛔ ONE ARRAY, TWO USES, DECLARED ONCE. The plan computes `params_idx`
+      // and the registry-node proof over this set; `readFrom` supplies this same
+      // set. A second list could disagree while remaining perfectly well typed.
+      const refUtxos = [paramsUtxo, node, issuanceLogicRefUtxo];
+      const plan = issuancePlan({
+        issuanceLogicHash: ctx.deployment.issuanceLogic.scriptHash,
+        otherWithdrawals: [{ hash: issueScript.hash, isScript: true }],
+        referenceInputs: refUtxos.map(utxoToTxInput),
+        paramsRefInput: utxoToTxInput(paramsUtxo),
+        issued: [
+          {
+            policyId: tokenPolicyId,
+            proof: { kind: "reference-input", input: utxoToTxInput(node) },
+          },
+        ],
+      });
 
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
       const recipientPlbAddr = baseAddress(networkId, plbHash, recipient);
@@ -499,9 +612,16 @@ export function dummySubstandard(config: {
         amount: 0n,
         redeemer: Data.int(100n),
       });
+      tx = tx.withdraw({
+        stakeCredential: Credential.makeScriptHash(
+          hexToBytes(ctx.deployment.issuanceLogic.scriptHash)
+        ),
+        amount: 0n,
+        redeemer: plan.issuanceLogicRedeemer,
+      });
       tx = tx.mintAssets({
         assets: mintAssetsFromMap(new Map([[unit, quantity]])),
-        redeemer: mintingProofRefInput(nodeIdx),
+        redeemer: plan.issuanceRedeemer,
       });
       tx = tx.payToAddress({
         address: EvoAddress.fromBech32(recipientPlbAddr),
@@ -515,10 +635,17 @@ export function dummySubstandard(config: {
           new Map([[unit, quantity]]),
         ),datum: new InlineDatum.InlineDatum({ data: voidData() }),
       });
-      tx = tx.readFrom({ referenceInputs: refs });
+      tx = tx.readFrom({ referenceInputs: refUtxos });
       tx = tx.attachScript({ script: buildEvoScript(issuanceMint.compiledCode) });
       tx = tx.attachScript({ script: buildEvoScript(issueScript.compiledCode) });
 
+      // Deliberately no decoded-transaction assertion checks mint's withdrawal
+      // set here. The evaluator runs inside the builder, so such an assertion
+      // could not fire first; test/devnet/ is outside the offline suite, so it
+      // would add no CI coverage either. Upstream issuance_mint.ak's checks are
+      // presence checks, so the chain catches every omission. The declared set
+      // is inert on this path: plan.withdrawals is read by nothing executable
+      // here, so a divergence in the other direction has no on-chain consequence.
       return finish(tx, feePayerAddress, { tokenPolicyId, unit });
     },
 
