@@ -153,7 +153,7 @@ await client.awaitTx(txHash);
 Burn tokens from a specific UTxO. Requires issuer admin.
 
 In 0.5.0-alpha.4, every burn includes `issuance_logic`'s second protocol withdraw-0.
-If it is omitted, the mint is refused without naming a missing withdrawal, policy, or index.
+If it is omitted, the burn is refused without naming a missing withdrawal, policy, or index.
 
 ```typescript
 const result = await protocol.burn({

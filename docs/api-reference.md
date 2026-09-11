@@ -21,6 +21,8 @@ const protocol = CIP113.init({
 
 ### Core Operations
 
+> ⚠ In 0.5.0-alpha.4, every `register`, `mint`, and `burn` transaction carries `issuance_logic`'s withdraw-0; omitting it refuses the mint without naming a missing withdrawal, policy, or index.
+
 | Method | Description |
 |--------|-------------|
 | `register(substandardId, params)` | Register a new token (first mint + registry insert) |

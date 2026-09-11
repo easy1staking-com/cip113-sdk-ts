@@ -154,7 +154,7 @@ test("the README's migration note names the silent redeemer change", () => {
   );
   assert.match(
     migration,
-    /wdrl_idx` now indexes the\s+\*\*dispatcher/,
+    /wdrl_idx`\s+now\s+indexes\s+the\s+\*\*dispatcher/,
     "must say where wdrl_idx now points",
   );
   assert.match(
