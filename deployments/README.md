@@ -6,7 +6,8 @@ deployed protocol.
 
 ```
 deployments/preview/alpha2.json    CIP-113 0.5.0-alpha.2   ← the platform points here today
-deployments/preview/alpha3.json    CIP-113 0.5.0-alpha.3   ← what this SDK targets
+deployments/preview/alpha3.json    CIP-113 0.5.0-alpha.3   ← retained live instance; its 0.8.x source line must be built from git
+# No alpha.4 instance record exists in deployments/preview/.
 ```
 
 ## ⛔ These files cannot be regenerated
@@ -31,20 +32,22 @@ one-shot seeds, and the overwrite guard would have refused the record anyway.
 The completion path is a separate script (`register-dummy-preview.ts`).
 **Every step after the first irreversible one needs to be separately runnable.**
 
-## The two instances are not interchangeable
+## The instances are not interchangeable
 
 They are different protocols, not versions of one. alpha.3 merged
 `registry_mint`+`registry_spend` and the protocol-params pair, reduced the params
 datum from seven fields to four, reintroduced the `programmable_logic_global`
 dispatcher, and changed three delegate arities.
 
-⇒ **An SDK targeting alpha.3 cannot build transactions against the alpha.2
-instance**, and it refuses rather than trying: a 7-field params datum is rejected
-outright, because old index 1 was `prog_logic_cred` and new index 1 is
-`transfer_cred` — both Credentials, so a positional read would return a
-well-formed value with the wrong meaning.
+⇒ **A 0.9.0 SDK targeting alpha.4 cannot build transactions against either live
+instance**, and it refuses rather than trying: alpha.2 has a 7-field params datum,
+alpha.3 has a 4-field datum, and alpha.4 has six fields with `issuance_logic_cred`
+at index 1. Indices 1, 2 and 3 all hold a `Credential`, so an alpha.3 positional
+reader returns well-formed values with the wrong meanings after every one of those
+slots shifts.
 
-To operate the alpha.2 instance, use an SDK release from the `0.7.x` line.
+To operate the alpha.2 instance, use a published SDK release from the `0.7.x` line.
+No published release operates alpha.3; its `0.8.x` source line must be built from git.
 
 ## Usage
 
