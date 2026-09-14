@@ -54,11 +54,45 @@ function findPinDirs(dir) {
   return found;
 }
 
-const pinDirs = findPinDirs(BLUEPRINTS_DIR);
+// ⛔ `findPinDirs`'s `readdirSync` calls are the one read in this file that
+// runs at MODULE SCOPE, before any `test()` is registered — an unreadable
+// directory under `blueprints/` (e.g. permission denied, or a dangling
+// symlink mid-walk) would throw here uncaught and crash node:test's
+// registration of EVERY test in this file, collapsing the count to an
+// ANONYMOUS failure with no test name at all (see T-D38-1: the same shape,
+// at a different call site, produced "# tests 201" with nothing in the
+// output naming which pin caused it).
+//
+// This wraps the WHOLE walk, not each recursive `readdirSync` individually.
+// That is a stated limit, not an oversight: unlike the per-pin try/catch
+// below — which knows every directory in advance from a walk that already
+// finished — a walk that fails partway through cannot enumerate the
+// directories it never reached, so there is no list to attribute the
+// failure to per-entry. What this CAN do, and does: turn the crash into one
+// NAMED test instead of a silent module-scope abort, and that name is not
+// empty — Node's own ENOENT/EACCES error embeds the offending path in
+// `.message`, so the failure still says which directory could not be read.
+// The cost is real: a walk failure loses the count floor and every per-pin
+// test for that run, same as it would with per-call wrapping, because
+// nothing downstream of a partial walk can be trusted either way.
+let pinDirs;
+let pinDirsError;
+try {
+  pinDirs = findPinDirs(BLUEPRINTS_DIR);
+} catch (e) {
+  pinDirs = [];
+  pinDirsError = e;
+}
 
 test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
   // ⛔ Not optional. Without this floor, a broken walk that finds nothing
   // would make every test below vacuously pass by iterating zero times.
+  if (pinDirsError) {
+    assert.fail(
+      `walking ${BLUEPRINTS_DIR} for UPSTREAM_PIN.json failed before any pin could be ` +
+        `checked: ${pinDirsError.message}`
+    );
+  }
   assert.ok(
     pinDirs.length >= 7,
     `expected the walk of ${BLUEPRINTS_DIR} to find at least 7 UPSTREAM_PIN.json ` +
@@ -76,8 +110,8 @@ for (const dir of pinDirs) {
   // of those, uncaught, would throw at MODULE scope and crash node:test's
   // registration of every test in this file, including the count floor above.
   // The try/catch confines the damage to ONE named failing test for THIS
-  // directory and lets the loop continue to the rest. This covers every read
-  // failure — it does NOT, and cannot, catch a per-pin assertion body that has
+  // directory and lets the loop continue to the rest. This covers every
+  // PER-PIN read failure — it does NOT, and cannot, catch a per-pin assertion body that has
   // been gutted to a no-op; that failure mode is a silent gap in what this
   // file checks, not a crash, and is invisible to the test count. See T-D38-1.
   let pin, blueprint;
@@ -106,6 +140,27 @@ for (const dir of pinDirs) {
     test(`provenance-artefact: ${rel} has a readable pin and a readable declared artifact`, () => {
       assert.fail(
         `${rel}: failed to read or parse UPSTREAM_PIN.json or its declared artifact: ${e.message}`
+      );
+    });
+    continue;
+  }
+
+  // ⛔ EMPTY-STRING GUARD, T-D39-1. `pin.provenance === "VERIFIED"` is false
+  // for `""` (falls into the "refuses it" branch below), but that branch used
+  // to build its own assertion from `new RegExp(pin.provenance)` UNGUARDED:
+  // `new RegExp("")` compiles to `/(?:)/`, which matches every string,
+  // including whatever `e.message` happens to be — the assertion could never
+  // fail, so the test's own name ("...refuses it for that reason") would pass
+  // GREEN whether or not the refusal actually named the claimed provenance.
+  // Same for a missing `provenance` field: `undefined === "VERIFIED"` is also
+  // false, and `new RegExp(undefined)` compiles to `/undefined/`, matching
+  // only the literal word "undefined" — not vacuous, but not naming anything
+  // real either. Refused by a NAMED assertion before either regex is ever
+  // built, same discipline as the "artifact" field guard above.
+  if (typeof pin.provenance !== "string" || pin.provenance === "") {
+    test(`provenance-artefact: ${rel} declares a non-empty string "provenance" field`, () => {
+      assert.fail(
+        `${rel}/UPSTREAM_PIN.json is missing a non-empty string "provenance" field naming its claim`
       );
     });
     continue;
