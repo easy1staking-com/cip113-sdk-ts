@@ -68,8 +68,22 @@ test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
 
 for (const dir of pinDirs) {
   const rel = relative(ROOT, dir);
-  const blueprint = JSON.parse(readFileSync(join(dir, "plutus.json"), "utf8"));
   const pin = JSON.parse(readFileSync(join(dir, "UPSTREAM_PIN.json"), "utf8"));
+
+  // ⛔ The pin declares its own artifact filename; read the declaration rather
+  // than assuming "plutus.json". A missing or non-string field is refused by
+  // a NAMED assertion (not a `??`/`||` guess) so a bad pin fails one test
+  // instead of crashing the module and taking the rest of this file with it.
+  if (typeof pin.artifact !== "string") {
+    test(`provenance-artefact: ${rel} declares a string "artifact" field`, () => {
+      assert.fail(
+        `${rel}/UPSTREAM_PIN.json is missing a string "artifact" field naming its blueprint file`
+      );
+    });
+    continue;
+  }
+
+  const blueprint = JSON.parse(readFileSync(join(dir, pin.artifact), "utf8"));
 
   if (pin.provenance === "VERIFIED") {
     test(`provenance-artefact: ${rel} claims VERIFIED and survives provenanceFromPin`, () => {
