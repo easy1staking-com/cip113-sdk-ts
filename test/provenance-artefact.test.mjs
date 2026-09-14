@@ -68,22 +68,48 @@ test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
 
 for (const dir of pinDirs) {
   const rel = relative(ROOT, dir);
-  const pin = JSON.parse(readFileSync(join(dir, "UPSTREAM_PIN.json"), "utf8"));
 
-  // ⛔ The pin declares its own artifact filename; read the declaration rather
-  // than assuming "plutus.json". A missing or non-string field is refused by
-  // a NAMED assertion (not a `??`/`||` guess) so a bad pin fails one test
-  // instead of crashing the module and taking the rest of this file with it.
-  if (typeof pin.artifact !== "string") {
-    test(`provenance-artefact: ${rel} declares a string "artifact" field`, () => {
+  // ⛔ Every per-pin read below (the pin's own JSON, and the blueprint file it
+  // declares) can throw: a nonexistent declared artifact (ENOENT), malformed
+  // JSON in either file (SyntaxError), or a directory instead of a file
+  // (EISDIR, e.g. `artifact: ""` — see the empty-string guard just below). Any
+  // of those, uncaught, would throw at MODULE scope and crash node:test's
+  // registration of every test in this file, including the count floor above.
+  // The try/catch confines the damage to ONE named failing test for THIS
+  // directory and lets the loop continue to the rest. This covers every read
+  // failure — it does NOT, and cannot, catch a per-pin assertion body that has
+  // been gutted to a no-op; that failure mode is a silent gap in what this
+  // file checks, not a crash, and is invisible to the test count. See T-D38-1.
+  let pin, blueprint;
+  try {
+    pin = JSON.parse(readFileSync(join(dir, "UPSTREAM_PIN.json"), "utf8"));
+
+    // The pin declares its own artifact filename; read the declaration rather
+    // than assuming "plutus.json". A guard asserting the field is PRESENT
+    // must also assert it is NON-EMPTY: `typeof pin.artifact !== "string"`
+    // alone accepts `artifact: ""`, and `join(dir, "")` resolves to the
+    // directory itself, which `readFileSync` refuses with EISDIR rather than
+    // naming the real defect. A missing, non-string, or empty field is
+    // refused by a NAMED assertion (never a `??`/`||` guess) so a bad pin
+    // fails one test instead of crashing the module.
+    if (typeof pin.artifact !== "string" || pin.artifact === "") {
+      test(`provenance-artefact: ${rel} declares a non-empty string "artifact" field`, () => {
+        assert.fail(
+          `${rel}/UPSTREAM_PIN.json is missing a non-empty string "artifact" field naming its blueprint file`
+        );
+      });
+      continue;
+    }
+
+    blueprint = JSON.parse(readFileSync(join(dir, pin.artifact), "utf8"));
+  } catch (e) {
+    test(`provenance-artefact: ${rel} has a readable pin and a readable declared artifact`, () => {
       assert.fail(
-        `${rel}/UPSTREAM_PIN.json is missing a string "artifact" field naming its blueprint file`
+        `${rel}: failed to read or parse UPSTREAM_PIN.json or its declared artifact: ${e.message}`
       );
     });
     continue;
   }
-
-  const blueprint = JSON.parse(readFileSync(join(dir, pin.artifact), "utf8"));
 
   if (pin.provenance === "VERIFIED") {
     test(`provenance-artefact: ${rel} claims VERIFIED and survives provenanceFromPin`, () => {
