@@ -1,5 +1,6 @@
 /**
- * In-place protocol upgrade — test fixture (T-D07), TARGETING alpha.4 at 7e8a631.
+ * In-place protocol upgrade — test fixture (T-D07), TARGETING alpha.4 at
+ * 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4.
  *
  * The protocol-params UTxO holds the live wiring. An upgrade SPENDS it and
  * writes a continuing output with a new datum, rather than redeploying
@@ -14,7 +15,8 @@
  * purpose, so the sitting authority authorises every change including a change
  * of authority.
  *
- * Rails, read from `validators/protocol_params.ak` at 7e8a631:
+ * Rails, read from `validators/protocol_params.ak` at
+ * 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4:
  *   * exactly one continuing output at the own address (`expect [cont]`);
  *   * non-ADA value STRICTLY equal in both directions — the NFT can never be
  *     split away and junk can never be injected;
