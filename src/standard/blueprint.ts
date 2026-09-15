@@ -7,7 +7,8 @@ import type { PlutusBlueprint, BlueprintValidator, HexString } from "../types.js
 /**
  * Standard validator titles as they appear in the blueprint.
  *
- * Targets CIP-113 0.5.0-alpha.4 (upstream commit 7e8a631). See PLAN.md D-11.
+ * Targets CIP-113 0.5.0-alpha.4 (upstream commit 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4). See
+ * PLAN.md D-11.
  *
  * --- What alpha.4 moved --------------------------------------------------
  *

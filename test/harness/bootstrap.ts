@@ -12,7 +12,7 @@
  * as a supported way to deploy a production protocol. It is not. Do not point
  * this at preprod or mainnet.
  *
- * TARGETS CIP-113 0.5.0-alpha.4 (upstream 7e8a631).
+ * TARGETS CIP-113 0.5.0-alpha.4 (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
  *
  * The topology this fixture stands up, and the three things alpha.4 changed:
  *

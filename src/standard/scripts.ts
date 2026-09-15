@@ -1,5 +1,6 @@
 /**
- * Standard script parameterization — CIP-113 0.5.0-alpha.4 (upstream 7e8a631).
+ * Standard script parameterization — CIP-113 0.5.0-alpha.4
+ * (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
  *
  * Uses Evolution SDK directly for UPLC.applyParamsToScript and ScriptHash.
  *

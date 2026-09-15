@@ -22,9 +22,20 @@
  * (`standard/v0.3.0`, `substandards/dummy/v0.1.0`) legitimately carry
  * `provenance: "UNVERIFIED"` / `"UNKNOWN"` — honest records of unverifiable
  * provenance, not defects. Only a pin claiming VERIFIED must survive
- * `provenanceFromPin`; any other pin must be asserted to throw, and to throw
- * FOR THAT REASON (the message must name the claimed provenance value) — so
- * the pin's honesty is pinned rather than ignored.
+ * `provenanceFromPin`; any other pin must be asserted to throw.
+ *
+ * ⛔ T-D43-1 r4 (F1): the sentence this replaces claimed the refusal is
+ * asserted to throw "for that reason" — that the message was CORRECTLY
+ * DERIVED from the pin. MEASURED FALSE: `""`, `undefined`, `"."` and
+ * `"record"` all satisfy the per-pin refusal assertion, because that
+ * assertion searches the SAME message for the SAME value it was built
+ * from — tautological with its own source of truth (see the per-pin test
+ * below for the full account). What the refusal assertion DOES establish:
+ * the throw is `provenanceFromPin`'s own non-VERIFIED refusal, carrying
+ * the pin's own value in quotes, not some unrelated throw — and the
+ * quotes are load-bearing (MEASURED: dropping them from the message while
+ * keeping the value reddens the assertion). It does not, and cannot,
+ * establish correctness of derivation.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -72,9 +83,11 @@ function findPinDirs(dir) {
 // NAMED test instead of a silent module-scope abort, and that name is not
 // empty — Node's own ENOENT/EACCES error embeds the offending path in
 // `.message`, so the failure still says which directory could not be read.
-// The cost is real: a walk failure loses the count floor and every per-pin
-// test for that run, same as it would with per-call wrapping, because
-// nothing downstream of a partial walk can be trusted either way.
+// The cost is real: a walk failure loses every per-pin test for that run —
+// the count floor does NOT disappear; it is the thing that REPORTS the walk
+// failure (see the `pinDirsError` → named `assert.fail` below), same as it
+// would with per-call wrapping, because nothing downstream of a partial walk
+// can be trusted either way.
 let pinDirs;
 let pinDirsError;
 try {
@@ -83,6 +96,21 @@ try {
   pinDirs = [];
   pinDirsError = e;
 }
+
+// ⚑ COVERAGE-OF-SUBSTANCE (PLAN.md). Read-time guards above cover a per-pin
+// test's SURVIVAL — they cannot see a test body gutted to `assert.ok(true);
+// return;`, which still leaves every existing assertion in this file GREEN
+// (T-D38 measured this at 208). `callProvenance` is the one substitute call
+// site both per-pin branches route through; `calls` records which pin
+// directories actually reached `provenanceFromPin`, and the final test below
+// compares that against every pin that reached either branch, naming any
+// directory whose test stopped calling it.
+const calls = [];
+const callProvenance = (blueprint, pin, rel) => {
+  calls.push(rel);
+  return provenanceFromPin(blueprint, pin);
+};
+const expectedRels = [];
 
 test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
   // ⛔ Not optional. Without this floor, a broken walk that finds nothing
@@ -146,17 +174,19 @@ for (const dir of pinDirs) {
   }
 
   // ⛔ EMPTY-STRING GUARD, T-D39-1. `pin.provenance === "VERIFIED"` is false
-  // for `""` (falls into the "refuses it" branch below), but that branch used
-  // to build its own assertion from `new RegExp(pin.provenance)` UNGUARDED:
-  // `new RegExp("")` compiles to `/(?:)/`, which matches every string,
-  // including whatever `e.message` happens to be — the assertion could never
-  // fail, so the test's own name ("...refuses it for that reason") would pass
-  // GREEN whether or not the refusal actually named the claimed provenance.
-  // Same for a missing `provenance` field: `undefined === "VERIFIED"` is also
-  // false, and `new RegExp(undefined)` compiles to `/undefined/`, matching
-  // only the literal word "undefined" — not vacuous, but not naming anything
-  // real either. Refused by a NAMED assertion before either regex is ever
-  // built, same discipline as the "artifact" field guard above.
+  // for `""` (falls into the "refuses it" branch below). ⛔ T-D43-1 r4
+  // (F2): an earlier version of this comment argued `"".includes('""')` is
+  // `false`, therefore this guard and the refusal assertion overlapped —
+  // that substituted the VALUE for the MESSAGE the test actually evaluates.
+  // The real expression is `e.message.includes('""')`, and
+  // `provenanceFromPin`'s message for an empty provenance is
+  // `is pinned "", not VERIFIED` — which DOES contain `""`. MEASURED: with
+  // this guard neutered, a pin whose `provenance` is `""` makes the
+  // per-pin refusal test **PASS (vacuously)**, same as `undefined` would.
+  // ⇒ **There is no overlap.** This guard is the ONLY thing standing
+  // between an empty or missing `provenance` and a vacuous pass — refused
+  // by a NAMED assertion before that branch is ever reached, same
+  // discipline as the "artifact" field guard above.
   if (typeof pin.provenance !== "string" || pin.provenance === "") {
     test(`provenance-artefact: ${rel} declares a non-empty string "provenance" field`, () => {
       assert.fail(
@@ -166,11 +196,13 @@ for (const dir of pinDirs) {
     continue;
   }
 
+  expectedRels.push(rel);
+
   if (pin.provenance === "VERIFIED") {
     test(`provenance-artefact: ${rel} claims VERIFIED and survives provenanceFromPin`, () => {
       let result;
       assert.doesNotThrow(() => {
-        result = provenanceFromPin(blueprint, pin);
+        result = callProvenance(blueprint, pin, rel);
       }, `${rel} is pinned VERIFIED but provenanceFromPin refused it`);
       assert.match(
         result.commitHash,
@@ -179,15 +211,48 @@ for (const dir of pinDirs) {
       );
     });
   } else {
-    test(`provenance-artefact: ${rel} claims "${pin.provenance}" and provenanceFromPin refuses it for that reason`, () => {
+    test(`provenance-artefact: ${rel} claims "${pin.provenance}" and provenanceFromPin throws the PROVENANCE refusal carrying that value, quoted`, () => {
       assert.throws(
-        () => provenanceFromPin(blueprint, pin),
+        () => callProvenance(blueprint, pin, rel),
         (e) => {
-          assert.match(
-            e.message,
-            new RegExp(pin.provenance),
-            `${rel}: expected the refusal to name its own provenance ` +
-              `"${pin.provenance}", got: ${e.message}`
+          // ⛔ T-D43-1 r3 (my defect #18: r2's own mutation — a metacharacter
+          // in `pin.provenance` — was aimed at the wrong object). What this
+          // assertion DOES establish: the throw is `provenanceFromPin`'s
+          // non-VERIFIED refusal, carrying the PIN'S OWN provenance value in
+          // quotes (`is pinned "${pin.provenance}"`, the one place the
+          // message interpolates it) — not some unrelated throw, and, since
+          // r2, a value like `"("` can no longer blow up as a regex
+          // `SyntaxError` instead of reaching this assertion at all (T-D41,
+          // now closed). What it does NOT and CANNOT establish: that the
+          // message was CORRECTLY DERIVED from the pin. The message is BUILT
+          // by interpolating `pin.provenance`, and this assertion then
+          // searches that same message for that same value — the check is
+          // tautological with its own source of truth, so no value of
+          // `pin.provenance` can make it fail. (MEASURED, T-D43-1 r2/r3:
+          // mutating the pin's `provenance` field can never redden this —
+          // only mutating `provenanceFromPin`'s message-building code can,
+          // and that is deliberately out of this test's reach; a weak guard
+          // with its limit written down is worth keeping, so it stays.)
+          //
+          // ⛔ THE QUOTES ARE LOAD-BEARING. T-D43-1 r4 (F5): the Ticket
+          // Owner believed the r2 quote change bought only the `"("` regex
+          // `SyntaxError` case — MEASURED WRONG. Removing *only the quotes*
+          // from `provenance.ts`'s refusal (keeping the value: `is pinned
+          // ${pin.provenance},` instead of `is pinned "${pin.provenance}",`)
+          // reddens this assertion for both shipped non-VERIFIED pins,
+          // while the same change against base `1f8b7ba`'s regex form
+          // stays green. The quotes are what turns "the message contains
+          // this value somewhere" back into "the message names this value
+          // AT THE ONE PLACE IT IS INTERPOLATED" — single-factor, and the
+          // only thing this assertion still catches. DO NOT SIMPLIFY THEM
+          // AWAY; a future edit that "cleans up" `` `"${pin.provenance}"` ``
+          // to `` `${pin.provenance}` `` silently degrades this guard back
+          // into the bare-substring form r2 condemned, and nothing else
+          // here will notice.
+          assert.ok(
+            e.message.includes(`"${pin.provenance}"`),
+            `${rel}: expected the refusal to carry its own provenance ` +
+              `"${pin.provenance}", quoted, got: ${e.message}`
           );
           return true;
         },
@@ -196,3 +261,31 @@ for (const dir of pinDirs) {
     });
   }
 }
+
+// ⚑ COVERAGE-OF-SUBSTANCE's own assertion — see the module-scope comment
+// above `calls`/`callProvenance`. `expectedRels` is every pin that reached
+// either per-pin branch (a pin that `continue`d on a bad `artifact` or
+// `provenance` field has no per-pin provenance test to gut, so it is
+// correctly excluded from both sides of this comparison). If a per-pin test
+// body were gutted to `assert.ok(true); return;`, its branch would stop
+// calling `callProvenance` while its `test()` still registers and passes —
+// invisible to every guard above, and to the test count — but this
+// assertion would go red and name exactly which directory's test stopped
+// calling `provenanceFromPin`.
+test("provenance-artefact: every per-pin test that ran actually called provenanceFromPin", () => {
+  const calledSet = new Set(calls);
+  const expectedSet = new Set(expectedRels);
+  const missing = expectedRels.filter((rel) => !calledSet.has(rel));
+  const unexpected = [...calledSet].filter((rel) => !expectedSet.has(rel));
+  assert.deepEqual(
+    missing,
+    [],
+    `the following pin directories have a per-pin provenance test registered but it never ` +
+      `called provenanceFromPin (a gutted test body): ${missing.join(", ")}`
+  );
+  assert.deepEqual(
+    unexpected,
+    [],
+    `provenanceFromPin was called for directories with no expected per-pin test: ${unexpected.join(", ")}`
+  );
+});

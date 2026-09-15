@@ -25,7 +25,7 @@
  * for the delegates actually deployed. A stale dispatcher fails at withdrawal
  * time with an index error that names neither cause.
  *
- * TARGET: CIP-113 0.5.0-alpha.4 (upstream 7e8a631).
+ * TARGET: CIP-113 0.5.0-alpha.4 (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
  *
  * The preprod deployment this repo used to assert against was a 0.3.x protocol
  * instance and is no longer REPRESENTABLE — programmable_logic_global does not
