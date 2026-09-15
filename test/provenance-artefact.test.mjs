@@ -22,9 +22,20 @@
  * (`standard/v0.3.0`, `substandards/dummy/v0.1.0`) legitimately carry
  * `provenance: "UNVERIFIED"` / `"UNKNOWN"` — honest records of unverifiable
  * provenance, not defects. Only a pin claiming VERIFIED must survive
- * `provenanceFromPin`; any other pin must be asserted to throw, and to throw
- * FOR THAT REASON (the message must name the claimed provenance value) — so
- * the pin's honesty is pinned rather than ignored.
+ * `provenanceFromPin`; any other pin must be asserted to throw.
+ *
+ * ⛔ T-D43-1 r4 (F1): the sentence this replaces claimed the refusal is
+ * asserted to throw "for that reason" — that the message was CORRECTLY
+ * DERIVED from the pin. MEASURED FALSE: `""`, `undefined`, `"."` and
+ * `"record"` all satisfy the per-pin refusal assertion, because that
+ * assertion searches the SAME message for the SAME value it was built
+ * from — tautological with its own source of truth (see the per-pin test
+ * below for the full account). What the refusal assertion DOES establish:
+ * the throw is `provenanceFromPin`'s own non-VERIFIED refusal, carrying
+ * the pin's own value in quotes, not some unrelated throw — and the
+ * quotes are load-bearing (MEASURED: dropping them from the message while
+ * keeping the value reddens the assertion). It does not, and cannot,
+ * establish correctness of derivation.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -163,15 +174,19 @@ for (const dir of pinDirs) {
   }
 
   // ⛔ EMPTY-STRING GUARD, T-D39-1. `pin.provenance === "VERIFIED"` is false
-  // for `""` (falls into the "refuses it" branch below). The refusal branch
-  // asserts `e.message.includes(\`"${pin.provenance}"\`)` (T-D41, amended by
-  // T-D43-1 r2 — see below), and `"".includes('""')` is `false`, so an empty
-  // `provenance` would fail this assertion rather than pass it vacuously —
-  // refused earlier anyway, by the NAMED assertion right here, so the two
-  // guards overlap rather than one silently covering for the other. Same for
-  // a missing `provenance` field. Refused by a NAMED assertion before that
-  // branch is ever reached, same discipline as the "artifact" field guard
-  // above.
+  // for `""` (falls into the "refuses it" branch below). ⛔ T-D43-1 r4
+  // (F2): an earlier version of this comment argued `"".includes('""')` is
+  // `false`, therefore this guard and the refusal assertion overlapped —
+  // that substituted the VALUE for the MESSAGE the test actually evaluates.
+  // The real expression is `e.message.includes('""')`, and
+  // `provenanceFromPin`'s message for an empty provenance is
+  // `is pinned "", not VERIFIED` — which DOES contain `""`. MEASURED: with
+  // this guard neutered, a pin whose `provenance` is `""` makes the
+  // per-pin refusal test **PASS (vacuously)**, same as `undefined` would.
+  // ⇒ **There is no overlap.** This guard is the ONLY thing standing
+  // between an empty or missing `provenance` and a vacuous pass — refused
+  // by a NAMED assertion before that branch is ever reached, same
+  // discipline as the "artifact" field guard above.
   if (typeof pin.provenance !== "string" || pin.provenance === "") {
     test(`provenance-artefact: ${rel} declares a non-empty string "provenance" field`, () => {
       assert.fail(
@@ -218,6 +233,22 @@ for (const dir of pinDirs) {
           // only mutating `provenanceFromPin`'s message-building code can,
           // and that is deliberately out of this test's reach; a weak guard
           // with its limit written down is worth keeping, so it stays.)
+          //
+          // ⛔ THE QUOTES ARE LOAD-BEARING. T-D43-1 r4 (F5): the Ticket
+          // Owner believed the r2 quote change bought only the `"("` regex
+          // `SyntaxError` case — MEASURED WRONG. Removing *only the quotes*
+          // from `provenance.ts`'s refusal (keeping the value: `is pinned
+          // ${pin.provenance},` instead of `is pinned "${pin.provenance}",`)
+          // reddens this assertion for both shipped non-VERIFIED pins,
+          // while the same change against base `1f8b7ba`'s regex form
+          // stays green. The quotes are what turns "the message contains
+          // this value somewhere" back into "the message names this value
+          // AT THE ONE PLACE IT IS INTERPOLATED" — single-factor, and the
+          // only thing this assertion still catches. DO NOT SIMPLIFY THEM
+          // AWAY; a future edit that "cleans up" `` `"${pin.provenance}"` ``
+          // to `` `${pin.provenance}` `` silently degrades this guard back
+          // into the bare-substring form r2 condemned, and nothing else
+          // here will notice.
           assert.ok(
             e.message.includes(`"${pin.provenance}"`),
             `${rel}: expected the refusal to carry its own provenance ` +
