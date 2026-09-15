@@ -164,15 +164,14 @@ for (const dir of pinDirs) {
 
   // ⛔ EMPTY-STRING GUARD, T-D39-1. `pin.provenance === "VERIFIED"` is false
   // for `""` (falls into the "refuses it" branch below). The refusal branch
-  // now asserts `e.message.includes(pin.provenance)` (T-D41 — see below), and
-  // `"".includes("")` is `true`, so an empty `provenance` would still make
-  // that assertion vacuous — the test's own name ("...refuses it for that
-  // reason") would pass GREEN whether or not the refusal actually named the
-  // claimed provenance. Same for a missing `provenance` field: reading
-  // `.includes(undefined)` would coerce to the literal string `"undefined"`,
-  // not vacuous, but not naming anything real either. Refused by a NAMED
-  // assertion before that branch is ever reached, same discipline as the
-  // "artifact" field guard above.
+  // asserts `e.message.includes(\`"${pin.provenance}"\`)` (T-D41, amended by
+  // T-D43-1 r2 — see below), and `"".includes('""')` is `false`, so an empty
+  // `provenance` would fail this assertion rather than pass it vacuously —
+  // refused earlier anyway, by the NAMED assertion right here, so the two
+  // guards overlap rather than one silently covering for the other. Same for
+  // a missing `provenance` field. Refused by a NAMED assertion before that
+  // branch is ever reached, same discipline as the "artifact" field guard
+  // above.
   if (typeof pin.provenance !== "string" || pin.provenance === "") {
     test(`provenance-artefact: ${rel} declares a non-empty string "provenance" field`, () => {
       assert.fail(
@@ -201,8 +200,29 @@ for (const dir of pinDirs) {
       assert.throws(
         () => callProvenance(blueprint, pin, rel),
         (e) => {
+          // ⛔ T-D43-1 r2 (my 17th contract defect; the bare-`includes` form
+          // I specified was vacuous). `provenanceFromPin`'s refusal is
+          // `CIP-171 REFUSED: <where> is pinned "<provenance>", not VERIFIED.
+          // A record is a permanent, public claim that these scripts came
+          // from a named commit; unlike a file, a metadatum cannot be
+          // deleted.` — ordinary English prose. `e.message.includes(v)` does
+          // not test "the refusal NAMED v"; it tests "the refusal CONTAINED
+          // v", and a sentence contains plenty of short substrings:
+          // `v = "."` matches the sentence's own full stops, `v =
+          // "VERIFIED"` matches the word "VERIFIED" earlier in the SAME
+          // sentence, and `v = "record"` / `"a"` match the prose too — all
+          // vacuous, none of them proof the refusal named the CLAIMED value.
+          // The source interpolates the value in double quotes and ONLY
+          // there (`is pinned "${pin.provenance}"`); asserting the quoted
+          // form is what separates "the refusal named this value" from "the
+          // prose happens to contain these characters". ⚠ STATED COUPLING,
+          // deliberate: this test is now coupled to `provenance.ts`
+          // quoting the value at that interpolation site. If it stops
+          // quoting, this test reddens — correctly, because an unquoted
+          // message genuinely cannot be checked for having named the value.
+          // Do not "simplify" the quotes away.
           assert.ok(
-            e.message.includes(pin.provenance),
+            e.message.includes(`"${pin.provenance}"`),
             `${rel}: expected the refusal to name its own provenance ` +
               `"${pin.provenance}", got: ${e.message}`
           );
