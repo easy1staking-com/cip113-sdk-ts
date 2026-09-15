@@ -196,35 +196,32 @@ for (const dir of pinDirs) {
       );
     });
   } else {
-    test(`provenance-artefact: ${rel} claims "${pin.provenance}" and provenanceFromPin refuses it for that reason`, () => {
+    test(`provenance-artefact: ${rel} claims "${pin.provenance}" and provenanceFromPin throws the PROVENANCE refusal carrying that value, quoted`, () => {
       assert.throws(
         () => callProvenance(blueprint, pin, rel),
         (e) => {
-          // ⛔ T-D43-1 r2 (my 17th contract defect; the bare-`includes` form
-          // I specified was vacuous). `provenanceFromPin`'s refusal is
-          // `CIP-171 REFUSED: <where> is pinned "<provenance>", not VERIFIED.
-          // A record is a permanent, public claim that these scripts came
-          // from a named commit; unlike a file, a metadatum cannot be
-          // deleted.` — ordinary English prose. `e.message.includes(v)` does
-          // not test "the refusal NAMED v"; it tests "the refusal CONTAINED
-          // v", and a sentence contains plenty of short substrings:
-          // `v = "."` matches the sentence's own full stops, `v =
-          // "VERIFIED"` matches the word "VERIFIED" earlier in the SAME
-          // sentence, and `v = "record"` / `"a"` match the prose too — all
-          // vacuous, none of them proof the refusal named the CLAIMED value.
-          // The source interpolates the value in double quotes and ONLY
-          // there (`is pinned "${pin.provenance}"`); asserting the quoted
-          // form is what separates "the refusal named this value" from "the
-          // prose happens to contain these characters". ⚠ STATED COUPLING,
-          // deliberate: this test is now coupled to `provenance.ts`
-          // quoting the value at that interpolation site. If it stops
-          // quoting, this test reddens — correctly, because an unquoted
-          // message genuinely cannot be checked for having named the value.
-          // Do not "simplify" the quotes away.
+          // ⛔ T-D43-1 r3 (my defect #18: r2's own mutation — a metacharacter
+          // in `pin.provenance` — was aimed at the wrong object). What this
+          // assertion DOES establish: the throw is `provenanceFromPin`'s
+          // non-VERIFIED refusal, carrying the PIN'S OWN provenance value in
+          // quotes (`is pinned "${pin.provenance}"`, the one place the
+          // message interpolates it) — not some unrelated throw, and, since
+          // r2, a value like `"("` can no longer blow up as a regex
+          // `SyntaxError` instead of reaching this assertion at all (T-D41,
+          // now closed). What it does NOT and CANNOT establish: that the
+          // message was CORRECTLY DERIVED from the pin. The message is BUILT
+          // by interpolating `pin.provenance`, and this assertion then
+          // searches that same message for that same value — the check is
+          // tautological with its own source of truth, so no value of
+          // `pin.provenance` can make it fail. (MEASURED, T-D43-1 r2/r3:
+          // mutating the pin's `provenance` field can never redden this —
+          // only mutating `provenanceFromPin`'s message-building code can,
+          // and that is deliberately out of this test's reach; a weak guard
+          // with its limit written down is worth keeping, so it stays.)
           assert.ok(
             e.message.includes(`"${pin.provenance}"`),
-            `${rel}: expected the refusal to name its own provenance ` +
-              `"${pin.provenance}", got: ${e.message}`
+            `${rel}: expected the refusal to carry its own provenance ` +
+              `"${pin.provenance}", quoted, got: ${e.message}`
           );
           return true;
         },
