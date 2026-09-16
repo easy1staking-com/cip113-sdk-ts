@@ -58,6 +58,52 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.10.0 (a required field on `DeploymentParams`)
+
+**0.10.0 adds one REQUIRED field and breaks every consumer that builds a `DeploymentParams`
+literal.** It is a minor bump because this package is pre-1.0; treat it as major. It targets the
+same protocol version as 0.9.0 — CIP-113 0.5.0-alpha.4, upstream
+`7e8a63198c5b240135f1aa2f043ce5d7c046b2c4` — so **no on-chain behaviour changed and no redeployment
+is needed**. The break is in what a deployment record must say about itself.
+
+```diff
+  programmableLogicGlobal: {
+    scriptHash: ScriptHash;
++   unfrackingParameter: ScriptHash;   // REQUIRED
+  }
+```
+
+**What to write in it:** the unfracking hash `programmable_logic_global` was **compiled against**.
+For an ordinary deployment that is `deployment.unfracking.scriptHash` — the same value, written
+twice on purpose. For a deployment launched with unfracking **disabled**, it is the exported
+constant `UNFRACKING_DISABLED`.
+
+⛔ **Why there is no default, and why the field is not a boolean.** A deployment now contains **two
+legitimate unfracking values** — the real deployed hash, and the hash the dispatcher was compiled
+against — and **which one PLG used cannot be inferred**, because both appear in the record and each
+is correct for its own purpose. A boolean would not help: the reader would still need this SDK's
+constant to reconstruct what was hashed, so the fact determining the dispatcher's script hash would
+live in two places, one of them a version of this package. **A deployment file opened in three years
+must say what PLG was built from without needing the SDK that built it.**
+
+And a default would have been the quietest possible failure: `?? deployment.unfracking.scriptHash`
+is **correct for every record written before this release** — and wrong for the first record written
+after it. A wrong default announces itself; one that is right until precisely the case it was added
+for does not.
+
+⚠ **It is validated, not merely typed.** The recorded value must be an own property (an inherited
+`Object.prototype` key is refused), 56 lowercase hex characters, and **either** the derived
+unfracking hash **or** `UNFRACKING_DISABLED` — nothing else. Uppercase is refused and reported as a
+case problem rather than normalised, because the recorded spelling is what the dispatcher was
+compiled against. Untyped JavaScript callers hit these refusals at load time rather than at build
+time.
+
+**Disabling unfracking at launch.** Compile PLG against `UNFRACKING_DISABLED` and record that;
+deploy, register and publish the unfracking script exactly as normal. The dispatcher's unfracking
+arm can then never be satisfied. Enabling it later is one recompile: rebuild PLG with the real hash,
+publish that one reference script, and `PROTOCOL_UPGRADE` the params datum's `plg_cred` — no new
+unfracking deployment, no re-registration, registry nodes untouched, no token reissued.
+
 ## Migrating to 0.9.0 (CIP-113 0.5.0-alpha.4)
 
 **0.9.0 targets a different protocol version and breaks every published consumer.** It is a

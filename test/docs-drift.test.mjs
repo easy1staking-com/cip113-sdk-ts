@@ -194,8 +194,17 @@ test("PROOF OF HARNESS: the parsers actually find fields", () => {
 test("the README's migration note names the silent redeemer change", () => {
   // The one change a consumer cannot discover by failing: stale bytes decode.
   // If this section is ever trimmed, the trap goes undocumented again.
+  //
+  // ⛔ ANCHORED ON 0.9.0 EXPLICITLY, NOT ON THE FIRST "## Migrating to".
+  // Every assertion below is about the alpha.2->alpha.4 PROTOCOL migration, which
+  // is documented in the 0.9.0 section and nowhere else. This used to take the
+  // FIRST migration heading, which was unambiguous only while exactly one existed
+  // — adding the 0.10.0 note put a different section in that slot and reddened
+  // this test for a reason that had nothing to do with the trap it guards. A
+  // later release adding its own note must not silently re-point this guard.
   const readme = read("README.md");
-  const start = readme.indexOf("## Migrating to");
+  const start = readme.indexOf("## Migrating to 0.9.0");
+  assert.notEqual(start, -1, "the 0.9.0 migration section is gone — the alpha.4 trap it documents is not");
   const end = readme.indexOf("\n## ", start + 1);
   const migration = readme.slice(start, end === -1 ? undefined : end);
 
@@ -228,6 +237,6 @@ test("the README's migration note names the silent redeemer change", () => {
 
 test("package version and the migration note agree", () => {
   const pkg = JSON.parse(read("package.json"));
-  assert.equal(pkg.version, "0.9.0");
+  assert.equal(pkg.version, "0.10.0");
   assert.match(read("README.md"), new RegExp(`Migrating to ${pkg.version.replace(/\./g, "\\.")}`));
 });
