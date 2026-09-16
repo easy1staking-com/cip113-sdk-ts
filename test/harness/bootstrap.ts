@@ -1216,7 +1216,17 @@ export async function bootstrapProtocol(
     transfer: { scriptHash: transfer.hash },
     thirdParty: { scriptHash: thirdParty.hash },
     unfracking: { scriptHash: unfracking.hash },
-    programmableLogicGlobal: { scriptHash: plg.hash },
+    programmableLogicGlobal: {
+      scriptHash: plg.hash,
+      // ⛔ WHAT THE DISPATCHER WAS COMPILED AGAINST, and it is NOT derivable
+      // from `unfracking` above. This harness builds `plg` from
+      // `unfracking.hash` (see the call beside the delegates), so this devnet
+      // instance has unfracking ENABLED and records the real hash. A deployment
+      // that wants unfracking deployed but unreachable records
+      // `UNFRACKING_DISABLED` here instead, with `unfracking.scriptHash` and
+      // `unfrackingRefInput` unchanged — the two fields are two different facts.
+      unfrackingParameter: unfracking.hash,
+    },
     maxInlineDatumBytes: Number(MAX_INLINE_DATUM_BYTES),
     issuanceLogic: { scriptHash: issuanceLogic.hash },
     upgradeMultisig: {

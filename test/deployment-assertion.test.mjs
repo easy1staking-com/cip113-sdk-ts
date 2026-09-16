@@ -132,7 +132,12 @@ function deriveDeployment(bp) {
     transfer: { scriptHash: transfer },
     thirdParty: { scriptHash: thirdParty },
     unfracking: { scriptHash: unfracking },
-    programmableLogicGlobal: { scriptHash: plg },
+    // ⛔ WHAT THE DISPATCHER WAS COMPILED AGAINST, recorded beside its hash.
+    // This fixture enables unfracking, so the two agree — but they are two
+    // different facts and a deployment may legitimately record the sentinel
+    // here while `unfracking.scriptHash` above stays real. See
+    // test/unfracking-parameter.test.mjs.
+    programmableLogicGlobal: { scriptHash: plg, unfrackingParameter: unfracking },
     maxInlineDatumBytes: MAX_INLINE_DATUM_BYTES,
     upgradeMultisig: { scriptHash: upgradeMultisig, txInput: UM_TX, utxo: ref(6) },
     upgradeMultisigRefInput: ref(7),

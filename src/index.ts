@@ -421,6 +421,12 @@ export {
   assertDeploymentScripts,
   DeploymentMismatchError,
   createStandardScripts,
+  // ⛔ THE SENTINEL HAS ONE HOME AND THIS IS HOW IT LEAVES IT. A deployment
+  // that disables unfracking records this value in
+  // `programmableLogicGlobal.unfrackingParameter`; the platform must IMPORT it
+  // rather than keep a copy, because a second copy is a second place to
+  // disagree about a value that determines a script hash.
+  UNFRACKING_DISABLED,
   type ScriptHashCheck,
   type StandardScripts,
 } from "./standard/scripts.js";

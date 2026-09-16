@@ -156,7 +156,39 @@ export interface DeploymentParams {
    * be written together. `assertDeploymentScripts` checks this off-chain
    * precisely because the ledger cannot.
    */
-  programmableLogicGlobal: { scriptHash: ScriptHash };
+  programmableLogicGlobal: {
+    scriptHash: ScriptHash;
+    /**
+     * The `unfracking_hash` THIS DISPATCHER WAS COMPILED AGAINST — either the
+     * real `unfracking` script hash or `UNFRACKING_DISABLED`.
+     *
+     * ⚠ A DEPLOYMENT CHOICE, NOT A DERIVATION, and the same category as
+     * `maxInlineDatumBytes` below: it is a compile-time parameter of
+     * `programmable_logic_global`, so it is baked into that hash. Two
+     * deployments differing only here are DIFFERENT PROTOCOLS. Recorded
+     * because it cannot be recovered from any hash.
+     *
+     * ⛔ NOT INFERABLE FROM THE REST OF THE RECORD, and that is the whole
+     * reason it exists. A launch may deploy unfracking IN FULL — registered,
+     * published, `unfracking.scriptHash` and `unfrackingRefInput` both present
+     * and both real — while compiling this dispatcher against the sentinel so
+     * its unfracking arm can never be satisfied. Both values then legitimately
+     * appear in one record and each is correct for its own purpose, so nothing
+     * here may be defaulted from the other.
+     *
+     * ⛔ A VALUE, NEVER A FLAG. A boolean would leave the fact that
+     * determines this hash in two places, one of them A VERSION OF THIS SDK:
+     * the reader would also need the constant to reconstruct what was hashed.
+     * A deployment file opened in three years must say what the dispatcher was
+     * built from on its own.
+     *
+     * ⚑ Enabling unfracking later does not touch this deployment's other
+     * fields: recompile PLG against the real hash, publish that one reference
+     * script, and `PROTOCOL_UPGRADE` the params datum's `plg_cred`. Only this
+     * field and `programmableLogicGlobal.scriptHash` move with it.
+     */
+    unfrackingParameter: ScriptHash;
+  };
 
   /**
    * `max_inline_datum_bytes` — a deployment CHOICE, not a derivation.

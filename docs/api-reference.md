@@ -165,7 +165,15 @@ On-chain protocol deployment references. Obtained from the bootstrap transaction
 > shape — `programmableLogicGlobal: { policyId, scriptHash }`, `protocolParams.alwaysFailScriptHash`,
 > a `directoryMint`/`directorySpend` pair — and survived the entire 0.3.x → 0.5.0-alpha.2 migration
 > unnoticed, because nothing tests documentation. It is now pinned by
-> `test/docs-drift.test.mjs`, which fails if these field names stop matching the real type.
+> `test/docs-drift.test.mjs`, which fails if these field names stop matching the real type —
+> **top-level names AND one level of nesting**, so `programmableLogicGlobal.unfrackingParameter`
+> is compared, not just `programmableLogicGlobal`.
+>
+> ⚠ **That claim was itself wrong once, which is the reason it now states its depth.** The drift
+> test originally collected names at brace-depth 0 only, so every nested field was invisible to it
+> and this block could — and did — describe a `programmableLogicGlobal` the SDK refuses, with the
+> test sitting green. A check classified by its shape ("it pins `DeploymentParams`") rather than by
+> what gets past it is the same defect this section exists to record, one level down.
 >
 > ⚠ **For 0.5.0-alpha.4, this is the six-field deployment shape.** The params datum inserts
 > `issuance_logic_cred` at index 1, shifting the credential-valued slots at indices 1, 2 and 3.
@@ -189,7 +197,18 @@ interface DeploymentParams {
   unfracking: { scriptHash: ScriptHash };
 
   // The dispatcher. Every programmable transaction withdraws through it.
-  programmableLogicGlobal: { scriptHash: ScriptHash };
+  //
+  // unfrackingParameter is a deployment CHOICE, not a derivation — it is what
+  // programmable_logic_global was COMPILED AGAINST, baked into scriptHash and
+  // recoverable from no hash. It is EITHER unfracking.scriptHash (unfracking
+  // enabled) OR UNFRACKING_DISABLED, the 28-byte zero sentinel exported from
+  // this package (unfracking deployed and published, but the dispatcher's
+  // unfracking arm made permanently unsatisfiable). NOTHING ELSE IN THE RECORD
+  // DETERMINES WHICH, so it is REQUIRED and has no default: a record that omits
+  // it, or that copies unfracking.scriptHash without checking, is refused by
+  // name. Import the constant — a local copy is a second place to disagree
+  // about a value that determines a script hash.
+  programmableLogicGlobal: { scriptHash: ScriptHash; unfrackingParameter: ScriptHash };
 
   // A deployment CHOICE, not a derivation — baked into transfer, third_party,
   // unfracking, and issuance_logic hashes and recoverable from none of them.
