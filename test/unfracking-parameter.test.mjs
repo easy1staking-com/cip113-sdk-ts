@@ -39,6 +39,7 @@ import {
   assertDeploymentScripts,
   buildDeploymentScripts,
   createStandardScripts,
+  DeploymentMismatchError,
   UNFRACKING_DISABLED,
 } from "../dist/standard/scripts.js";
 import * as barrel from "../dist/index.js";
@@ -175,19 +176,205 @@ test("SENTINEL recorded: the dispatcher hash is DIFFERENT, and the record still 
 });
 
 // ---------------------------------------------------------------------------
-// The guard: membership in a TWO-element set, and nothing else
+// THREE refusals, three messages — and which one fired is the actionable part
 // ---------------------------------------------------------------------------
 
 /**
- * Values that are neither the derived unfracking hash nor the sentinel.
+ * ⚠ THE THREE ANSWER DIFFERENT QUESTIONS, so they are asserted separately:
+ *   1. ABSENT      — is the field there at all, as an OWN property?
+ *   2. MALFORMED   — is it a well-formed 56-lowercase-hex script hash?
+ *   3. NOT A CHOICE— is it one of the two values THIS deployment may record?
+ * A deployer told only "refused" cannot act. A deployer told "this is a case
+ * problem" fixes it in one edit; told "this is not one of the two legal values"
+ * goes and looks at what the bootstrap actually compiled.
  *
- * ⛔ A GUARD THAT ONLY REJECTS `""` IS NOT THIS GUARD. The cases that matter
- * are the ones a "didn't derive ⇒ must be the sentinel" fallback waves through:
- * a truncation, a single mistyped nibble, a hash lifted from a different
- * deployment of the same protocol, and the sentinel written in the wrong case.
+ * ⛔ EVERY ONE OF THEM MUST BE A `DeploymentMismatchError`. The documented
+ * consumer shape is `catch (e) { if (e instanceof DeploymentMismatchError) … }`,
+ * so a bare `Error` here is a refusal that names a field being reported to the
+ * user as "something went wrong".
  */
-const ILLEGAL = [
+
+/** Set the recorded parameter to `param` WITHOUT touching anything else. */
+function recordedAs(param) {
+  const d = structuredClone(REAL);
+  d.programmableLogicGlobal = { scriptHash: REAL_PLG, unfrackingParameter: param };
+  return d;
+}
+
+/** Assert both public entry points refuse `d`, and hand back the message. */
+function refusal(d, why) {
+  let message;
+  assert.throws(
+    () => assertDeploymentScripts(blueprint, d),
+    (err) => {
+      assert.ok(
+        err instanceof DeploymentMismatchError,
+        `${why}: refusals must be DeploymentMismatchError, got ${err.name}: a bare Error ` +
+          `falls into the consumer's generic handler`,
+      );
+      message = err.message;
+      return true;
+    },
+    why,
+  );
+  // The resolved surface must refuse identically — a rejected parameter must
+  // never reach the object substandards build transactions from.
+  assert.throws(() => buildDeploymentScripts(blueprint, d), DeploymentMismatchError, why);
+  return message;
+}
+
+// ---------------------------------------------------------------------------
+// 1. ABSENT — including the inherited-property hole
+// ---------------------------------------------------------------------------
+
+test("REFUSED as ABSENT: no own unfrackingParameter, and it is never DEFAULTED", () => {
+  // ⛔ REQUIRED, WITH NO DEFAULT. TypeScript catches this in every caller's
+  // build. A legacy JSON record loaded at runtime carries no types, so the
+  // refusal has to hold there too. `?? deployment.unfracking.scriptHash` would
+  // be CORRECT for every record written before this field existed, and that is
+  // exactly what makes it dangerous: the silent path is right often enough that
+  // nobody ever checks it.
+  const legacy = structuredClone(REAL);
+  delete legacy.programmableLogicGlobal.unfrackingParameter;
+
+  const msg = refusal(legacy, "an absent parameter must be refused, never defaulted");
+  assert.match(msg, /unfrackingParameter is ABSENT/, "must say WHICH failure this is");
+  assert.match(msg, /REQUIRED/, "must say it is required");
+  assert.match(msg, /no default/i, "must say it is not defaulted");
+  assert.ok(msg.includes(UNFRACKING_DISABLED), "must name the sentinel as one of the two");
+  assert.match(msg, /unfracking\.scriptHash is not it/, "must say why the obvious default is wrong");
+
+  // ⚑ CONTROL. The same record with the field present passes, so the refusal is
+  // attributable to the missing field and not to a broken fixture.
+  assert.doesNotThrow(() => assertDeploymentScripts(blueprint, REAL));
+});
+
+test("⛔ REFUSED as ABSENT: an INHERITED Object.prototype key does not satisfy the field", () => {
+  // ⛔ MEASURED, NOT FEARED. Before the own-property check, a record with the
+  // field genuinely absent read the polluted prototype value back, passed ALL
+  // TEN hash checks, and built the dispatcher from a value nobody recorded —
+  // the one outcome this whole ticket exists to make impossible. `in` and a
+  // truthiness test both walk the prototype chain; only `hasOwnProperty` does
+  // not. Twin of test/ledger-order.test.mjs's "refuses an inherited
+  // Object.prototype key"; the house standard already existed, this call site
+  // did not meet it.
+  const polluted = structuredClone(REAL);
+  delete polluted.programmableLogicGlobal.unfrackingParameter;
+
+  Object.defineProperty(Object.prototype, "unfrackingParameter", {
+    value: REAL_UNFRACKING,
+    configurable: true,
+    writable: true,
+    enumerable: false,
+  });
+  try {
+    // Precondition: the hole is genuinely open — a plain read DOES find a value.
+    assert.equal(
+      polluted.programmableLogicGlobal.unfrackingParameter,
+      REAL_UNFRACKING,
+      "fixture: the prototype must actually be visible, or this test proves nothing",
+    );
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(
+        polluted.programmableLogicGlobal,
+        "unfrackingParameter",
+      ),
+      "fixture: the OWN property must genuinely be gone",
+    );
+
+    const msg = refusal(polluted, "an inherited value must never satisfy a required field");
+    assert.match(msg, /no OWN property/, "must say the property is not an own property");
+    assert.match(msg, /Object\.prototype/, "must name the hole so the reader can find it");
+  } finally {
+    delete Object.prototype.unfrackingParameter;
+  }
+  assert.ok(!("unfrackingParameter" in {}), "the prototype must be restored");
+});
+
+// ---------------------------------------------------------------------------
+// 2. MALFORMED — refused BEFORE any derivation, and never normalised
+// ---------------------------------------------------------------------------
+
+/**
+ * Values that are not a well-formed 56-lowercase-hex script hash.
+ *
+ * ⛔ WITHOUT THIS REFUSAL EVERY ONE OF THESE REACHED EVOLUTION'S CBOR ENCODER
+ * and died as `ParseError: Data.ByteArray … Expected string`, naming no field,
+ * no record and no file — in front of an artefact `deployments/README.md` says
+ * cannot be regenerated. Fails closed either way; the entire difference is
+ * whether the deployer can act on it.
+ */
+const MALFORMED = [
+  ["a leading space", " " + REAL_UNFRACKING],
+  ["a trailing space", REAL_UNFRACKING + " "],
+  ["an embedded space", REAL_UNFRACKING.slice(0, 28) + " " + REAL_UNFRACKING.slice(28)],
+  ["a trailing newline", REAL_UNFRACKING + "\n"],
+  ["a 0x prefix on the real hash", "0x" + REAL_UNFRACKING],
+  ["a 0x prefix on the sentinel", "0x" + UNFRACKING_DISABLED],
   ["a TRUNCATED unfracking hash", REAL_UNFRACKING.slice(0, 54)],
+  ["the empty string", ""],
+  ["undefined", undefined],
+  ["null", null],
+  ["the number 0", 0],
+  ["a Uint8Array of the right length", new Uint8Array(28)],
+  // eslint-disable-next-line no-new-wrappers
+  ["a boxed String wrapper", new String(REAL_UNFRACKING)],
+  ["the hash inside an array", [REAL_UNFRACKING]],
+];
+
+for (const [label, bad] of MALFORMED) {
+  test(`REFUSED as MALFORMED: ${label}`, () => {
+    const msg = refusal(recordedAs(bad), `${label} is not a well-formed script hash`);
+
+    assert.match(msg, /unfrackingParameter records /, "must name the field");
+    assert.match(msg, /not a well-formed script hash/, "must say WHICH refusal this is");
+    assert.match(msg, /56 LOWERCASE HEX CHARACTERS/, "must state the required shape");
+    // ⛔ And it must NOT claim membership failure. Saying a malformed value "is
+    // neither value a deployment may record" is true byte-wise and useless to
+    // read: it sends a deployer to compare hashes when the fix is a stray space.
+    assert.ok(
+      !/neither\s+value a deployment may record/.test(msg),
+      `a malformed value must not be diagnosed as a membership failure: ${msg}`,
+    );
+    // It is refused BEFORE derivation, so Evolution never sees it.
+    assert.ok(
+      !/ParseError|Data\.ByteArray/.test(msg),
+      `must not surface Evolution's encoder error: ${msg}`,
+    );
+  });
+}
+
+test("REFUSED as MALFORMED: the real hash in UPPERCASE, and the message says it is a CASE problem", () => {
+  // ⛔ BYTE-EXACT, DELIBERATELY NOT NORMALISED. Lowercased, this IS a legal
+  // value — which is precisely why it must be refused rather than fixed for the
+  // caller: this field records what the dispatcher was COMPILED AGAINST, and
+  // accepting a spelling that differs from the bytes that were hashed re-opens
+  // the ambiguity the field exists to remove. A "didn't derive ⇒ must be the
+  // sentinel" fallback would have waved it through as a DISABLED deployment.
+  const upper = REAL_UNFRACKING.toUpperCase();
+  assert.notEqual(upper, REAL_UNFRACKING, "fixture: the hash must contain letters to upcase");
+
+  const msg = refusal(recordedAs(upper), "an uppercase spelling must be refused");
+  assert.ok(msg.includes(upper), `must quote the value as written: ${msg}`);
+  assert.match(msg, /CASE PROBLEM/, "must diagnose it as a case problem, not a wrong value");
+  assert.match(msg, /lowercase/i, "must say what to do about it");
+
+  // …and the SDK must not have silently accepted the lowercased form instead.
+  assert.throws(() => buildDeploymentScripts(blueprint, recordedAs(upper)));
+});
+
+// ---------------------------------------------------------------------------
+// 3. NOT A CHOICE — well-formed, and still not one of the two
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ A GUARD THAT ONLY REJECTS `""` IS NOT THIS GUARD. These are all perfectly
+ * well-formed 56-lowercase-hex script hashes — they pass every shape test — and
+ * they are exactly what a "didn't derive ⇒ must be the sentinel" fallback waves
+ * through: a typo, and a hash lifted from a different deployment of the same
+ * protocol.
+ */
+const NOT_A_CHOICE = [
   // Last nibble only: the FIRST character of this hash is already "0", so a
   // leading-nibble "typo" would silently reproduce the original.
   ["a one-nibble TYPO in the unfracking hash", REAL_UNFRACKING.slice(0, 55) + "d"],
@@ -195,95 +382,78 @@ const ILLEGAL = [
     "eb2131575dce4bfeee8054be6a58d1dcd06a12befbfbd5f6224a79a4"],
   ["a hash from a DIFFERENT deployment (preview alpha.2)",
     "042c367e45a36d7bdb295fbefab63427485e6f2cd9120a7505d58903"],
-  // ⚠ The CANONICAL FORM is load-bearing. Every hash in a deployment record
-  // is lowercase hex, and `Data.bytearray` accepts either case — so an
-  // uppercase copy of the real hash derives the SAME dispatcher and a
-  // "didn't derive ⇒ must be the sentinel" fallback would wave it through as
-  // a disabled deployment. The guard is byte-exact on the canonical form.
-  ["the real unfracking hash in UPPERCASE", REAL_UNFRACKING.toUpperCase()],
   ["an almost-sentinel with one bit set", "00".repeat(27) + "01"],
-  ["the empty string", ""],
 ];
 
-for (const [label, bad] of ILLEGAL) {
-  test(`REFUSED: ${label}`, () => {
-    // ⚑ FIXTURE INTEGRITY, per case. The bad value must actually differ from
-    // both legal ones, or this case is vacuous.
+for (const [label, bad] of NOT_A_CHOICE) {
+  test(`REFUSED as NOT A CHOICE: ${label}`, () => {
+    // ⚑ FIXTURE INTEGRITY, per case. It must be well-formed (or this is a shape
+    // test in disguise) and differ from both legal values (or it is vacuous).
+    assert.match(bad, /^[0-9a-f]{56}$/, "must be a WELL-FORMED hash — shape is not the point here");
     assert.notEqual(bad, REAL_UNFRACKING);
     assert.notEqual(bad, UNFRACKING_DISABLED);
 
+    // ⛔ THE FIXTURE IS SELF-CONSISTENT ON PURPOSE. Its recorded dispatcher hash
+    // is recomputed FROM the bad parameter, which is what a bootstrap that used
+    // that parameter would genuinely have written — so all ten hash checks
+    // reproduce and nothing in the existing assertion can refuse it. The
+    // membership test is the only thing left.
     const d = compiledAgainst(bad);
 
-    // ⛔ THE CONTROL. The record is self-consistent: every one of the ten hash
-    // checks reproduces, so nothing in the existing assertion can refuse it.
-    // Swap ONLY the parameter for a legal value, keeping the same construction,
-    // and it passes — which is what makes the refusal below attributable to the
-    // parameter rather than to a broken fixture.
+    // ⛔ THE CONTROL. Same construction, a LEGAL parameter: it passes. That is
+    // what makes the refusal attributable to the parameter rather than to the
+    // fixture.
     assert.doesNotThrow(
       () => assertDeploymentScripts(blueprint, compiledAgainst(REAL_UNFRACKING)),
       "control: the same record shape with a LEGAL parameter must pass",
     );
 
-    assert.throws(
-      () => assertDeploymentScripts(blueprint, d),
-      (err) => {
-        // Named refusal, and it must name the value it found…
-        assert.match(
-          err.message,
-          new RegExp(`unfrackingParameter records "${bad}"`),
-          `the message must quote the offending value; got: ${err.message}`,
-        );
-        // …and BOTH values it would have accepted. A message naming only one
-        // leaves the reader to guess the other from a version of this SDK.
-        assert.ok(
-          err.message.includes(REAL_UNFRACKING),
-          "must name the derived unfracking hash as a candidate",
-        );
-        assert.ok(
-          err.message.includes(UNFRACKING_DISABLED),
-          "must name UNFRACKING_DISABLED as a candidate",
-        );
-        assert.match(err.message, /UNFRACKING_DISABLED/, "must name the constant by name");
-        return true;
-      },
+    const msg = refusal(d, `${label} is well-formed but not a legal choice`);
+    assert.ok(
+      msg.includes(`unfrackingParameter records "${bad}"`),
+      `the message must quote the offending value; got: ${msg}`,
     );
-
-    // The resolved surface must refuse identically — a rejected parameter must
-    // never reach the object substandards build transactions from.
-    assert.throws(
-      () => buildDeploymentScripts(blueprint, d),
-      new RegExp(`unfrackingParameter records "${bad}"`),
+    assert.match(msg, /neither\s+value a deployment may record/, "must say WHICH refusal this is");
+    assert.ok(msg.includes(REAL_UNFRACKING), "must name the derived unfracking hash as a candidate");
+    assert.ok(msg.includes(UNFRACKING_DISABLED), "must name UNFRACKING_DISABLED as a candidate");
+    assert.match(msg, /UNFRACKING_DISABLED/, "must name the constant by name");
+    // …and NOT mis-diagnose a well-formed value as malformed.
+    assert.ok(
+      !/not a well-formed script hash/.test(msg),
+      `a well-formed value must not be diagnosed as malformed: ${msg}`,
     );
   });
 }
 
-test("REFUSED: a legacy record with NO unfrackingParameter is never DEFAULTED", () => {
-  // ⛔ THE FIELD IS REQUIRED, WITH NO DEFAULT. TypeScript catches an absent
-  // field in every caller's build — loudly, at compile time, naming the field.
-  // A legacy JSON record loaded at runtime carries no types, so the refusal has
-  // to hold there too. `?? deployment.unfracking.scriptHash` would be CORRECT
-  // for every record written before this field existed, and that is exactly
-  // what makes it dangerous: the silent path would be right often enough that
-  // nobody ever checks it. The whole point is that this value is not inferable.
-  const legacy = structuredClone(REAL);
-  delete legacy.programmableLogicGlobal.unfrackingParameter;
+// ---------------------------------------------------------------------------
+// The dispatcher-coherence mismatch now has THREE causes, and must name them
+// ---------------------------------------------------------------------------
+
+test("a PLG mismatch names unfrackingParameter as a candidate cause", () => {
+  // ⚠ The check is called "dispatcher coherence" and its name trains the reader
+  // to hunt for a stale delegate. A record that compiled against the sentinel
+  // and then wrote the ENABLED dispatcher's hash fails here with transfer and
+  // thirdParty both perfectly correct. The parameter is also the only one of
+  // the three derivation inputs that cannot be cross-checked against anything
+  // else in the record — so it is the one the message has to name.
+  const incoherent = structuredClone(REAL);
+  incoherent.programmableLogicGlobal.unfrackingParameter = UNFRACKING_DISABLED;
+  // scriptHash left at REAL_PLG — the enabled dispatcher.
 
   assert.throws(
-    () => assertDeploymentScripts(blueprint, legacy),
-    "an absent parameter must be REFUSED, never defaulted to the real hash",
+    () => assertDeploymentScripts(blueprint, incoherent),
+    (err) => {
+      assert.ok(err instanceof DeploymentMismatchError);
+      const names = err.mismatches.map((m) => m.name);
+      assert.deepEqual(names, ["programmable_logic_global (dispatcher coherence)"],
+        `exactly one check must fail, got: ${names.join(", ")}`);
+      assert.match(err.message, /unfrackingParameter/, "must name the third cause");
+      assert.match(err.message, /transfer\.scriptHash/, "must name the delegate causes too");
+      assert.match(err.message, /thirdParty\.scriptHash/);
+      assert.match(err.message, /COMPILED AGAINST/, "must say what the parameter means");
+      return true;
+    },
   );
-  assert.throws(() => buildDeploymentScripts(blueprint, legacy));
-
-  // ⚑ CONTROL, and it is what turns the two refusals above into evidence. The
-  // same record with the field PRESENT passes, so the throw is attributable to
-  // the missing field and not to some unrelated breakage in the fixture.
-  assert.doesNotThrow(() => assertDeploymentScripts(blueprint, REAL));
-
-  // ⚠ KNOWN LIMIT, stated rather than hidden: an ABSENT value fails inside
-  // Evolution's `Data.bytearray` while the dispatcher is being derived, so the
-  // message a runtime caller sees is an encoding error, not the named
-  // membership refusal the illegal-VALUE cases above get. The refusal is real
-  // either way; only the diagnosis is worse. A typed caller never reaches here.
 });
 
 // ---------------------------------------------------------------------------

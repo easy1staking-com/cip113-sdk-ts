@@ -365,23 +365,68 @@ export interface ScriptHashCheck {
   deployed: ScriptHash;
 }
 
-/** Thrown when a blueprint does not reproduce its deployment's script hashes. */
+/**
+ * Thrown when a deployment record and the blueprint do not describe the same
+ * protocol instance.
+ *
+ * ⛔ IT IS THE CLASS CONSUMERS CATCH, so every refusal from this module must
+ * be one. The documented consumer shape is
+ * `catch (e) { if (e instanceof DeploymentMismatchError) … }`; a bare `Error`
+ * thrown beside it drops silently into whatever generic handler comes next,
+ * which is how a refusal that names a field ends up reported as "something went
+ * wrong".
+ *
+ * ⚠ `mismatches` IS EMPTY FOR REFUSALS THAT ARE NOT HASH COMPARISONS, and the
+ * emptiness is the signal rather than an oversight: nothing derived disagreed
+ * with anything recorded — the record was malformed, or held a value that was
+ * never a legal choice. Those pass their own `detail` message, because the
+ * composed "N script hash(es) differ" text would describe a comparison that
+ * never happened.
+ */
 export class DeploymentMismatchError extends Error {
   readonly mismatches: ScriptHashCheck[];
 
-  constructor(mismatches: ScriptHashCheck[], blueprintTitle: string) {
+  constructor(mismatches: ScriptHashCheck[], blueprintTitle: string, detail?: string) {
     super(
-      `Blueprint "${blueprintTitle}" does not reproduce this deployment. ` +
-      `${mismatches.length} script hash(es) differ:\n` +
-      mismatches
-        .map((m) => `  ${m.name}: derived ${m.derived}, deployment says ${m.deployed}`)
-        .join("\n") +
-      `\nThe blueprint and the DeploymentParams describe different protocol instances. ` +
-      `Transactions built from this pairing would be rejected at submission.`
+      detail ??
+        `Blueprint "${blueprintTitle}" does not reproduce this deployment. ` +
+          `${mismatches.length} script hash(es) differ:\n` +
+          mismatches
+            .map((m) => `  ${m.name}: derived ${m.derived}, deployment says ${m.deployed}`)
+            .join("\n") +
+          `\nThe blueprint and the DeploymentParams describe different protocol instances. ` +
+          `Transactions built from this pairing would be rejected at submission.` +
+          dispatcherCauseHint(mismatches)
     );
     this.name = "DeploymentMismatchError";
     this.mismatches = mismatches;
   }
+}
+
+/** The name `deriveDeploymentScripts` gives the dispatcher-coherence check. */
+const PLG_CHECK_NAME = "programmable_logic_global (dispatcher coherence)";
+
+/**
+ * ⚠ THE DISPATCHER CHECK IS REACHABLE FROM THREE CAUSES AND ITS NAME ONLY
+ * SUGGESTS ONE. "dispatcher coherence" trains the reader to look for a stale
+ * delegate, so a mismatch caused by the RECORDED `unfrackingParameter` sends
+ * them to the wrong two fields — and the parameter is the one cause the reader
+ * cannot see by comparing the record against itself. The check's name is pinned
+ * by `test/deployment-assertion.test.mjs`; the causes are named here instead.
+ */
+function dispatcherCauseHint(mismatches: ScriptHashCheck[]): string {
+  if (!mismatches.some((m) => m.name === PLG_CHECK_NAME)) return "";
+  return (
+    `\n\n${PLG_CHECK_NAME} is derived from THREE recorded values, and any one of ` +
+    `them can cause it:\n` +
+    `  transfer.scriptHash\n` +
+    `  thirdParty.scriptHash\n` +
+    `  programmableLogicGlobal.unfrackingParameter — what the dispatcher was ` +
+    `COMPILED AGAINST, which is NOT necessarily unfracking.scriptHash: a deployment ` +
+    `may record UNFRACKING_DISABLED here while deploying the real unfracking script ` +
+    `beside it. Check this one before the delegates; it is the only one of the three ` +
+    `that cannot be checked against anything else in the record.`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -436,14 +481,114 @@ export const UNFRACKING_DISABLED = "00".repeat(28);
  * SELF-CONSISTENT, so there is nothing for a comparison to disagree with — and
  * only this membership test says the parameter was never a legal choice.
  */
+const CANONICAL_SCRIPT_HASH = /^[0-9a-f]{56}$/;
+
+/**
+ * Read `programmableLogicGlobal.unfrackingParameter` and refuse anything that
+ * is not a WELL-FORMED script hash — BEFORE a single script is derived.
+ *
+ * ⛔ REFUSAL 1, THE OWN-PROPERTY CHECK, AND IT IS NOT DEFENSIVE PROGRAMMING.
+ * With `Object.prototype.unfrackingParameter` set, a record with the field
+ * GENUINELY ABSENT reads back a value, passes every one of the ten hash checks,
+ * and builds the dispatcher from something nobody recorded. MEASURED, not
+ * feared. This repo already treats that exact shape as a defect class —
+ * `test/ledger-order.test.mjs`, *"refuses an inherited `Object.prototype` key"*
+ * — so the standard exists and this call site has to meet it. `in` and a
+ * truthiness test both walk the prototype chain; only `hasOwnProperty` does not.
+ *
+ * ⛔ REFUSAL 2, THE SHAPE CHECK. A stray space, a newline from a copy-paste, a
+ * `0x` prefix off a block explorer, a `Uint8Array`, a `Buffer`, `null` — every
+ * one of these used to fall through to Evolution's
+ * `ParseError: Data.ByteArray … Expected string`, which names NO field, NO
+ * record and NO file, in front of an artefact that cannot be regenerated.
+ * Fails closed either way; the whole difference is whether the deployer can act
+ * on it.
+ *
+ * ⚠ BYTE-EXACT, AND DELIBERATELY NOT NORMALISING. An uppercase spelling of a
+ * legal hash is REFUSED and told it is a CASE problem — never lowercased and
+ * accepted. This value is what the dispatcher was COMPILED AGAINST; accepting a
+ * record whose spelling differs from what was hashed would re-open the exact
+ * hole this ticket exists to close.
+ *
+ * ⚠ TWO REFUSALS, TWO MESSAGES, AND THEY ANSWER DIFFERENT QUESTIONS — *is this
+ * a well-formed script hash?* and *is it one of the two this deployment may
+ * record?* (`refuseOnUnfrackingParameter`, below). A reader who cannot tell
+ * which one fired cannot act, so they are never merged into one condition.
+ */
+function readUnfrackingParameter(
+  deployment: DeploymentParams,
+  blueprintTitle: string,
+): ScriptHash {
+  const plg = deployment.programmableLogicGlobal;
+
+  if (!Object.prototype.hasOwnProperty.call(plg, "unfrackingParameter")) {
+    throw new DeploymentMismatchError(
+      [],
+      blueprintTitle,
+      `programmableLogicGlobal.unfrackingParameter is ABSENT from this deployment ` +
+      `record — it has no OWN property of that name. It is REQUIRED and it has no ` +
+      `default: it records what programmable_logic_global was COMPILED AGAINST, ` +
+      `either the real unfracking script hash or UNFRACKING_DISABLED ` +
+      `(${UNFRACKING_DISABLED}), and NOTHING IN THE RECORD DETERMINES WHICH. ` +
+      `unfracking.scriptHash is not it: a deployment may deploy, publish and ` +
+      `record the real unfracking script while compiling the dispatcher against ` +
+      `the sentinel, so defaulting to it would be right often enough that nobody ` +
+      `would ever check. Add the field to the record. ` +
+      `⚠ An inherited Object.prototype.unfrackingParameter does NOT satisfy this: ` +
+      `it would hand the dispatcher a value no deployment recorded.`
+    );
+  }
+
+  const recorded: unknown = plg.unfrackingParameter;
+
+  if (typeof recorded !== "string" || !CANONICAL_SCRIPT_HASH.test(recorded)) {
+    const shown = typeof recorded === "string" ? JSON.stringify(recorded) : describe(recorded);
+    const caseOnly =
+      typeof recorded === "string" &&
+      CANONICAL_SCRIPT_HASH.test(recorded.toLowerCase()) &&
+      recorded !== recorded.toLowerCase();
+    throw new DeploymentMismatchError(
+      [],
+      blueprintTitle,
+      `programmableLogicGlobal.unfrackingParameter records ${shown}, which is not a ` +
+      `well-formed script hash. It must be EXACTLY 56 LOWERCASE HEX CHARACTERS ` +
+      `(28 bytes), with no 0x prefix, no whitespace and no surrounding quotes.` +
+      (caseOnly
+        ? ` ⚠ THIS IS A CASE PROBLEM, AND ONLY A CASE PROBLEM: lowercased, this IS ` +
+          `56 hex characters. It is refused rather than normalised because this value ` +
+          `is what the dispatcher was COMPILED AGAINST — accepting a spelling that ` +
+          `differs from the bytes that were hashed is the ambiguity this field exists ` +
+          `to remove. Write it in lowercase in the record.`
+        : ``) +
+      `\nThis check runs BEFORE any script is derived, so nothing downstream saw ` +
+      `this value; without it the failure surfaces inside Evolution's CBOR encoder ` +
+      `naming neither the field, the record, nor the file.`
+    );
+  }
+
+  return recorded;
+}
+
+/** A non-string value, described by type rather than by a misleading cast. */
+function describe(value: unknown): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  const ctor = (value as { constructor?: { name?: string } })?.constructor?.name;
+  return `a ${typeof value}${ctor && ctor !== typeof value ? ` (${ctor})` : ``}: ` +
+    `${String(value).slice(0, 80)}`;
+}
+
 function refuseOnUnfrackingParameter(
   recorded: ScriptHash,
   derivedUnfrackingHash: ScriptHash,
+  blueprintTitle: string,
 ): void {
   if (recorded === derivedUnfrackingHash || recorded === UNFRACKING_DISABLED) return;
 
-  const shown = JSON.stringify(recorded) ?? String(recorded);
-  throw new Error(
+  const shown = JSON.stringify(recorded);
+  throw new DeploymentMismatchError(
+    [],
+    blueprintTitle,
     `programmableLogicGlobal.unfrackingParameter records ${shown}, which is neither ` +
     `value a deployment may record. It must be EXACTLY ONE OF:\n` +
     `  ${derivedUnfrackingHash}  — the derived unfracking script hash ` +
@@ -535,6 +680,22 @@ function deriveDeploymentScripts(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
 ): DerivedDeployment {
+  // ⛔ BEFORE ANY DERIVATION, AND READ EXACTLY ONCE. Two reads of one recorded
+  // field are two chances to disagree — this module's own founding lesson — and
+  // a guard placed after the first read would be guarding a value the builder
+  // had already consumed. `readUnfrackingParameter` refuses an absent or
+  // inherited property and a malformed one; `refuseOnUnfrackingParameter` (run
+  // after the hash checks, see the call sites) refuses a well-formed value that
+  // is not one of the two this deployment may record.
+  //
+  // ⚠ IT VALIDATES, IT DOES NOT TRANSFORM. The string handed to the builder
+  // below is the same string the record holds — no trim, no lowercase, no
+  // 0x-strip — so this guard cannot move a single derived hash.
+  const recordedUnfrackingParameter = readUnfrackingParameter(
+    deployment,
+    blueprint.preamble.title,
+  );
+
   const builders = createStandardScripts(blueprint);
 
   const plb = deployment.programmableLogicBase.scriptHash;
@@ -565,7 +726,7 @@ function deriveDeploymentScripts(
   const programmableLogicGlobal = builders.programmableLogicGlobal(
     deployment.transfer.scriptHash,
     deployment.thirdParty.scriptHash,
-    deployment.programmableLogicGlobal.unfrackingParameter,
+    recordedUnfrackingParameter,
   );
   const issuanceCborHexMint = builders.issuanceCborHexMint(
     deployment.issuance.txInput,
@@ -615,7 +776,17 @@ function deriveDeploymentScripts(
       // the deployment's own delegate hashes is the only place that mismatch
       // can be caught — and a dispatcher naming stale delegates fails at
       // withdrawal time with an index error, never with "wrong dispatcher".
-      name: "programmable_logic_global (dispatcher coherence)",
+      //
+      // ⚠ AND IT IS NOW REACHABLE FROM THREE CAUSES, NOT ONE. Its name says
+      // "stale delegates", but the third derivation input is the RECORDED
+      // `programmableLogicGlobal.unfrackingParameter` — so a record that
+      // compiled against `UNFRACKING_DISABLED` and then wrote the enabled
+      // dispatcher's hash (or the reverse) fails HERE, with a name pointing at
+      // the two fields that are fine. The parameter is also the only one of the
+      // three that cannot be cross-checked against anything else in the record.
+      // `dispatcherCauseHint` names all three in the thrown message; do not let
+      // this comment and that message drift apart.
+      name: PLG_CHECK_NAME,
       derived: programmableLogicGlobal.hash,
       deployed: deployment.programmableLogicGlobal.scriptHash,
     },
@@ -680,7 +851,7 @@ function deriveDeploymentScripts(
     builders,
     paramsPolicy,
     unfrackingParameter: {
-      recorded: deployment.programmableLogicGlobal.unfrackingParameter,
+      recorded: recordedUnfrackingParameter,
       derivedUnfrackingHash: unfracking.hash,
     },
     scripts: {
@@ -722,6 +893,7 @@ export function assertDeploymentScripts(
   refuseOnUnfrackingParameter(
     unfrackingParameter.recorded,
     unfrackingParameter.derivedUnfrackingHash,
+    blueprint.preamble.title,
   );
   return checks;
 }
@@ -751,6 +923,7 @@ export function buildDeploymentScripts(
   refuseOnUnfrackingParameter(
     unfrackingParameter.recorded,
     unfrackingParameter.derivedUnfrackingHash,
+    blueprint.preamble.title,
   );
 
   return {

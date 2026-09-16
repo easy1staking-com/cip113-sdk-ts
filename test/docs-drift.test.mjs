@@ -31,38 +31,40 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(resolve(ROOT, p), "utf-8");
 
-/** Top-level field names from a documented `interface X { ... }` fence. */
-function documentedFields(markdown, interfaceName) {
-  const start = markdown.indexOf(`interface ${interfaceName} {`);
-  assert.notEqual(start, -1, `docs must still document ${interfaceName}`);
-  const body = markdown.slice(start);
-  const end = body.indexOf("\n}");
-  assert.notEqual(end, -1, `${interfaceName} block must be closed`);
+/**
+ * Field names of a documented / declared `interface X { … }`, TOP LEVEL AND
+ * ONE LEVEL DOWN — nested members come back as `parent.child`.
+ *
+ * ⛔ THE NESTING IS THE WHOLE FIX, AND ITS ABSENCE IS THIS FILE'S SECOND
+ * INCARNATION OF ITS OWN DEFECT. Both parsers used to collect names at
+ * brace-depth 0 only. `DeploymentParams` puts most of its real content one level
+ * down — `protocolParams.policyId`, `upgradeMultisig.txInput`,
+ * `programmableLogicGlobal.unfrackingParameter` — so a field could be ADDED to
+ * the type, REQUIRED by the SDK, and absent from the document a deployer
+ * hand-builds the record from, while this test sat GREEN and
+ * `docs/api-reference.md` CLAIMED to be pinned by it. MEASURED: that is exactly
+ * what happened to `unfrackingParameter`.
+ *
+ * ⚠ The lesson is the classification. The check was judged by its SHAPE — "it
+ * compares DeploymentParams field names" — rather than by WHAT GETS PAST IT,
+ * which was everything nested. One level is what this type needs; it is a depth
+ * with a reason, not a depth that happened. A third level would need the same
+ * argument made again.
+ *
+ * ⚠ NOT A TYPE CHECK, still. It catches the drift that actually happens —
+ * fields renamed, added, removed — without pretending a markdown fence can be
+ * typechecked.
+ */
+function interfaceFields(text, header, what) {
+  const start = text.indexOf(header);
+  assert.notEqual(start, -1, `${what}: must still declare ${header}`);
+  const body = text.slice(text.indexOf("{", start) + 1);
 
   const names = [];
   let depth = 0;
-  for (const raw of body.slice(0, end).split("\n").slice(1)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("//")) continue;
-    // Only take names at brace-depth 0 — nested object literals are inline here.
-    if (depth === 0) {
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)\??\s*:/.exec(line);
-      if (m) names.push(m[1]);
-    }
-    depth += (line.match(/{/g) ?? []).length - (line.match(/}/g) ?? []).length;
-  }
-  return names;
-}
-
-/** Top-level field names of the real type, read from its source declaration. */
-function sourceFields(ts, interfaceName) {
-  const start = ts.indexOf(`export interface ${interfaceName} {`);
-  assert.notEqual(start, -1, `${interfaceName} must exist in src`);
-  const body = ts.slice(ts.indexOf("{", start) + 1);
-
-  const names = [];
-  let depth = 0;
+  let parent = null;
   let inBlockComment = false;
+
   for (const raw of body.split("\n")) {
     const line = raw.trim();
     if (inBlockComment) {
@@ -75,13 +77,41 @@ function sourceFields(ts, interfaceName) {
     }
     if (!line || line.startsWith("//") || line.startsWith("*")) continue;
     if (depth === 0 && line.startsWith("}")) break;
-    if (depth === 0) {
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)\??\s*:/.exec(line);
-      if (m) names.push(m[1]);
+
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)\??\s*:/.exec(line);
+    if (m && depth === 0) {
+      names.push(m[1]);
+      // An object written INLINE on one line — the form the docs fence uses for
+      // most of these, e.g. `registry: { txInput: TxInput; scriptHash: ... };`
+      const inline = /^[A-Za-z_][A-Za-z0-9_]*\??\s*:\s*\{(.*)\}/.exec(line);
+      if (inline) {
+        for (const part of inline[1].split(/[;,]/)) {
+          const n = /^\s*([A-Za-z_][A-Za-z0-9_]*)\??\s*:/.exec(part);
+          if (n) names.push(`${m[1]}.${n[1]}`);
+        }
+      } else if (line.includes("{")) {
+        // A multi-line block — the form src/types.ts uses when a member carries
+        // its own doc comment. Its members are collected at depth 1 below.
+        parent = m[1];
+      }
+    } else if (m && depth === 1 && parent) {
+      names.push(`${parent}.${m[1]}`);
     }
+
     depth += (line.match(/{/g) ?? []).length - (line.match(/}/g) ?? []).length;
+    if (depth === 0) parent = null;
   }
   return names;
+}
+
+/** Documented field names, from a markdown ```typescript fence. */
+function documentedFields(markdown, interfaceName) {
+  return interfaceFields(markdown, `interface ${interfaceName} {`, "docs");
+}
+
+/** Real field names, from the source declaration. */
+function sourceFields(ts, interfaceName) {
+  return interfaceFields(ts, `export interface ${interfaceName} {`, "src");
 }
 
 test("docs/api-reference.md documents the REAL DeploymentParams fields", () => {
@@ -116,6 +146,32 @@ test("PROOF OF HARNESS: the parsers actually find fields", () => {
 
   assert.ok(documented.length >= 10, `docs parser found only ${documented.length} fields`);
   assert.ok(actual.length >= 10, `source parser found only ${actual.length} fields`);
+
+  // ⛔ AND THEY MUST ACTUALLY DESCEND. Without this the test above compares two
+  // top-level-only lists and passes exactly as it did while
+  // `programmableLogicGlobal.unfrackingParameter` was undocumented — a green
+  // reading from an instrument pointed one level too high. A parser that quietly
+  // stopped nesting would restore that defect and nothing else would say so.
+  const nested = (l) => l.filter((f) => f.includes("."));
+  assert.ok(
+    nested(documented).length >= 15,
+    `docs parser found only ${nested(documented).length} NESTED fields — it is not descending`,
+  );
+  assert.ok(
+    nested(actual).length >= 15,
+    `source parser found only ${nested(actual).length} NESTED fields — it is not descending`,
+  );
+  // Both nesting FORMS must be reached: inline `{ a: T; b: U }` (the docs fence)
+  // and a multi-line block whose members carry their own doc comments
+  // (src/types.ts). A parser handling only one silently half-works.
+  for (const required of [
+    "protocolParams.policyId",              // inline, both files
+    "upgradeMultisig.txInput",              // inline in docs, multi-line in src
+    "programmableLogicGlobal.unfrackingParameter", // the field this fix exists for
+  ]) {
+    assert.ok(actual.includes(required), `source parser must reach ${required}`);
+    assert.ok(documented.includes(required), `docs parser must reach ${required}`);
+  }
 
   // And the names must be the specific ones alpha.3 introduced, so a parser
   // that silently returned a stale-but-plausible list would be caught.
