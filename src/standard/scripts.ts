@@ -384,6 +384,80 @@ export class DeploymentMismatchError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The unfracking parameter — a deployment CHOICE baked into the dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * The `unfracking_hash` a dispatcher is compiled against when the deployment
+ * wants unfracking DEPLOYED BUT UNREACHABLE: 28 zero bytes.
+ *
+ * ⚠ IT IS BAKED INTO THE DISPATCHER'S HASH, so two deployments that chose
+ * differently are DIFFERENT PROTOCOLS. Same category as `maxInlineDatumBytes`
+ * (see `types.ts`): a deployment CHOICE, recoverable from no hash, which is why
+ * `DeploymentParams.programmableLogicGlobal.unfrackingParameter` records the
+ * value itself rather than a flag.
+ *
+ * ⚠ WHY 28 BYTES AND NOT `#""`. The Aiken parameter is a bare `ScriptHash`
+ * — a `ByteArray` with no length constraint, not an `Option`, so there is no
+ * "none" to reach for. `#""` is type-legal, but NOBODY HERE CAN READ THE
+ * COMPILED VALIDATOR'S BODY: whether it asserts a length, or builds an address
+ * out of this parameter, is unknown. A 28-byte value is structurally identical
+ * to a real script hash, so every path behaves normally.
+ * ⇒ Choose a value that cannot reach code we cannot read, rather than reason
+ * about what that code probably does.
+ *
+ * ⚠ NOTHING HASHES TO IT. At 2^224 that is an impossibility, not a low risk,
+ * so the sentinel can never collide with a real `unfracking` deployment. Zeros
+ * rather than `FF…FF`, which reads as a mask or a placeholder.
+ *
+ * ⛔ IT LIVES HERE AND NOWHERE ELSE. The platform must IMPORT it. A
+ * platform-side copy is a second place to disagree about a value that
+ * determines a script hash.
+ */
+export const UNFRACKING_DISABLED = "00".repeat(28);
+
+/**
+ * Refuse a recorded `unfrackingParameter` that is neither of the two values a
+ * deployment may legitimately hold.
+ *
+ * ⛔ THIS IS A TWO-ELEMENT SET MEMBERSHIP, NOT A "DOESN'T MATCH ⇒ SENTINEL"
+ * FALLBACK. `if (recorded !== derived) { assume sentinel }` is the shape that
+ * passes everything: it accepts a typo, a truncation, and a stale hash from a
+ * different deployment — each of which then silently becomes the value the
+ * dispatcher is built from. Both candidates are named explicitly, and so is the
+ * value that was actually found; the standing discipline is
+ * `test/provenance-artefact.test.mjs` — refused by a NAMED assertion, never by
+ * a `??`/`||` guess.
+ *
+ * ⚠ THE CASE ONLY THIS CATCHES, and the reason it has to exist at all: a
+ * bootstrap that compiled the dispatcher against a wrong value and then recorded
+ * BOTH. Every one of the ten hash checks then reproduces — the record is
+ * SELF-CONSISTENT, so there is nothing for a comparison to disagree with — and
+ * only this membership test says the parameter was never a legal choice.
+ */
+function refuseOnUnfrackingParameter(
+  recorded: ScriptHash,
+  derivedUnfrackingHash: ScriptHash,
+): void {
+  if (recorded === derivedUnfrackingHash || recorded === UNFRACKING_DISABLED) return;
+
+  const shown = JSON.stringify(recorded) ?? String(recorded);
+  throw new Error(
+    `programmableLogicGlobal.unfrackingParameter records ${shown}, which is neither ` +
+    `value a deployment may record. It must be EXACTLY ONE OF:\n` +
+    `  ${derivedUnfrackingHash}  — the derived unfracking script hash ` +
+    `(unfracking ENABLED: the dispatcher's unfracking arm dispatches to it)\n` +
+    `  ${UNFRACKING_DISABLED}  — UNFRACKING_DISABLED ` +
+    `(unfracking deployed and published, but the dispatcher's unfracking arm made ` +
+    `permanently unsatisfiable)\n` +
+    `A third value is a typo, a truncation, or a hash from a different deployment. ` +
+    `It is not inferable and it is not defaultable: it is what this dispatcher was ` +
+    `COMPILED AGAINST, so a wrong value here means every transaction that withdraws ` +
+    `through programmable_logic_global was built for a script that is not on chain.`
+  );
+}
+
 /**
  * Derive every parameterizable standard script hash from the blueprint and
  * check it against DeploymentParams. Throws DeploymentMismatchError on any
@@ -449,6 +523,12 @@ interface DerivedDeployment {
   scripts: Omit<ResolvedStandardScripts, "buildIssuanceMint">;
   /** One comparison per script above, in the same order. */
   checks: ScriptHashCheck[];
+  /**
+   * The recorded `unfrackingParameter` and the derived `unfracking` hash it is
+   * checked against. Carried out rather than checked in place so the refusal
+   * can be SEQUENCED AFTER the hash mismatches — see the call sites.
+   */
+  unfrackingParameter: { recorded: ScriptHash; derivedUnfrackingHash: ScriptHash };
 }
 
 function deriveDeploymentScripts(
@@ -471,10 +551,21 @@ function deriveDeploymentScripts(
   const transfer = builders.transfer(plb, registryPolicy, mid);
   const thirdParty = builders.thirdParty(plb, registryPolicy, mid);
   const unfracking = builders.unfracking(plb, registryPolicy, mid);
+  // ⛔ THE THIRD ARGUMENT IS READ FROM THE RECORD, NOT FROM `unfracking`. A
+  // deployment may compile this dispatcher against `UNFRACKING_DISABLED` while
+  // deploying, publishing and recording the REAL unfracking script beside it,
+  // so `deployment.unfracking.scriptHash` is NOT the value that was hashed —
+  // only `programmableLogicGlobal.unfrackingParameter` says what was. Reading
+  // the wrong one derives a dispatcher hash for a script nobody deployed, and
+  // the failure surfaces at withdrawal time naming neither field.
+  //
+  // ⚠ It is used unvalidated HERE and refused by `refuseOnUnfrackingParameter`
+  // before either public entry point returns — see the call sites for why the
+  // refusal is sequenced after the hash mismatches rather than before them.
   const programmableLogicGlobal = builders.programmableLogicGlobal(
     deployment.transfer.scriptHash,
     deployment.thirdParty.scriptHash,
-    deployment.unfracking.scriptHash,
+    deployment.programmableLogicGlobal.unfrackingParameter,
   );
   const issuanceCborHexMint = builders.issuanceCborHexMint(
     deployment.issuance.txInput,
@@ -588,6 +679,10 @@ function deriveDeploymentScripts(
   return {
     builders,
     paramsPolicy,
+    unfrackingParameter: {
+      recorded: deployment.programmableLogicGlobal.unfrackingParameter,
+      derivedUnfrackingHash: unfracking.hash,
+    },
     scripts: {
       protocolParams,
       programmableLogicBase,
@@ -616,8 +711,18 @@ export function assertDeploymentScripts(
   blueprint: PlutusBlueprint,
   deployment: DeploymentParams,
 ): ScriptHashCheck[] {
-  const { checks } = deriveDeploymentScripts(blueprint, deployment);
+  const { checks, unfrackingParameter } = deriveDeploymentScripts(blueprint, deployment);
   refuseOnMismatch(checks, blueprint.preamble.title);
+  // ⚠ ORDER IS DELIBERATE, AND IT IS NOT A CONDITIONAL. A wrong
+  // `maxInlineDatumBytes` moves the derived `unfracking` hash, which would let a
+  // parameter complaint pre-empt — and hide — the four named delegate
+  // mismatches that say what actually went wrong. Hash disagreements are
+  // reported first, by name; this refusal is what is left when all ten
+  // reproduce and the record is nevertheless not a legal deployment.
+  refuseOnUnfrackingParameter(
+    unfrackingParameter.recorded,
+    unfrackingParameter.derivedUnfrackingHash,
+  );
   return checks;
 }
 
@@ -638,11 +743,15 @@ export function buildDeploymentScripts(
   // whose hashes were just checked, not a second build from the same arguments.
   // A second build is a second chance to disagree, and it WAS unguarded here:
   // see the block on `DerivedDeployment`.
-  const { builders, paramsPolicy, scripts, checks } = deriveDeploymentScripts(
-    blueprint,
-    deployment,
-  );
+  const { builders, paramsPolicy, scripts, checks, unfrackingParameter } =
+    deriveDeploymentScripts(blueprint, deployment);
   refuseOnMismatch(checks, blueprint.preamble.title);
+  // Same refusal, same order, as `assertDeploymentScripts` — the resolved
+  // surface must never be built from a parameter the assertion would reject.
+  refuseOnUnfrackingParameter(
+    unfrackingParameter.recorded,
+    unfrackingParameter.derivedUnfrackingHash,
+  );
 
   return {
     ...scripts,
