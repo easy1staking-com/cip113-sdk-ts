@@ -291,6 +291,41 @@ interface FESDeploymentParams {
 
 ---
 
+## Substandard Plugin Interface
+
+### SubstandardContext
+
+The object `CIP113.init()` hands to every plugin's `init()`. Field names here are pinned
+against `src/substandards/interface.ts` by `test/docs-drift.test.mjs`.
+
+```typescript
+interface SubstandardContext {
+  evaluator?: unknown;
+  client: EvoClient;
+  standardScripts: ResolvedStandardScripts;
+  deployment: DeploymentParams;
+  network?: Network;
+  checkStakeRegistration?: (stakeAddress: string) => Promise<boolean>;
+}
+```
+
+⛔ **`network` is `Network | undefined`, and the `undefined` is load-bearing.** It names the
+public Cardano network the client is pointed at — `"mainnet"`, `"preprod"` or `"preview"` —
+derived from the chain's **network magic**. A client pointed at a devnet or any other private
+network gets `undefined`, because it is none of the three and naming it one would be a lie a
+plugin would then act on. Branch on the absence; do not coerce it to a default.
+
+> ⚠ **Breaking, and it landed after 0.10.0** — the release notes name the version; this
+> block deliberately does not, because a number written here ages into a lie. This field
+> was previously typed `string` and computed from
+> `chain.id`, which is the *address* network id — `1` for mainnet and `0` for **every** testnet.
+> A preview client was therefore labelled `"preprod"`, and a devnet was too. Plugins that read
+> `ctx.network` into a `string`, or that branch on `=== "preprod"` to detect a devnet, must be
+> updated. `networkFromChain(chain)` is exported from the package root if you need the same
+> mapping for a chain of your own.
+
+---
+
 ## Substandard Factories
 
 ### `dummySubstandard(config)`

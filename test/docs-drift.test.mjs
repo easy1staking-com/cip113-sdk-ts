@@ -240,3 +240,74 @@ test("package version and the migration note agree", () => {
   assert.equal(pkg.version, "0.10.0");
   assert.match(read("README.md"), new RegExp(`Migrating to ${pkg.version.replace(/\./g, "\\.")}`));
 });
+
+// ---------------------------------------------------------------------------
+// SubstandardContext — the published plugin interface
+// ---------------------------------------------------------------------------
+
+test("docs/api-reference.md documents the REAL SubstandardContext fields", () => {
+  // ⛔ WHY THIS TYPE JOINS DeploymentParams HERE. `SubstandardContext` is the
+  // object every substandard plugin receives, and it was undocumented while its
+  // `network` field was both wrongly typed (`string`, not `Network`) and wrongly
+  // computed (from `chain.id`, which is 0 for EVERY testnet). A plugin author
+  // had no document to be misled by — and no document to be corrected by
+  // either. Documenting it without pinning it would just restore the rot this
+  // file exists for.
+  const documented = documentedFields(read("docs/api-reference.md"), "SubstandardContext");
+  const actual = sourceFields(read("src/substandards/interface.ts"), "SubstandardContext");
+
+  assert.ok(actual.length > 3, "sanity: the parser found a real field list");
+
+  const missing = actual.filter((f) => !documented.includes(f));
+  const invented = documented.filter((f) => !actual.includes(f));
+
+  assert.deepEqual(
+    missing,
+    [],
+    `SubstandardContext fields exist but are UNDOCUMENTED: ${missing.join(", ")}. ` +
+      `A plugin author reading the docs would not know they are there.`,
+  );
+  assert.deepEqual(
+    invented,
+    [],
+    `docs describe SubstandardContext fields that DO NOT EXIST: ${invented.join(", ")}.`,
+  );
+});
+
+test("the documented SubstandardContext.network is OPTIONAL and typed Network", () => {
+  // ⚠ THE FIELD NAME SURVIVING IS NOT THE FACT THAT MATTERS HERE. The name
+  // `network` was correct throughout the defect; what was wrong was its type
+  // and the possibility of its absence. The name check above cannot see either,
+  // so the two properties a plugin author must act on are asserted directly —
+  // in the DOCS, because that is the artefact this file guards.
+  const docs = read("docs/api-reference.md");
+  const start = docs.indexOf("interface SubstandardContext {");
+  assert.notEqual(start, -1, "the SubstandardContext fence is gone");
+  const fence = docs.slice(start, docs.indexOf("```", start));
+
+  assert.match(
+    fence,
+    /network\?: Network;/,
+    "the documented field must be `network?: Network` — optional, and the union, not `string`",
+  );
+  assert.doesNotMatch(
+    fence,
+    /network\??: string;/,
+    "`string` here is the looseness that let the value and the Network union disagree",
+  );
+
+  // And the prose must tell the reader what the absence MEANS, because
+  // `undefined` with no explanation reads as an oversight to be defaulted away
+  // — which is exactly how a devnet gets relabelled "preprod" by a consumer
+  // instead of by us.
+  assert.match(
+    docs,
+    /devnet[^.]*`undefined`|`undefined`[^.]*devnet/i,
+    "the docs must say that a devnet (or any private network) yields undefined",
+  );
+  assert.match(
+    docs,
+    /network magic/i,
+    "the docs must name the field the label is actually derived from",
+  );
+});

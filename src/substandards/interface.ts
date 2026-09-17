@@ -14,6 +14,7 @@ import type {
   Address,
   DeploymentParams,
   HexString,
+  Network,
   PlutusBlueprint,
   PolicyId,
   ScriptHash,
@@ -112,7 +113,25 @@ export interface SubstandardContext {
   client: EvoClient;
   standardScripts: ResolvedStandardScripts;
   deployment: DeploymentParams;
-  network: string;
+  /**
+   * Which public Cardano network the client is pointed at, or `undefined` when
+   * it is pointed at none of them.
+   *
+   * ⛔ OPTIONAL ON PURPOSE, AND `string` ON PURPOSE NO LONGER. This field was
+   * typed `string` and computed as `chain.id === 1 ? "mainnet" : "preprod"`.
+   * `chain.id` is the address network id — 1 for mainnet, 0 for EVERY testnet —
+   * so a preview client was labelled `"preprod"`, and the `Network` union
+   * declared a `"preview"` member the code could not produce. The looseness of
+   * `string` is what let the value and the union disagree without a compiler
+   * ever having to reconcile them; `Network` is what stops that recurring.
+   *
+   * ⚠ `undefined` IS A REAL VALUE HERE, not an oversight. A devnet or any
+   * private network is none of the three, and naming it one of them would be
+   * the original defect with a different wrong answer. Branch on the absence;
+   * do not coerce it to a default. See `networkFromChain` in `src/index.ts`
+   * for the derivation and for the alternatives that were rejected.
+   */
+  network?: Network;
   /** Check if a stake address is registered on-chain. If not provided, assumes not registered. */
   checkStakeRegistration?: (stakeAddress: string) => Promise<boolean>;
 }
