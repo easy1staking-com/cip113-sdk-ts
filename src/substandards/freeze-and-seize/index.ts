@@ -482,7 +482,16 @@ export function freezeAndSeizeSubstandard(config: {
     // REGISTER — first mint + registry insert
     // ====================================================================
     async register(params: RegisterParams): Promise<UnsignedTx> {
-      const { feePayerAddress, assetName, quantity, recipientAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, assetName, quantity, recipientAddress } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED. feePayerAddress is the
+      // FALLBACK the optional guards below hand back for an absent parameter, so
+      // guarding it afterwards closes nothing: an empty fee payer would still
+      // reach bech32 decoding as an unnamed ParseError by way of the fallback.
+      // MEASURED before this line existed: register({ feePayerAddress: "" }) threw
+      // ParseError with an absent recipient, and NOTHING AT ALL with a valid one.
+      // Rebound over the raw parameter so no later read can reach the unchecked
+      // value — every downstream use is the guarded one by construction.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.register", "feePayerAddress");
       // `||` substituted the fee payer for an EMPTY recipientAddress and built a
       // valid transaction against the wrong address. Absent still defaults.
       const recipient = resolveOptionalAddress(
@@ -814,7 +823,10 @@ export function freezeAndSeizeSubstandard(config: {
     // MINT — subsequent mint with RefInput proof
     // ====================================================================
     async mint(params: MintParams): Promise<UnsignedTx> {
-      const { feePayerAddress, tokenPolicyId, assetName, quantity, recipientAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, quantity, recipientAddress } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
+      // the raw parameter so no later read can reach the unchecked value.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.mint", "feePayerAddress");
       // As in register: `||` minted an EMPTY recipientAddress to the fee payer.
       const recipient = resolveOptionalAddress(
         recipientAddress,
@@ -922,7 +934,10 @@ export function freezeAndSeizeSubstandard(config: {
     // ====================================================================
     async burn(params: BurnParams): Promise<UnsignedTx> {
 
-      const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
+      // the raw parameter so no later read can reach the unchecked value.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.burn", "feePayerAddress");
       // `||` searched the FEE PAYER's PLB address for an EMPTY holderAddress and
       // then reported "UTxO ...#... not found" — the wrong cause, for a UTxO that
       // exists at the holder it was never told about.
@@ -1553,7 +1568,10 @@ export function freezeAndSeizeSubstandard(config: {
     // ====================================================================
     async seize(params: SeizeParams): Promise<UnsignedTx> {
 
-      const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
+      // the raw parameter so no later read can reach the unchecked value.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.seize", "feePayerAddress");
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
 

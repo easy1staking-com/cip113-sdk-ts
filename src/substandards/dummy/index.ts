@@ -344,7 +344,16 @@ export function dummySubstandard(config: {
      * input and its map entry exactly as `mint` does.
      */
     async register(params: RegisterParams): Promise<UnsignedTx> {
-      const { feePayerAddress, assetName, quantity } = params;
+      const { feePayerAddress: feePayerAddressParam, assetName, quantity } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED. feePayerAddress is the
+      // FALLBACK the optional guards below hand back for an absent parameter, so
+      // guarding it afterwards closes nothing: an empty fee payer would still
+      // reach bech32 decoding as an unnamed ParseError by way of the fallback.
+      // MEASURED before this line existed: register({ feePayerAddress: "" }) threw
+      // ParseError with an absent recipient, and NOTHING AT ALL with a valid one.
+      // Rebound over the raw parameter so no later read can reach the unchecked
+      // value — every downstream use is the guarded one by construction.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "dummy.register", "feePayerAddress");
       // `??` let an EMPTY recipientAddress through to bech32 decoding, three frames
       // deep in evo-utils, naming neither the parameter nor the operation.
       const recipient = resolveOptionalAddress(
@@ -580,7 +589,10 @@ export function dummySubstandard(config: {
      * an output of this transaction.
      */
     async mint(params: MintParams): Promise<UnsignedTx> {
-      const { feePayerAddress, tokenPolicyId, assetName, quantity } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, quantity } = params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
+      // the raw parameter so no later read can reach the unchecked value.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "dummy.mint", "feePayerAddress");
       // As in register: `??` deferred an EMPTY recipientAddress to an unnamed
       // ParseError inside evo-utils.
       const recipient = resolveOptionalAddress(
@@ -708,8 +720,11 @@ export function dummySubstandard(config: {
      * is where that field points at a real issuer-admin check.
      */
     async thirdPartyTransfer(params: ThirdPartyTransferParams): Promise<UnsignedTx> {
-      const { holderAddress, recipientAddress, tokenPolicyId, assetName, quantity, feePayerAddress } =
+      const { holderAddress, recipientAddress, tokenPolicyId, assetName, quantity, feePayerAddress: feePayerAddressParam } =
         params;
+      // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
+      // the raw parameter so no later read can reach the unchecked value.
+      const feePayerAddress = requiredAddress(feePayerAddressParam, "dummy.thirdPartyTransfer", "feePayerAddress");
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
       // min-UTxO is sized from live protocol parameters, not guessed — the asset

@@ -618,3 +618,121 @@ test("site 9 — FES seize with a VALID destinationAddress still sends the seize
     "holder, then feePayer, then destination — the f42758e search order, unchanged",
   );
 });
+
+// ---------------------------------------------------------------------------
+// r3 — feePayerAddress, on the SEVEN operations this slice touches
+//
+// ⛔ WHY THIS IS NOT "one more parameter". `feePayerAddress` is the FALLBACK the
+// optional guards above hand back for an absent parameter, so leaving it
+// unguarded left the slice's own central claim false. MEASURED on f07f00f,
+// before these guards existed:
+//
+//   register({ feePayerAddress: "", recipientAddress: undefined })
+//     -> ParseError: AddressStructure.FromBech32      (the unnamed error this
+//                                                      slice exists to remove,
+//                                                      reached VIA the guard)
+//   register({ feePayerAddress: "", recipientAddress: <valid> })
+//     -> no error at all through output construction
+//
+// The guard therefore runs BEFORE the optional resolution, and is rebound over
+// the raw parameter so no later read can reach the unchecked value. Guarding it
+// afterwards would close nothing.
+//
+// ⚠ The rule is about OPERATIONS, not about a parameter across the codebase.
+// `transfer`, `freeze`, `unfreeze` and `initCompliance` are untouched by this
+// slice and their feePayerAddress stays unguarded — honestly untouched rather
+// than half-guarded. Seated as T-D50.
+// ---------------------------------------------------------------------------
+
+const FEE_PAYER_SITES = [
+  {
+    operation: "freeze-and-seize.register",
+    plugin: fes,
+    method: "register",
+    params: registerParams,
+    utxos: () => REGISTER_UTXOS,
+    // With recipientAddress absent, the fee payer IS the mint target — so this
+    // asserts the fallback still works and still points where f42758e pointed.
+    valid: (r) => assertTargeted(r, plb(FEE_PAYER), "a valid feePayerAddress still receives the fallback mint"),
+  },
+  {
+    operation: "freeze-and-seize.mint",
+    plugin: fes,
+    method: "mint",
+    params: mintParams,
+    utxos: () => OWN_NODE_UTXOS,
+    valid: (r) => assertTargeted(r, plb(FEE_PAYER), "a valid feePayerAddress still receives the fallback mint"),
+  },
+  {
+    operation: "freeze-and-seize.burn",
+    plugin: fes,
+    method: "burn",
+    params: burnParams,
+    utxos: () => burnUtxos(FEE_PAYER),
+    valid: (r) =>
+      assert.equal(r.getUtxos[0], plb(FEE_PAYER), "a valid feePayerAddress is still the fallback holder searched"),
+  },
+  {
+    operation: "freeze-and-seize.seize",
+    plugin: fes,
+    method: "seize",
+    params: seizeParams,
+    utxos: () => seizeUtxos(FEE_PAYER),
+    valid: (r) =>
+      assert.equal(r.getUtxos[0], plb(FEE_PAYER), "a valid feePayerAddress is still searched when no holder is named"),
+  },
+  {
+    operation: "dummy.register",
+    plugin: dummy,
+    method: "register",
+    params: registerParams,
+    utxos: () => REGISTER_UTXOS,
+    valid: (r) => assertTargeted(r, plb(FEE_PAYER), "a valid feePayerAddress still receives the fallback mint"),
+  },
+  {
+    operation: "dummy.mint",
+    plugin: dummy,
+    method: "mint",
+    params: mintParams,
+    utxos: () => OWN_NODE_UTXOS,
+    valid: (r) => assertTargeted(r, plb(FEE_PAYER), "a valid feePayerAddress still receives the fallback mint"),
+  },
+  {
+    operation: "dummy.thirdPartyTransfer",
+    plugin: dummy,
+    method: "thirdPartyTransfer",
+    params: tptParams,
+    utxos: () => tptUtxos(HOLDER),
+    // feePayerAddress drives no address here — it is the administrator. The
+    // property is that guarding it changed NOTHING about where the transfer goes.
+    valid: (r) => {
+      assertTargeted(r, plb(RECIPIENT), "guarding feePayerAddress must not move the transfer target");
+      assert.equal(r.getUtxos[0], plb(HOLDER), "nor the address searched for the tokens");
+    },
+  },
+];
+
+for (const site of FEE_PAYER_SITES) {
+  test(`feePayerAddress — ${site.operation} REFUSES an empty feePayerAddress by name`, async () => {
+    const result = await run(site.plugin, site.method, site.params({ feePayerAddress: "" }), site.utxos());
+    assertRefusedByName(result, { operation: site.operation, parameter: "feePayerAddress" });
+    assert.doesNotMatch(result.error.message, /ParseError/, "the unnamed bech32 ParseError is what this replaces");
+    assert.deepEqual(result.getUtxos, [], "the refusal must precede every chain read");
+  });
+
+  test(`feePayerAddress — ${site.operation} REFUSES an ABSENT feePayerAddress by name (it is REQUIRED)`, async () => {
+    const result = await run(site.plugin, site.method, site.params({ feePayerAddress: undefined }), site.utxos());
+    assertRefusedByName(result, {
+      operation: site.operation,
+      parameter: "feePayerAddress",
+      received: "undefined",
+    });
+    assert.match(result.error.message, /REQUIRED/, "there is no documented default here to fall back to");
+  });
+
+  test(`feePayerAddress — ${site.operation} with a VALID feePayerAddress is unchanged`, async () => {
+    // Pinned to the f42758e reading: this test passes WITH the defect present,
+    // which is what makes the two above a refusal and not a behaviour change.
+    site.valid(await run(site.plugin, site.method, site.params({}), site.utxos()));
+  });
+}
