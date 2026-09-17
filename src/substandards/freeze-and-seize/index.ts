@@ -35,6 +35,10 @@ import type {
   UnsignedTx,
 } from "../interface.js";
 import {
+  optionalAddressOrAbsent,
+  resolveOptionalAddress,
+} from "../address-guard.js";
+import {
   sortTxInputs,
   findRefInputIndex,
   findRegistryNode,
@@ -478,7 +482,15 @@ export function freezeAndSeizeSubstandard(config: {
     // ====================================================================
     async register(params: RegisterParams): Promise<UnsignedTx> {
       const { feePayerAddress, assetName, quantity, recipientAddress } = params;
-      const recipient = recipientAddress || feePayerAddress;
+      // `||` substituted the fee payer for an EMPTY recipientAddress and built a
+      // valid transaction against the wrong address. Absent still defaults.
+      const recipient = resolveOptionalAddress(
+        recipientAddress,
+        feePayerAddress,
+        "freeze-and-seize.register",
+        "recipientAddress",
+        "feePayerAddress"
+      );
       const chainedUtxos = (params.chainedUtxos ?? []) as EvoUTxO.UTxO[];
       // Already hex: `assetName` is raw asset-name HEX at every API boundary in
       // this SDK. This previously ran stringToHex over it, double-encoding any
@@ -802,7 +814,14 @@ export function freezeAndSeizeSubstandard(config: {
     // ====================================================================
     async mint(params: MintParams): Promise<UnsignedTx> {
       const { feePayerAddress, tokenPolicyId, assetName, quantity, recipientAddress } = params;
-      const recipient = recipientAddress || feePayerAddress;
+      // As in register: `||` minted an EMPTY recipientAddress to the fee payer.
+      const recipient = resolveOptionalAddress(
+        recipientAddress,
+        feePayerAddress,
+        "freeze-and-seize.mint",
+        "recipientAddress",
+        "feePayerAddress"
+      );
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
 
@@ -903,7 +922,16 @@ export function freezeAndSeizeSubstandard(config: {
     async burn(params: BurnParams): Promise<UnsignedTx> {
 
       const { feePayerAddress, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx } = params;
-      const holder = params.holderAddress || feePayerAddress;
+      // `||` searched the FEE PAYER's PLB address for an EMPTY holderAddress and
+      // then reported "UTxO ...#... not found" — the wrong cause, for a UTxO that
+      // exists at the holder it was never told about.
+      const holder = resolveOptionalAddress(
+        params.holderAddress,
+        feePayerAddress,
+        "freeze-and-seize.burn",
+        "holderAddress",
+        "feePayerAddress"
+      );
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
 
@@ -1538,8 +1566,18 @@ export function freezeAndSeizeSubstandard(config: {
 
       // Search the holder's PLB address first, then fall back to feePayer and destination
       const searchAddresses: string[] = [];
-      if (params.holderAddress) {
-        searchAddresses.push(baseAddress(networkId, plbHash, params.holderAddress));
+      // ⛔ NOT A FALLBACK — A CONDITIONAL, and `""` was falsy here too. An EMPTY
+      // holderAddress was silently dropped from the search set, aiming the
+      // seizure at feePayer and destination only. Absent legitimately means that;
+      // empty is a caller bug and is refused.
+      const holderAddress = optionalAddressOrAbsent(
+        params.holderAddress,
+        "freeze-and-seize.seize",
+        "holderAddress",
+        "to search only feePayerAddress and destinationAddress"
+      );
+      if (holderAddress) {
+        searchAddresses.push(baseAddress(networkId, plbHash, holderAddress));
       }
       searchAddresses.push(
         baseAddress(networkId, plbHash, feePayerAddress),

@@ -53,6 +53,7 @@ import type {
   ThirdPartyTransferParams,
   UnsignedTx,
 } from "../interface.js";
+import { requiredAddress, resolveOptionalAddress } from "../address-guard.js";
 import { getValidatorCode } from "../../standard/blueprint.js";
 import {
   sortTxInputs,
@@ -344,7 +345,15 @@ export function dummySubstandard(config: {
      */
     async register(params: RegisterParams): Promise<UnsignedTx> {
       const { feePayerAddress, assetName, quantity } = params;
-      const recipient = params.recipientAddress ?? feePayerAddress;
+      // `??` let an EMPTY recipientAddress through to bech32 decoding, three frames
+      // deep in evo-utils, naming neither the parameter nor the operation.
+      const recipient = resolveOptionalAddress(
+        params.recipientAddress,
+        feePayerAddress,
+        "dummy.register",
+        "recipientAddress",
+        "feePayerAddress"
+      );
       const client = ctx.client;
       // min-UTxO is sized from live protocol parameters, not guessed — the asset
       // name and the quantity are both caller-supplied and both widen the output.
@@ -572,7 +581,15 @@ export function dummySubstandard(config: {
      */
     async mint(params: MintParams): Promise<UnsignedTx> {
       const { feePayerAddress, tokenPolicyId, assetName, quantity } = params;
-      const recipient = params.recipientAddress ?? feePayerAddress;
+      // As in register: `??` deferred an EMPTY recipientAddress to an unnamed
+      // ParseError inside evo-utils.
+      const recipient = resolveOptionalAddress(
+        params.recipientAddress,
+        feePayerAddress,
+        "dummy.mint",
+        "recipientAddress",
+        "feePayerAddress"
+      );
       const client = ctx.client;
       // min-UTxO is sized from live protocol parameters, not guessed — the asset
       // name and the quantity are both caller-supplied and both widen the output.
@@ -700,7 +717,13 @@ export function dummySubstandard(config: {
       const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
 
-      const holderPlbAddr = baseAddress(networkId, plbHash, holderAddress);
+      // REQUIRED parameter: there is no fallback to get wrong, but `""` still
+      // reached bech32 decoding and produced an unnamed ParseError.
+      const holderPlbAddr = baseAddress(
+        networkId,
+        plbHash,
+        requiredAddress(holderAddress, "dummy.thirdPartyTransfer", "holderAddress")
+      );
       const recipientPlbAddr = baseAddress(networkId, plbHash, recipientAddress);
 
       const holderUtxos = await client.getUtxos(EvoAddress.fromBech32(holderPlbAddr));
