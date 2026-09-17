@@ -482,7 +482,7 @@ export function freezeAndSeizeSubstandard(config: {
     // REGISTER — first mint + registry insert
     // ====================================================================
     async register(params: RegisterParams): Promise<UnsignedTx> {
-      const { feePayerAddress: feePayerAddressParam, assetName, quantity, recipientAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, assetName, quantity, recipientAddress: recipientAddressParam } = params;
       // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED. feePayerAddress is the
       // FALLBACK the optional guards below hand back for an absent parameter, so
       // guarding it afterwards closes nothing: an empty fee payer would still
@@ -495,7 +495,7 @@ export function freezeAndSeizeSubstandard(config: {
       // `||` substituted the fee payer for an EMPTY recipientAddress and built a
       // valid transaction against the wrong address. Absent still defaults.
       const recipient = resolveOptionalAddress(
-        recipientAddress,
+        recipientAddressParam,
         feePayerAddress,
         "freeze-and-seize.register",
         "recipientAddress",
@@ -823,13 +823,13 @@ export function freezeAndSeizeSubstandard(config: {
     // MINT — subsequent mint with RefInput proof
     // ====================================================================
     async mint(params: MintParams): Promise<UnsignedTx> {
-      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, quantity, recipientAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, quantity, recipientAddress: recipientAddressParam } = params;
       // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
       // the raw parameter so no later read can reach the unchecked value.
       const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.mint", "feePayerAddress");
       // As in register: `||` minted an EMPTY recipientAddress to the fee payer.
       const recipient = resolveOptionalAddress(
-        recipientAddress,
+        recipientAddressParam,
         feePayerAddress,
         "freeze-and-seize.mint",
         "recipientAddress",
@@ -1568,7 +1568,7 @@ export function freezeAndSeizeSubstandard(config: {
     // ====================================================================
     async seize(params: SeizeParams): Promise<UnsignedTx> {
 
-      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress } = params;
+      const { feePayerAddress: feePayerAddressParam, tokenPolicyId, assetName, utxoTxHash: targetTxHash, utxoOutputIndex: targetIdx, destinationAddress: destinationAddressParam } = params;
       // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
       // the raw parameter so no later read can reach the unchecked value.
       const feePayerAddress = requiredAddress(feePayerAddressParam, "freeze-and-seize.seize", "feePayerAddress");
@@ -1603,14 +1603,14 @@ export function freezeAndSeizeSubstandard(config: {
       // half-guarded. Resolved ONCE, here, and used for both the search set and
       // the destination output below: two reads of one parameter must not be
       // able to disagree about whether it was checked.
-      const destination = requiredAddress(
-        destinationAddress,
+      const destinationAddress = requiredAddress(
+        destinationAddressParam,
         "freeze-and-seize.seize",
         "destinationAddress"
       );
       searchAddresses.push(
         baseAddress(networkId, plbHash, feePayerAddress),
-        baseAddress(networkId, plbHash, destination),
+        baseAddress(networkId, plbHash, destinationAddress),
       );
       // Deduplicate
       const uniqueAddresses = [...new Set(searchAddresses)];
@@ -1710,7 +1710,7 @@ export function freezeAndSeizeSubstandard(config: {
       const tokenDatum = voidData();
 
       // 5. Build recipient PLB address
-      const recipientPlbAddr = baseAddress(networkId, plbHash, destination);
+      const recipientPlbAddr = baseAddress(networkId, plbHash, destinationAddress);
 
       // 6. Compute remaining assets
       const remainingTokens = new Map<string, bigint>();

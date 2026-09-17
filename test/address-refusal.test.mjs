@@ -736,3 +736,129 @@ for (const site of FEE_PAYER_SITES) {
     site.valid(await run(site.plugin, site.method, site.params({}), site.utxos()));
   });
 }
+
+// ---------------------------------------------------------------------------
+// r4 / R-1 — the guard COMPUTED the trim and then THREW IT AWAY
+//
+// `isUsableAddress` was `value.trim().length > 0`: it used the trim to decide
+// emptiness and discarded it. So `"   "` was a named refusal while
+// `<valid> + "\n"` fell straight through to the unnamed bech32 `ParseError` —
+// and ⛔ A TRAILING NEWLINE IS WHAT YOU GET READING AN ADDRESS OUT OF A FILE,
+// which is the same `.env` route this whole guard exists for. The argument that
+// justified refusing whitespace at all ("bech32 admits no whitespace, so no
+// valid address is excluded") covers ANY whitespace-containing string; the
+// implementation took it halfway.
+//
+// ⚠ REFUSED, NEVER TRIMMED. Accepting a padded address by repairing it silently
+// would hide whatever produced the padding — this ticket's own anti-pattern.
+// ---------------------------------------------------------------------------
+
+const VALID = RECIPIENT;
+const WHITESPACE_CASES = [
+  ["a LEADING space", " " + VALID],
+  ["a TRAILING space", VALID + " "],
+  ["a TRAILING NEWLINE (what reading an address out of a file gives you)", VALID + "\n"],
+  ["an EMBEDDED space", VALID.slice(0, 20) + " " + VALID.slice(20)],
+];
+
+for (const [label, value] of WHITESPACE_CASES) {
+  test(`R-1 — FES register REFUSES a recipientAddress with ${label}`, async () => {
+    const result = await run(fes, "register", registerParams({ recipientAddress: value }), REGISTER_UTXOS);
+    assertRefusedByName(result, {
+      operation: "freeze-and-seize.register",
+      parameter: "recipientAddress",
+      received: "(contains whitespace)",
+    });
+    assert.doesNotMatch(result.error.message, /ParseError/, "the unnamed bech32 ParseError is what this replaces");
+    // ⛔ The refusal must not be a repair. If the guard trimmed and accepted, the
+    // run would reach payToAddress with the recipient — which is precisely the
+    // silent substitution this file exists to prevent, wearing a helpful face.
+    assert.equal(result.payTo.length, 0, "a padded address must be REFUSED, never trimmed and accepted");
+  });
+}
+
+test("R-1 — the message distinguishes PADDING from WHITESPACE-ONLY", async () => {
+  const padded = await run(fes, "register", registerParams({ recipientAddress: VALID + "\n" }), REGISTER_UTXOS);
+  const blank = await run(fes, "register", registerParams({ recipientAddress: "   " }), REGISTER_UTXOS);
+  assert.match(padded.error.message, /contains whitespace/, "a real address arrived dirty");
+  assert.match(blank.error.message, /whitespace only/, "the field was filled with nothing");
+  assert.notEqual(
+    padded.error.message,
+    blank.error.message,
+    "two different caller mistakes must not produce one indistinguishable message",
+  );
+});
+
+test("R-1 — FES mint REFUSES a recipientAddress with a trailing newline", async () => {
+  const result = await run(fes, "mint", mintParams({ recipientAddress: VALID + "\n" }), OWN_NODE_UTXOS);
+  assertRefusedByName(result, {
+    operation: "freeze-and-seize.mint",
+    parameter: "recipientAddress",
+    received: "(contains whitespace)",
+  });
+});
+
+test("R-1 — FES register REFUSES a feePayerAddress with a trailing newline", async () => {
+  // The REQUIRED parameter most likely to be read out of a file in the first place.
+  const result = await run(fes, "register", registerParams({ feePayerAddress: FEE_PAYER + "\n" }), REGISTER_UTXOS);
+  assertRefusedByName(result, {
+    operation: "freeze-and-seize.register",
+    parameter: "feePayerAddress",
+    received: "(contains whitespace)",
+  });
+});
+
+test("R-1 BOUNDARY — a `0x`-prefixed address is NOT this guard's business, and still reaches bech32", async () => {
+  // ⚠ PINNED DELIBERATELY, AND IT IS AN OPEN QUESTION, NOT A DECISION.
+  // r4 §Task 1 rules "refuse any value containing whitespace" and §Escalation
+  // names "any whitespace or `null` path" — both scope to whitespace. r4's own
+  // probe table lists `"0x" + <valid>` alongside the whitespace cases, and
+  // §Verification 4 says every probe line must be a named refusal. Those do not
+  // agree, so this test records what the delivered guard ACTUALLY does rather
+  // than asserting the reading I happen to prefer. Escalated in the report.
+  const result = await run(fes, "register", registerParams({ recipientAddress: "0x" + VALID }), REGISTER_UTXOS);
+  assert.ok(result.error instanceof Error);
+  assert.equal(result.error.constructor.name, "ParseError", "still the unnamed bech32 error — whitespace is the ruled scope");
+  assert.equal(result.payTo.length, 0, "it does at least fail rather than substitute");
+});
+
+// ---------------------------------------------------------------------------
+// r4 / R-2 — `null` is the JSON spelling of "unset", and it SILENTLY SUBSTITUTED
+//
+// MEASURED at b7b3618: `register({ recipientAddress: null })` built a
+// transaction paying the FEE PAYER. An HTTP/JSON caller sending
+// `{"recipientAddress": null}` — what `JSON.stringify` emits for a cleared
+// field, and what most config loaders and ORMs produce — minted to the wrong
+// address in silence. `.env` gives `""`; JSON gives `null`; the first round
+// closed one and left the other.
+//
+// ⇒ `null` is PRESENT, not absent. Only `undefined` means absent. The declared
+// type is `Address | undefined`, so no typed caller is broken.
+// ---------------------------------------------------------------------------
+
+const NULL_SITES = [
+  { operation: "freeze-and-seize.register", parameter: "recipientAddress", plugin: fes, method: "register", params: registerParams, utxos: () => REGISTER_UTXOS },
+  { operation: "freeze-and-seize.mint", parameter: "recipientAddress", plugin: fes, method: "mint", params: mintParams, utxos: () => OWN_NODE_UTXOS },
+  { operation: "freeze-and-seize.burn", parameter: "holderAddress", plugin: fes, method: "burn", params: burnParams, utxos: () => burnUtxos(FEE_PAYER) },
+  { operation: "freeze-and-seize.seize", parameter: "holderAddress", plugin: fes, method: "seize", params: seizeParams, utxos: () => seizeUtxos(FEE_PAYER) },
+  { operation: "dummy.register", parameter: "recipientAddress", plugin: dummy, method: "register", params: registerParams, utxos: () => REGISTER_UTXOS },
+  { operation: "dummy.mint", parameter: "recipientAddress", plugin: dummy, method: "mint", params: mintParams, utxos: () => OWN_NODE_UTXOS },
+];
+
+for (const site of NULL_SITES) {
+  test(`R-2 — ${site.operation} REFUSES a null ${site.parameter} instead of defaulting it`, async () => {
+    const result = await run(site.plugin, site.method, site.params({ [site.parameter]: null }), site.utxos());
+    assertRefusedByName(result, { operation: site.operation, parameter: site.parameter, received: "null" });
+    assert.match(result.error.message, /JSON spelling/, "the message must say why null is not absence");
+  });
+
+  test(`R-2 — ${site.operation} still treats an UNDEFINED ${site.parameter} as absent`, async () => {
+    // The other half of the pair, and the one that keeps this a refusal rather
+    // than a behaviour change: undefined must still reach the documented default.
+    const result = await run(site.plugin, site.method, site.params({}), site.utxos());
+    assert.ok(
+      !(result.error instanceof Error) || result.error instanceof HarnessStop,
+      `an omitted ${site.parameter} must still resolve, not refuse: ${result.error?.message}`,
+    );
+  });
+}

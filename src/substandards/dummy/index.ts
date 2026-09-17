@@ -720,11 +720,18 @@ export function dummySubstandard(config: {
      * is where that field points at a real issuer-admin check.
      */
     async thirdPartyTransfer(params: ThirdPartyTransferParams): Promise<UnsignedTx> {
-      const { holderAddress, recipientAddress, tokenPolicyId, assetName, quantity, feePayerAddress: feePayerAddressParam } =
+      const { holderAddress: holderAddressParam, recipientAddress: recipientAddressParam, tokenPolicyId, assetName, quantity, feePayerAddress: feePayerAddressParam } =
         params;
       // ⛔ FIRST, BEFORE ANY OTHER ADDRESS IS RESOLVED — see register. Rebound over
       // the raw parameter so no later read can reach the unchecked value.
       const feePayerAddress = requiredAddress(feePayerAddressParam, "dummy.thirdPartyTransfer", "feePayerAddress");
+      // REQUIRED parameters: there is no fallback to get wrong, but `""` still
+      // reached bech32 decoding and produced an unnamed ParseError. Both halves of
+      // the operation, because guarding only one is worse than guarding neither —
+      // a caller who sees a named refusal on one parameter reasonably infers the
+      // operation validates its addresses.
+      const holderAddress = requiredAddress(holderAddressParam, "dummy.thirdPartyTransfer", "holderAddress");
+      const recipientAddress = requiredAddress(recipientAddressParam, "dummy.thirdPartyTransfer", "recipientAddress");
       const unit = tokenPolicyId + assetName;
       const client = ctx.client;
       // min-UTxO is sized from live protocol parameters, not guessed — the asset
@@ -732,21 +739,8 @@ export function dummySubstandard(config: {
       const coinsPerUtxoByte = (await client.getProtocolParameters()).coinsPerUtxoByte;
       const plbHash = ctx.standardScripts.programmableLogicBase.hash;
 
-      // REQUIRED parameter: there is no fallback to get wrong, but `""` still
-      // reached bech32 decoding and produced an unnamed ParseError.
-      const holderPlbAddr = baseAddress(
-        networkId,
-        plbHash,
-        requiredAddress(holderAddress, "dummy.thirdPartyTransfer", "holderAddress")
-      );
-      // ⛔ THE OTHER HALF OF THE SAME OPERATION. Guarding only holderAddress was
-      // worse than guarding neither: a caller who sees a named refusal on one
-      // parameter reasonably infers the operation validates its addresses.
-      const recipientPlbAddr = baseAddress(
-        networkId,
-        plbHash,
-        requiredAddress(recipientAddress, "dummy.thirdPartyTransfer", "recipientAddress")
-      );
+      const holderPlbAddr = baseAddress(networkId, plbHash, holderAddress);
+      const recipientPlbAddr = baseAddress(networkId, plbHash, recipientAddress);
 
       const holderUtxos = await client.getUtxos(EvoAddress.fromBech32(holderPlbAddr));
       const tokenUtxos = holderUtxos.filter((u) => utxoUnitQty(u, unit) > 0n);

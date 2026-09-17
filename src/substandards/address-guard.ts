@@ -34,13 +34,23 @@ import type { Address } from "../types.js";
 // ---------------------------------------------------------------------------
 
 /**
- * A value is usable as an address only if it is a string with non-whitespace
- * content. Whitespace-only is refused with `""`: bech32 admits no whitespace,
- * so nothing valid is excluded, and `" "` reaches the caller from the same
- * unfilled-form and trimmed-`.env` sources that produce `""`.
+ * A value is usable as an address only if it is a non-empty string containing NO
+ * WHITESPACE ANYWHERE.
+ *
+ * ⛔ THIS USED TO COMPUTE `value.trim()` TO DECIDE EMPTINESS AND THEN THROW THE
+ * TRIM AWAY. `"   "` was a named refusal while `<valid> + "\n"` fell straight
+ * through to the unnamed bech32 `ParseError` — and **a trailing newline is what
+ * you get reading an address out of a file**, which is the `.env` route this
+ * whole guard exists for. The argument that justified refusing whitespace at all
+ * ("bech32 admits no whitespace, so no valid address is excluded") covers ANY
+ * whitespace-containing string; the implementation took it halfway.
+ *
+ * ⚠ REFUSED, NEVER TRIMMED. Accepting `" addr1..."` by silently repairing it
+ * would hide the bug that produced the padding — the same silent-substitution
+ * anti-pattern this module was written to delete.
  */
 function isUsableAddress(value: unknown): value is Address {
-  return typeof value === "string" && value.trim().length > 0;
+  return typeof value === "string" && value.length > 0 && !/\s/.test(value);
 }
 
 /** Describe what arrived without letting a large object into the message. */
@@ -49,7 +59,11 @@ function describeReceived(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "string") {
     if (value.length === 0) return '"" (the empty string)';
+    // Three distinguishable failures, because the caller's next move differs:
+    // an empty field was never filled in, a whitespace-only one was filled with
+    // nothing, and a padded one holds a real address that arrived dirty.
     if (value.trim().length === 0) return `${JSON.stringify(value)} (whitespace only)`;
+    if (/\s/.test(value)) return `${JSON.stringify(value)} (contains whitespace)`;
     return JSON.stringify(value);
   }
   if (typeof value === "object") return `a ${Array.isArray(value) ? "array" : "object"}`;
@@ -57,13 +71,40 @@ function describeReceived(value: unknown): string {
 }
 
 /**
+ * Whitespace inside an otherwise plausible address gets its own sentence: the
+ * caller holds a real address that arrived dirty, and the fix is at the source
+ * that dirtied it, not here.
+ */
+const WHITESPACE_NOTE =
+  " Whitespace is never part of a bech32 address, and a leading or trailing space or newline is " +
+  "exactly what reading one out of a file or a `.env` produces. It is REFUSED rather than trimmed: " +
+  "repairing a caller's data silently hides whatever produced the padding.";
+
+/**
+ * `null` gets its own sentence too. It is the JSON spelling of a CLEARED field —
+ * what `JSON.stringify` emits for one, and what most config loaders and ORMs
+ * produce — and defaulting it is how an HTTP caller silently pays the wrong
+ * address. Only `undefined` means absent.
+ */
+const NULL_NOTE =
+  " `null` is the JSON spelling of a CLEARED field, not of an absent one: only omitting the " +
+  "parameter (or passing `undefined`) selects the documented default. Defaulting `null` would send " +
+  "the transaction somewhere the caller never named.";
+
+/**
  * The single refusal. Names the OPERATION, the PARAMETER and what was RECEIVED,
  * then says what the caller should do instead — the habit this repo keeps for
  * every error: say what was actually available.
  */
 function refuseAddress(operation: string, parameter: string, value: unknown, remedy: string): never {
+  const note =
+    value === null
+      ? NULL_NOTE
+      : typeof value === "string" && /\s/.test(value)
+        ? WHITESPACE_NOTE
+        : "";
   throw new Error(
-    `${operation}: ${parameter} is not a usable address — received ${describeReceived(value)}. ${remedy}`
+    `${operation}: ${parameter} is not a usable address — received ${describeReceived(value)}. ${remedy}${note}`
   );
 }
 
@@ -74,8 +115,15 @@ function refuseAddress(operation: string, parameter: string, value: unknown, rem
 /**
  * An OPTIONAL address with a documented default.
  *
- * absent (`undefined`/`null`) ⇒ `fallback`, which is the existing, documented
- * behaviour and must not change. Present but unusable ⇒ refused by name.
+ * absent (`undefined`) ⇒ `fallback`, which is the existing, documented behaviour
+ * and must not change. Present but unusable ⇒ refused by name.
+ *
+ * ⛔ `null` IS PRESENT, NOT ABSENT, AND IS REFUSED. It used to default, so an
+ * HTTP/JSON caller sending `{"recipientAddress": null}` — what `JSON.stringify`
+ * emits for a cleared field — minted to the fee payer in silence. The declared
+ * type is `Address | undefined`, so `null` was never a typed input: refusing it
+ * breaks no typed caller and converts a silent wrong-address into a named
+ * refusal for every untyped one.
  */
 export function resolveOptionalAddress(
   value: unknown,
@@ -84,7 +132,7 @@ export function resolveOptionalAddress(
   parameter: string,
   fallbackParameter: string
 ): Address {
-  if (value === undefined || value === null) return fallback;
+  if (value === undefined) return fallback;
   if (!isUsableAddress(value)) {
     refuseAddress(
       operation,
@@ -103,8 +151,9 @@ export function resolveOptionalAddress(
  * `seize`'s `holderAddress`, where absent legitimately means "search only the
  * fee payer and the destination".
  *
- * absent ⇒ `undefined`, and the caller's own conditional decides. Present but
- * unusable ⇒ refused by name rather than silently dropped.
+ * absent (`undefined`) ⇒ `undefined`, and the caller's own conditional decides.
+ * Present but unusable ⇒ refused by name rather than silently dropped. `null` is
+ * PRESENT — see `resolveOptionalAddress`.
  */
 export function optionalAddressOrAbsent(
   value: unknown,
@@ -112,7 +161,7 @@ export function optionalAddressOrAbsent(
   parameter: string,
   absentMeans: string
 ): Address | undefined {
-  if (value === undefined || value === null) return undefined;
+  if (value === undefined) return undefined;
   if (!isUsableAddress(value)) {
     refuseAddress(
       operation,
