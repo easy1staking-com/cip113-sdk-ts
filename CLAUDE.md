@@ -1,7 +1,7 @@
 # cip113-sdk-ts
 
 TypeScript SDK for [CIP-113 Programmable Tokens](https://cips.cardano.org/cip/CIP-0113) on
-Cardano. Published to npm as `@easy1staking/cip113-sdk-ts` (Apache-2.0, currently v0.3.1).
+Cardano. Published to npm as `@easy1staking/cip113-sdk-ts` (Apache-2.0, currently v0.10.0).
 
 <!-- fabbrica:begin -->
 ## La Fabbrica
@@ -30,12 +30,34 @@ transactions*; it does not run services, hold keys, index the chain, or provide 
   them. A `.ak` file appearing here is an escalation.
 - Backend services, indexers, schedulers, or anything with a database.
 - Frontend/dApp code, wallet connectors, React components.
-- Protocol *deployment/bootstrap* tooling, **with one scoped exception** (approved 2026-08-14):
-  bootstrap code that exists solely to stand up a test fixture — deploying a protocol instance
-  into a local devnet so the harness has a `DeploymentParams` to operate against — is permitted,
-  provided it lives under the test/example tree, is excluded from the npm tarball, and is never
-  presented as a supported way to deploy a production protocol. Deploying a real protocol
-  instance remains another system's job: `DeploymentParams` is an input to this SDK.
+- Protocol deployment **orchestration** — running a deployment, holding keys, deciding when to
+  submit, waiting on confirmations, funding wallets, or talking to a faucet. That is the caller's
+  job and it is where this boundary now sits.
+
+**Protocol bootstrap — AMENDED 2026-09-17 (Giovanni, first-hand), superseding the 2026-08-14
+test-fixture exception.** Building the transactions that stand up a protocol instance **does**
+belong here, and is exported: it is the same thing this SDK already does — *build and return
+unsigned transactions* — applied to the deployment sequence. `DeploymentParams` stops being only
+an input; the SDK can now also produce the transactions whose submission yields one.
+
+⛔ **Why this changed, so nobody reverts it as scope creep:** the platform could not import
+`test/harness/bootstrap.ts` (the `files` allowlist ships only `dist` and `blueprints`), so it
+maintained **its own port of a protocol-critical sequence**. That port had already diverged — it
+reserved seed UTxOs from coin selection where the harness did not — and the divergence was
+*correct*, which is the kind that never announces itself. Two implementations, one right and the
+other not yet wrong, is worse than one supported export.
+
+⛔ **WHAT MUST NOT COME WITH IT.** The harness version is a devnet fixture and carries fixture
+values. Exported code must not ship: a hardcoded mnemonic or any seed phrase; `localhost` or any
+other network endpoint as a default; a fixture-chosen **security parameter** as a default (see
+`maxInlineDatumBytes` — its own comment records that the production value is deferred); hardcoded
+nonces; placeholder policy ids; or `any` where a real type belongs. **A value the caller must
+decide is a required input, never a default.** Key handling and submission stay outside: the SDK
+returns unsigned transactions and does not sign, submit, or await.
+
+⚠ **The devnet harness stays** under `test/`, excluded from the tarball, as the fixture it always
+was. It should consume the exported builders rather than duplicate them — a harness that drifts
+from the exported path is the same defect this amendment exists to remove, one level in.
 
 **Allowed technologies.** TypeScript (strict, ES2022, ESM-only, `moduleResolution: bundler`),
 compiled with `tsc` — no bundler, no transpiler, no build framework. Node 20+.
@@ -68,7 +90,7 @@ Proven on 2026-08-14/15, Node v20.20.2 / npm 10.8.2, from a clean `npm ci`:
 | `npm ci` | Lockfile installs cleanly | green |
 | `npm run typecheck` | `tsc --noEmit` over `src/**` — whole public surface typechecks | green — exit 0 |
 | `npm run build` | `tsc` emits `dist/` (js + .d.ts + maps) — the published artifact compiles | green — exit 0 |
-| `npm test` | build + offline unit tests. **Never touches the network.** | green — 31 pass, 0 fail, 0 skipped |
+| `npm test` | build + offline unit tests. **Never touches the network.** | green — 236 pass, 0 fail, 0 skipped (2026-09-17) |
 | `npm run test:devnet` | build + devnet tests against a live Yaci chain | green — 4 pass, 0 fail, 0 skipped (requires a devnet) |
 
 Other scripts: `npm run dev` (`tsc --watch`), `npm run clean` (`rm -rf dist`),
