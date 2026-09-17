@@ -173,6 +173,42 @@ export async function submitToOgmios(ogmiosUrl: string, cborHex: string): Promis
 }
 
 /**
+ * Block until a submitted transaction is visible in the LEDGER's UTxO set.
+ *
+ * ⛔ A SUBMISSION IS NOT A STATE CHANGE. `submitTransaction` returning an id
+ * means the node accepted the transaction into its mempool, not that the ledger
+ * has applied it. Anything that depends on the effect — a withdrawal against a
+ * credential the previous transaction registered, say — validates against a
+ * ledger state that may not contain it yet, and fails in a way that looks
+ * exactly like the effect never happening. That would turn a timing artefact
+ * into a false verdict on the question under test.
+ *
+ * Asks the LEDGER (`queryLedgerState/utxo`) rather than an indexer: Kupo and
+ * yaci-store both trail the node, and this has to be ahead of them, not behind.
+ * Every transaction here produces at least a change output at index 0, so its
+ * presence is the confirmation signal.
+ */
+export async function awaitTxOnChain(
+  ogmiosUrl: string,
+  txId: string,
+  { timeoutMs = 60_000, intervalMs = 500 }: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await ogmiosRpc(ogmiosUrl, "queryLedgerState/utxo", {
+      outputReferences: [{ transaction: { id: txId }, index: 0 }],
+    });
+    if (Array.isArray(res.result) && res.result.length > 0) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `awaitTxOnChain: ${txId} did not appear in the ledger UTxO set within ${timeoutMs}ms. ` +
+      `It was accepted into the mempool but never applied, so anything downstream of its ` +
+      `effect would be measuring the wrong ledger state.`,
+  );
+}
+
+/**
  * Is a stake credential registered, as the LEDGER currently sees it?
  *
  * ⚠ TREAT AN EMPTY RESULT AS "NO ANSWER", NOT AS "NOT REGISTERED". Measured on

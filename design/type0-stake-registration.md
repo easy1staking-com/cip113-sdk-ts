@@ -2,9 +2,22 @@
 
 Investigation, 2026-09-17. Branch `feat/type0-stake-registration`, off `main` @ `f42758e`.
 
-**Status: Q3 SETTLED ON CHAIN.** Every verdict below was obtained by submitting a
-transaction to a live Conway ledger and reading its answer. Nothing here is derived
-from a specification, a changelog, or a reading of ledger source.
+**Status: Q3 AND THE GATE (Q4) BOTH SETTLED ON CHAIN.** Every verdict below was
+obtained by submitting a transaction to a live Conway ledger and reading its answer.
+Nothing here is derived from a specification, a changelog, or a reading of ledger
+source.
+
+| | Verdict |
+|---|---|
+| **Q3** — does the ledger accept a witnessless type-0 `StakeRegistration` for a SCRIPT credential? | **YES** |
+| **Q4** — is a withdraw-0 accepted against a credential registered that way? | **YES** |
+| **Q1** — is there a route to a pre-built certificate in Evolution 0.5.2? | a route exists, and it is a dead end |
+| **Q2** — upstream change or SDK-side assembler? | assembler now; the upstream patch has an API break in it |
+
+Q4 is the one that matters. Q3 alone establishes only that the ledger *records* the
+registration; the six credentials exist solely to carry a withdraw-0, so if Q4 had
+been "no", Q3 would have been a curiosity and the bootstrap would stay at five
+transactions. It is not "no".
 
 ---
 
@@ -33,9 +46,15 @@ Local Yaci DevKit devnet, the only chain used. No preview, no preprod, no mainne
 | `maxTransactionSize` | 16,384 bytes |
 | `minFeeCoefficient` / `minFeeConstant` | 44 / 155,381 |
 
-Probe: `test/devnet/type0-stake-registration.test.ts`. Assembler:
-`test/harness/raw-tx.ts`. Run with `npx tsx --test test/devnet/type0-stake-registration.test.ts`,
-or as part of `npm run test:devnet`.
+Probes: `test/devnet/type0-stake-registration.test.ts` (Q3) and
+`test/devnet/type0-withdraw.test.ts` (Q4). Assembler: `test/harness/raw-tx.ts`.
+
+⛔ **Run them serially.** Both drive the same devnet wallet and partition its UTxO set
+at `before` time; run concurrently they hand overlapping inputs to two builders and
+the loser is refused with 3117, which arrives as a refusal of whichever arm was
+unlucky and reads like that arm's verdict. Measured: `npx tsx --test <both files>`
+fails the subject arm, and the same two files with `--test-concurrency=1` pass 9/9.
+`npm run test:devnet` already passes that flag.
 
 ---
 
@@ -165,6 +184,100 @@ Unmutated: `# tests 6 / # pass 6 / # fail 0 / # skipped 0`.
 
 ---
 
+## Q4 — the gate: does a withdraw-0 work against such a credential?
+
+### **YES.** A withdraw-0 against a type-0-registered script credential is accepted.
+
+This is the operational question. The six credentials a CIP-113 bootstrap registers
+exist only so that `programmable_logic_global`, `transfer`, `third_party`,
+`unfracking`, `issuance_logic` and `upgrade_multisig` can each carry a withdraw-0 on
+every programmable transaction. A registration that cannot be withdrawn against is
+worth nothing.
+
+Probe: `test/devnet/type0-withdraw.test.ts`.
+
+**The instrument.** `example_transfer_logic.issuer_admin_contract` from the
+freeze-and-seize blueprint — a real Plutus V3 validator this repo ships, not a
+stand-in, and deliberately *not* a native script. It is the only shipped validator
+that reaches a SUCCEEDING withdraw with no protocol state: its handler is satisfied
+by the admin signature alone (`permitted_cred` = this wallet's payment key hash, plus
+an `addSigner`), and its unused-but-hashed `_asset_name` parameter yields unlimited
+fresh credentials so no arm can be perturbed by one another arm already registered.
+It also has a `publish` handler, which the `RegCert` control arm needs in order to
+register at all.
+
+Measured while selecting it: the dummy substandard's `transfer.transfer` withdraw
+*refuses* (3010/3012, empty trace list), and the standard validators all require
+registry or protocol state. Neither could serve.
+
+All three arms build the **identical** withdrawal transaction. The only thing that
+varies is what happened to the credential beforehand.
+
+**NEGATIVE CONTROL — never registered.** Reproduces the failure mode `bootstrap.ts`
+documents, verbatim:
+
+```json
+{
+  "code": 3141,
+  "message": "The transaction contains incomplete or invalid rewards withdrawals. When present, rewards withdrawals must consume rewards in full, there cannot be any leftover. The field 'data.incompleteWithdrawals' contains a map of withdrawals and their current rewards balance.",
+  "data": {
+    "incompleteWithdrawals": {
+      "stake_test17z5gdhgge2acmecw88ywsneemrkrh708ztqfgdzkcsxk2sch920y3": { "ada": { "lovelace": 0 } }
+    }
+  }
+}
+```
+
+Worth noting for anyone who meets it: the message talks about *leftover rewards* and
+reads as a balance problem. It means the credential is not registered. That is why
+the probe asserts on the reward account the ledger names, not merely on the code.
+
+**CONTROL — registered by `RegCert` with the script witness**, publish handler
+executed, i.e. exactly what `bootstrap.ts` does today:
+
+```
+withdraw-0 ACCEPTED  00a43da429179ac43f001f2584d055b62f7fbc39540e0d8eb9b9b4135e2aef03
+```
+
+**SUBJECT — registered by a witnessless type-0 `StakeRegistration`:**
+
+```
+register type-0  268 bytes, witnessless -> accepted
+withdraw-0 ACCEPTED  0aca004046b2c7be029aeb00202b5dc1030ee73e08ed97da367e97ab15cd62b4
+```
+
+The control and the subject are accepted alike. The ledger keeps one registration map
+and does not record which certificate populated it.
+
+### Proof of harness
+
+| Mutation | Expected red | Observed |
+|---|---|---|
+| subject registers a *different* credential than it withdraws against | arm 3 | red with 3141 |
+| control registers a *different* credential than it withdraws against | arm 2 | red with 3141 (same run) |
+| negative control registers its credential after all | arm 1 | red |
+
+Unmutated: `# tests 3 / # pass 3 / # fail 0 / # skipped 0`.
+
+### One confound met and fixed, not reported as the answer
+
+The first run of this file returned ledger code **3117**, "unknown UTxO references as
+inputs", on the subject arm — because the builder had been handed one shared UTxO
+snapshot for all four of its builds and selected one an earlier arm had already spent.
+
+That is worth recording because of how it fails: a 3117 is a *refusal of the subject
+arm's withdrawal*, so the subject assertion fired and reported "THE GATE IS SHUT" —
+a false negative on the only question the file exists to settle, caused by coin
+selection. Re-reading the wallet between arms does not fix it either, since Kupo
+trails the node. Each build now gets a disjoint, pre-selected slice of inputs.
+
+The same class is why the probe blocks on `awaitTxOnChain` between registering and
+withdrawing: a submission id means the mempool accepted the transaction, not that the
+ledger applied it, and a withdrawal raced against its own registration fails with
+3141 — which reads exactly like the answer.
+
+---
+
 ## Q1 — is there a route to a pre-built certificate in Evolution 0.5.2?
 
 Verified independently, not inherited. Two findings, and the second contradicts the
@@ -285,25 +398,33 @@ break in it, not a one-line tweak, and it should be reported upstream on its own
 merits: **Evolution 0.5.2 mis-balances any transaction containing a type-0
 registration or deregistration, whatever route put it there.**
 
-Recommendation: build on the SDK-side assembler for the bootstrap; open the balance
-bug upstream separately, since it is a correctness defect independent of this feature.
+Recommendation: build on the SDK-side assembler for the bootstrap.
+
+**And report the balance bug upstream regardless of what we decide here.** It is a
+correctness defect in Evolution 0.5.2 with nothing to do with CIP-113: any consumer
+who gets a `StakeRegistration` or `StakeDeregistration` into a transaction by any
+route will have it mis-balanced by exactly one deposit and refused by the ledger with
+3123. The type layer models both certificates, so a consumer has every reason to
+think they are supported. Measured here twice — once through the `compose` injection
+route (valueProduced exceeding valueConsumed by 2,000,000) and once by deliberately
+omitting the deposit from a hand-assembled transaction, which produced the identical
+gap. Filing it does not depend on this investigation's outcome.
 
 ---
 
 ## What this does NOT establish
 
-- **Whether a withdraw-0 against a type-0-registered script credential is accepted.**
-  This is the operational requirement — the six credentials exist so that
-  `programmable_logic_global` and friends can carry a withdrawal on every programmable
-  transaction, and `bootstrap.ts` records that an unregistered credential fails with
-  code 3141. The ledger keeps one registration map with no record of which certificate
-  populated it, so there is every reason to expect it works — but *expecting* is not
-  what this document is for. The probe registered `always_fail` credentials, which have
-  no withdraw handler, so the question could not be answered here. **This is the next
-  thing to settle, and the one-transaction bootstrap should not be planned as done
-  until it is.**
+- **The full six-credential protocol end to end.** Q4 was settled with FES
+  `issuer_admin` credentials, not with the actual `programmable_logic_global` /
+  `transfer` / `third_party` / `unfracking` / `issuance_logic` / `upgrade_multisig`
+  set, because those need a bootstrapped protocol to reach a succeeding withdraw. The
+  ledger rule exercised is credential-generic and the arms are controlled, so the
+  result should carry — but nobody has yet run `bootstrap.ts` with its tx5 switched to
+  the type-0 route and watched a real programmable transfer succeed. That is the
+  obvious next slice, and it is now a build task rather than an open question.
 - **Whether such a credential can later be deregistered**, and by which certificate
-  (`StakeDeregistration` type 1, or `UnregCert` type 8 with an explicit refund).
+  (`StakeDeregistration` type 1, or `UnregCert` type 8 with an explicit refund). Note
+  that Evolution mis-balances both of those too, per Q2.
 - **Whether the three-into-one merge actually fits.** 438 bytes for six registrations
   is measured; the merged registration-plus-reference-script-publication transaction
   was never built, and reference script outputs are large.
@@ -314,14 +435,33 @@ bug upstream separately, since it is a correctness defect independent of this fe
 - **Whether a future hard fork keeps this.** A deliberately-retained legacy path is a
   reasonable candidate for removal. The probe is written as a regression guard so the
   removal would surface as a red test rather than as a broken bootstrap.
-- **`queryLedgerState/rewardAccountSummaries` is not trusted here.** It returned `{}`
-  for the devnet's own stake-pool reward account, which is necessarily registered, so
-  it cannot distinguish "absent" from "not visible to this query". It is logged by the
-  probe and is never the basis of an assertion; the 3145 and 3123 refusals are.
+
+## An instrument that was pointed at nothing
+
+The obvious way to check whether a credential is registered is
+`queryLedgerState/rewardAccountSummaries`. **It does not work for this, and the next
+person will reach for it.**
+
+Asked about a freshly-registered script credential it answered `{}`. That reads as
+"not registered" and would have contradicted the registration finding. Before
+believing it, it was pointed at a control: the devnet's OWN stake-pool reward account,
+taken from `queryLedgerState/stakePools` and therefore necessarily registered. It
+answered `{}` for that too.
+
+So the empty result is a fact about the query, not about the ledger — it cannot
+distinguish "absent" from "not visible to this query", and any verdict resting on it
+would have been backwards. The probes log it and never assert on it.
+
+What replaced it is evidence the ledger is forced to produce, by refusing transactions
+it would otherwise accept: the **3145** on a double registration (which also names the
+credential as `"from": "script"`), the **3123** whose gap is exactly the deposit, and
+the **3141** on an unregistered withdrawal. A rule the ledger enforces is a better
+instrument than a query the ledger merely offers.
 
 ## Files
 
 | Path | What |
 |---|---|
 | `test/harness/raw-tx.ts` | Assembler, Ogmios transport, certificate constructors the builder cannot emit. Investigation scaffolding — deliberately not exported from `src/`. |
-| `test/devnet/type0-stake-registration.test.ts` | The six-arm probe. |
+| `test/devnet/type0-stake-registration.test.ts` | Q3: the six-arm registration probe. |
+| `test/devnet/type0-withdraw.test.ts` | Q4: the three-arm withdraw-0 probe. |

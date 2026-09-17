@@ -61,6 +61,15 @@
  * script which would ABORT if it ran is evidence that the script is not merely
  * unwitnessed but never executed at all.
  *
+ * ⛔ RUN SERIALLY. These probes drive ONE devnet wallet and each partitions its
+ * UTxO set at `before` time. Two probe files running CONCURRENTLY snapshot the same
+ * wallet and hand overlapping inputs to two builders, and the loser is refused with
+ * ledger code 3117 ("unknown UTxO references as inputs") — which arrives as a
+ * REFUSAL of whichever arm was unlucky and reads exactly like that arm's verdict.
+ * MEASURED: `npx tsx --test <both probe files>` fails the subject arm; the same two
+ * files with `--test-concurrency=1` pass 9/9. `npm run test:devnet` already passes
+ * that flag, so the suite is safe; an ad-hoc invocation is not.
+ *
  * There is no skip path: see test/harness/yaci.mjs.
  */
 
@@ -99,7 +108,6 @@ interface Fixture {
   client: any;
   addr: any;
   utxos: ReadonlyArray<any>;
-  spendable: SpendableUtxo[];
   params: RawTxParams;
   freshScriptHash: () => string;
   /** Hands out a distinct wallet UTxO per arm so no two arms double-spend. */
@@ -138,7 +146,6 @@ before(async () => {
     client,
     addr,
     utxos,
-    spendable: big,
     params,
     freshScriptHash: () => builders.alwaysFail(randomBytes(32).toString("hex")).hash,
     nextInput: () => [big[cursor++]!],
