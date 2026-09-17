@@ -724,7 +724,14 @@ export function dummySubstandard(config: {
         plbHash,
         requiredAddress(holderAddress, "dummy.thirdPartyTransfer", "holderAddress")
       );
-      const recipientPlbAddr = baseAddress(networkId, plbHash, recipientAddress);
+      // ⛔ THE OTHER HALF OF THE SAME OPERATION. Guarding only holderAddress was
+      // worse than guarding neither: a caller who sees a named refusal on one
+      // parameter reasonably infers the operation validates its addresses.
+      const recipientPlbAddr = baseAddress(
+        networkId,
+        plbHash,
+        requiredAddress(recipientAddress, "dummy.thirdPartyTransfer", "recipientAddress")
+      );
 
       const holderUtxos = await client.getUtxos(EvoAddress.fromBech32(holderPlbAddr));
       const tokenUtxos = holderUtxos.filter((u) => utxoUnitQty(u, unit) > 0n);

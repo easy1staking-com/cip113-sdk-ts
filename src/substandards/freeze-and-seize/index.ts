@@ -36,6 +36,7 @@ import type {
 } from "../interface.js";
 import {
   optionalAddressOrAbsent,
+  requiredAddress,
   resolveOptionalAddress,
 } from "../address-guard.js";
 import {
@@ -1579,9 +1580,19 @@ export function freezeAndSeizeSubstandard(config: {
       if (holderAddress) {
         searchAddresses.push(baseAddress(networkId, plbHash, holderAddress));
       }
+      // WHERE THE SEIZED ASSETS ARE SENT, and it was unguarded — the same
+      // operation as the holder above, so leaving it out would ship `seize`
+      // half-guarded. Resolved ONCE, here, and used for both the search set and
+      // the destination output below: two reads of one parameter must not be
+      // able to disagree about whether it was checked.
+      const destination = requiredAddress(
+        destinationAddress,
+        "freeze-and-seize.seize",
+        "destinationAddress"
+      );
       searchAddresses.push(
         baseAddress(networkId, plbHash, feePayerAddress),
-        baseAddress(networkId, plbHash, destinationAddress),
+        baseAddress(networkId, plbHash, destination),
       );
       // Deduplicate
       const uniqueAddresses = [...new Set(searchAddresses)];
@@ -1681,7 +1692,7 @@ export function freezeAndSeizeSubstandard(config: {
       const tokenDatum = voidData();
 
       // 5. Build recipient PLB address
-      const recipientPlbAddr = baseAddress(networkId, plbHash, destinationAddress);
+      const recipientPlbAddr = baseAddress(networkId, plbHash, destination);
 
       // 6. Compute remaining assets
       const remainingTokens = new Map<string, bigint>();

@@ -31,6 +31,22 @@
  * The transaction build is deliberately cut short by a sentinel thrown from the
  * first `payToAddress`: everything this file asserts is decided before that
  * point, and running further would require a chain.
+ *
+ * ⛔ NOT EVERY SITE HERE IS REACHABLE IN THE SHIPPED ARTEFACT, AND THAT CHANGES
+ * WHAT A GREEN READING MEANS. `dummySubstandard.init()` calls
+ * `requirePublishHandlers()`, which refuses the SHIPPED dummy blueprint outright
+ * — its validators carry no `.publish` handler (the W-D / T-D08 blocker). That
+ * refusal precedes every operation, so dummy's sites are LATENT: live,
+ * published code that no caller can currently reach. ⇒ **The defects actually
+ * live in 0.10.0 are the four freeze-and-seize sites, three of them silent.**
+ *
+ * The fixture blueprint below — a copy declaring those two handlers — is the
+ * ONLY reason the dummy tests are not vacuous. Without it every dummy test
+ * would go green against `init()`'s refusal while never reaching the address
+ * decision at all: **a guard pointed at an unreachable call site is a guard
+ * observed AGREEING, not a guard observed WORKING.** This repo has been bitten
+ * by that shape before — a suite reporting "0 skipped" for a file the runner
+ * never matched.
  */
 
 import { test } from "node:test";
@@ -518,4 +534,87 @@ test("site 7 — dummy thirdPartyTransfer REFUSES an ABSENT holderAddress by nam
 test("site 7 — dummy thirdPartyTransfer with a VALID holderAddress still searches that holder", async () => {
   const result = await run(dummy, "thirdPartyTransfer", tptParams({}), tptUtxos(HOLDER));
   assert.equal(result.getUtxos[0], plb(HOLDER), "a valid holderAddress is used unchanged");
+});
+
+// ---------------------------------------------------------------------------
+// Site 8 (r2) — dummy.thirdPartyTransfer, recipientAddress  (REQUIRED, unguarded)
+//
+// ⛔ THE NEXT LINE AFTER SITE 7, in the same function, destructured from the
+// same params object. Guarding only `holderAddress` left the operation
+// HALF-GUARDED, which is worse than guarding neither: a caller who sees a named
+// refusal on one parameter reasonably infers the operation validates its
+// addresses.
+// ---------------------------------------------------------------------------
+
+test("site 8 — dummy thirdPartyTransfer REFUSES an empty recipientAddress by name", async () => {
+  const result = await run(dummy, "thirdPartyTransfer", tptParams({ recipientAddress: "" }), tptUtxos(HOLDER));
+  assertRefusedByName(result, { operation: "dummy.thirdPartyTransfer", parameter: "recipientAddress" });
+  assert.doesNotMatch(result.error.message, /ParseError/, "the unnamed bech32 ParseError is what this replaces");
+  assert.doesNotMatch(
+    result.error.message,
+    /holderAddress/,
+    "the refusal must name the parameter that is wrong, not its guarded neighbour",
+  );
+});
+
+test("site 8 — dummy thirdPartyTransfer REFUSES an ABSENT recipientAddress by name (it is REQUIRED)", async () => {
+  const result = await run(dummy, "thirdPartyTransfer", tptParams({ recipientAddress: undefined }), tptUtxos(HOLDER));
+  assertRefusedByName(result, {
+    operation: "dummy.thirdPartyTransfer",
+    parameter: "recipientAddress",
+    received: "undefined",
+  });
+  assert.match(result.error.message, /REQUIRED/, "there is no documented default here to fall back to");
+});
+
+test("site 8 — dummy thirdPartyTransfer with a VALID recipientAddress still pays that recipient", async () => {
+  const result = await run(dummy, "thirdPartyTransfer", tptParams({}), tptUtxos(HOLDER));
+  // Pinned to the reading MEASURED at f42758e: the seized supply goes to the
+  // recipient's PLB address, and the holder's PLB is searched for it first.
+  assertTargeted(result, plb(RECIPIENT), "a valid recipientAddress is used unchanged");
+  assert.equal(result.getUtxos[0], plb(HOLDER), "and the holder is still where the tokens are sought");
+});
+
+// ---------------------------------------------------------------------------
+// Site 9 (r2) — freeze-and-seize.seize, destinationAddress  (REQUIRED, unguarded)
+//
+// Site 4's own operation, and the parameter that says WHERE THE SEIZED ASSETS
+// ARE SENT. It is read twice — once into the search set, once as the output —
+// so it is resolved ONCE and both reads use the resolved value: two reads of one
+// parameter must not be able to disagree about whether it was checked.
+// ---------------------------------------------------------------------------
+
+test("site 9 — FES seize REFUSES an empty destinationAddress by name", async () => {
+  const result = await run(fes, "seize", seizeParams({ holderAddress: HOLDER, destinationAddress: "" }), seizeUtxos(HOLDER));
+  assertRefusedByName(result, { operation: "freeze-and-seize.seize", parameter: "destinationAddress" });
+  assert.doesNotMatch(
+    result.error.message,
+    /holderAddress/,
+    "the refusal must name the parameter that is wrong, not its guarded neighbour",
+  );
+  assert.deepEqual(result.getUtxos, [], "no address may be searched once the destination is refused");
+});
+
+test("site 9 — FES seize REFUSES an ABSENT destinationAddress by name (it is REQUIRED)", async () => {
+  const result = await run(fes, "seize", seizeParams({ holderAddress: HOLDER, destinationAddress: undefined }), seizeUtxos(HOLDER));
+  assertRefusedByName(result, {
+    operation: "freeze-and-seize.seize",
+    parameter: "destinationAddress",
+    received: "undefined",
+  });
+  assert.match(result.error.message, /REQUIRED/, "there is no documented default here to fall back to");
+});
+
+test("site 9 — FES seize with a VALID destinationAddress still sends the seized assets there", async () => {
+  // The token is planted at the DESTINATION's PLB deliberately: the search loop
+  // BREAKS on the first hit, so this is the only fixture under which the
+  // destination's place in the search order is observable at all.
+  const result = await run(fes, "seize", seizeParams({ holderAddress: HOLDER }), seizeUtxos(DESTINATION));
+  // Pinned to the reading MEASURED at f42758e — both the order and the target.
+  assertTargeted(result, plb(DESTINATION), "a valid destinationAddress is used unchanged");
+  assert.deepEqual(
+    result.getUtxos.slice(0, 3),
+    [plb(HOLDER), plb(FEE_PAYER), plb(DESTINATION)],
+    "holder, then feePayer, then destination — the f42758e search order, unchanged",
+  );
 });
