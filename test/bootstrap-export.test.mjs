@@ -32,7 +32,10 @@ import { fileURLToPath } from "node:url";
 import {
   Assets as EvoAssets,
   Address as EvoAddress,
+  Bytes,
+  Data,
   InlineDatum,
+  UPLC,
   Transaction as EvoTransaction,
   TransactionHash as EvoTransactionHash,
 } from "@evolution-sdk/evolution";
@@ -50,6 +53,9 @@ import {
   assertDeploymentScripts,
   buildEvoScript,
   multisigScriptDatum,
+  createStandardScripts,
+  ISSUANCE_SPLICE_MARKER,
+  MAX_NEXT,
   outputAssets,
   scriptAddress,
   UNFRACKING_DISABLED,
@@ -103,6 +109,156 @@ const previewConfig = (overrides = {}) => ({
   maxInlineDatumBytes: BigInt(REAL.maxInlineDatumBytes),
   unfracking: "enabled",
   ...overrides,
+});
+
+// ---------------------------------------------------------------------------
+// THE GENESIS DATUMS, BUILT FROM SOURCES THAT ARE NOT `planBootstrap` (F-2)
+// ---------------------------------------------------------------------------
+//
+// ⛔ WHY THIS SECTION EXISTS, AND IT IS THIS REPO'S OLDEST TRAP WEARING A NEW
+// FACE. Round 1 asserted the genesis datums against `plan.datums.*` — the
+// output of the very function under test. That is a self-comparison, and the
+// audit measured what it cost: TWO mutations inside `planBootstrap` survived
+// the whole offline suite GREEN.
+//
+//   * swapping `issuanceLogicCred` with `transferCred` in the params datum —
+//     the exact defect the module's own comment warns about. Both are
+//     `Credential`, both 28 bytes; the datum has the right arity, passes
+//     `params_wellformed`, decodes into a well-formed record, and hands
+//     `issuance_mint` the TRANSFER credential as its issuance authority.
+//     Nothing at deploy time catches it.
+//   * moving the registry sentinel `next` by ONE BYTE, from ff×30 to
+//     ff×29 + fe. The origin node then claims a successor that does not exist.
+//
+// Both are caught on devnet. CI never runs devnet.
+//
+// ⇒ Every expectation below is built from the LIVE preview record's own named
+// fields, or from the blueprint, or from a literal written here — and none of
+// them from `planBootstrap`. The constructors are raw `Data.constr` rather than
+// this package's `protocolParamsDatum` / `registryNodeDatum` encoders, so a
+// swap inside an ENCODER cannot move both sides together either.
+
+/** Aiken `Credential`: VerificationKey is constructor 0, Script is constructor 1. */
+const scriptCred = (hash) => Data.constr(1n, [Data.bytearray(hash)]);
+const keyCred = (hash) => Data.constr(0n, [Data.bytearray(hash)]);
+
+/**
+ * The params datum, FIELD BY FIELD FROM THE LIVE RECORD, in upstream's order.
+ *
+ * ⛔ THE INDEX COMMENTS ARE THE ASSERTION. alpha.4 INSERTED `issuance_logic_cred`
+ * at index 1 and displaced `transfer_cred` to index 2. Reading the record's
+ * fields BY NAME and placing them BY INDEX here is what makes a swap inside
+ * `planBootstrap` visible: `issuanceLogic.scriptHash` and `transfer.scriptHash`
+ * are different 28-byte values on a real chain.
+ */
+const EXPECTED_PARAMS_DATUM = Data.constr(0n, [
+  scriptCred(REAL.programmableLogicGlobal.scriptHash), // 0 plg_cred
+  scriptCred(REAL.issuanceLogic.scriptHash), //            1 issuance_logic_cred  (INSERTED in alpha.4)
+  scriptCred(REAL.transfer.scriptHash), //                 2 transfer_cred        (displaced from 1)
+  scriptCred(REAL.thirdParty.scriptHash), //               3 third_party_cred
+  scriptCred(REAL.upgradeMultisig.scriptHash), //          4 upgrade_cred
+  Data.constr(1n, []), //                                  5 pending_upgrade_cred = None at genesis
+]);
+
+/**
+ * The registry origin node — a literal fixture, because no deployment record
+ * carries it. Stated rather than pinned against itself: the sentinel head is
+ * key "", next 0xff×30, every delegate slot empty, no global state.
+ *
+ * ⚑ The sentinel is cross-checked against the SDK's exported `MAX_NEXT` below,
+ * so this literal is not the only place that value lives.
+ */
+const EXPECTED_ORIGIN_DATUM = Data.constr(0n, [
+  Data.bytearray(""), //               0 key — the sentinel head has none
+  Data.bytearray("ff".repeat(30)), //  1 next — the maximum, so nothing sorts after it
+  keyCred(""), //                      2 minting_logic_script   (INSERTED, #52)
+  keyCred(""), //                      3 transfer_logic_script
+  keyCred(""), //                      4 third_party_transfer_logic_script
+  keyCred(""), //                      5 unfracking_logic_script (INSERTED, unfracking v2)
+  Data.bytearray(""), //               6 global_state_cs
+]);
+
+/**
+ * The issuance-CBOR datum, SPLICED INDEPENDENTLY FROM THE BLUEPRINT.
+ *
+ * ⚑ MEASURED, and it is what makes this pin possible: the `pre`/`post` halves
+ * do NOT depend on the marker's VALUE. Applying two different markers to
+ * `issuance_mint` yields byte-identical halves (688 B and 37 B), because the
+ * argument occupies the same bit positions either way. So this file can choose
+ * its OWN marker, re-derive the split straight from the blueprint via
+ * `createStandardScripts`, and never touch `planBootstrap`'s copy.
+ */
+const TEST_MARKER = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c";
+
+function scriptBodyHex(compiledCode) {
+  if (UPLC.getCborEncodingLevel(compiledCode) !== "double") return compiledCode;
+  const raw = Bytes.fromHex(compiledCode);
+  const additionalInfo = raw[0] & 0x1f;
+  const headerLen =
+    additionalInfo < 24 ? 1 : additionalInfo === 24 ? 2 : additionalInfo === 25 ? 3 : 5;
+  return Bytes.toHex(raw.slice(headerLen));
+}
+
+const INDEPENDENT_SPLICE = scriptBodyHex(
+  createStandardScripts(BLUEPRINT)
+    .issuanceMint(TEST_MARKER, REAL.protocolParams.policyId)
+    .compiledCode
+).split(TEST_MARKER);
+
+const EXPECTED_ISSUANCE_DATUM = Data.constr(0n, [
+  Data.bytearray(INDEPENDENT_SPLICE[0]),
+  Data.bytearray(INDEPENDENT_SPLICE[1]),
+]);
+
+test("PIN: the three genesis datums, against sources that are NOT planBootstrap", () => {
+  const plan = planBootstrap(previewConfig());
+
+  // ⛔ THE ONE WITH A PATH TO A PUBLISHED DEFECT. Field 1 is issuance_logic and
+  // field 2 is transfer; swapping them deploys, verifies and bricks issuance.
+  assert.deepEqual(
+    plan.datums.protocolParams,
+    EXPECTED_PARAMS_DATUM,
+    "the params datum no longer matches the credentials the LIVE preview deployment recorded, " +
+      "in upstream's field order"
+  );
+
+  assert.deepEqual(
+    plan.datums.registryOrigin,
+    EXPECTED_ORIGIN_DATUM,
+    "the registry origin node's sentinel head moved"
+  );
+  // The sentinel has a second home in the SDK; a literal that only this file
+  // knows is a literal nobody can check.
+  assert.equal(MAX_NEXT, "ff".repeat(30));
+
+  assert.deepEqual(
+    plan.datums.issuanceCborHex,
+    EXPECTED_ISSUANCE_DATUM,
+    "the issuance CBOR splice no longer reproduces from the blueprint"
+  );
+  // ⚠ MEASURED per artefact, never assumed — flat UPLC is BIT-packed and the
+  // parameter is only findable as whole bytes when it lands on a byte boundary.
+  assert.equal(INDEPENDENT_SPLICE.length, 2, "the marker must occur exactly once");
+  assert.equal(INDEPENDENT_SPLICE[0].length / 2, 688, "prefix bytes");
+  assert.equal(INDEPENDENT_SPLICE[1].length / 2, 37, "postfix bytes");
+
+  // ⛔ THE MARKER MUST NOT SURVIVE INTO WHAT SHIPS. It is a cutting guide, and
+  // the datum written on chain is the two halves with it gone from between
+  // them — so if it appears in either half, a placeholder really would be
+  // deployed and the whole justification for a fixed hex marker collapses.
+  assert.ok(!plan.issuanceCbor.pre.includes(ISSUANCE_SPLICE_MARKER), "marker leaked into pre");
+  assert.ok(!plan.issuanceCbor.post.includes(ISSUANCE_SPLICE_MARKER), "marker leaked into post");
+  assert.equal(ISSUANCE_SPLICE_MARKER.length, 56, "28 bytes, the shape of a script hash");
+});
+
+test("PIN: the splice halves do not depend on the marker's VALUE — which is what licenses the pin above", () => {
+  const other = "aa".repeat(28);
+  assert.notEqual(other, TEST_MARKER);
+  const halves = scriptBodyHex(
+    createStandardScripts(BLUEPRINT).issuanceMint(other, REAL.protocolParams.policyId).compiledCode
+  ).split(other);
+  assert.equal(halves.length, 2);
+  assert.deepEqual(halves, INDEPENDENT_SPLICE, "two markers, byte-identical halves");
 });
 
 // ---------------------------------------------------------------------------
@@ -421,7 +577,7 @@ test("REFUSAL: a blueprint with no publish handlers cannot bootstrap, and says w
 /** A minimal, valid transaction. The stub returns this so `finish` can serialise. */
 const PLACEHOLDER_TX = EvoTransaction.fromCBORHex("84a3008001800200a0f5f6");
 
-function recorder({ coinsPerUtxoByte = 4310n, txHash = "cc".repeat(32) } = {}) {
+function recorder({ coinsPerUtxoByte = 4310n, maxTxSize = 16384, txHash = "cc".repeat(32) } = {}) {
   const ops = [];
   const record = (name) => (params) => {
     ops.push({ op: name, params });
@@ -450,7 +606,7 @@ function recorder({ coinsPerUtxoByte = 4310n, txHash = "cc".repeat(32) } = {}) {
     chain: { id: 0 },
     newTx: () => builder,
     async getProtocolParameters() {
-      return { coinsPerUtxoByte };
+      return { coinsPerUtxoByte, maxTxSize };
     },
   };
   return { ops, client, only: (name) => ops.filter((o) => o.op === name) };
@@ -627,9 +783,13 @@ test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, t
     plan.addresses.registry,
     plan.addresses.issuanceCborHex,
   ]);
-  assert.deepEqual(pays[0].params.datum.data, plan.datums.protocolParams);
-  assert.deepEqual(pays[1].params.datum.data, plan.datums.registryOrigin);
-  assert.deepEqual(pays[2].params.datum.data, plan.datums.issuanceCborHex);
+  // ⛔ AGAINST THE INDEPENDENT EXPECTATIONS, NOT AGAINST `plan.datums.*`. The
+  // round-1 version compared the transaction's datum to the plan that produced
+  // it, so a swap inside planBootstrap moved both sides together and this
+  // assertion could not fail. See the F-2 section at the top of this file.
+  assert.deepEqual(pays[0].params.datum.data, EXPECTED_PARAMS_DATUM);
+  assert.deepEqual(pays[1].params.datum.data, EXPECTED_ORIGIN_DATUM);
+  assert.deepEqual(pays[2].params.datum.data, EXPECTED_ISSUANCE_DATUM);
   // ⛔ PINNED EXACTLY, AND A MUTATION RUN IS WHY. An earlier version asserted
   // only that the issuance output carried MORE than the params output — which
   // stayed true under an arm that solved the wrong output entirely, so the arm
@@ -642,9 +802,20 @@ test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, t
   // issuance_mint body, so its floor is an order of magnitude above the others'.
   // The harness used to write a flat 15 ADA here: a guess, ~10.6 ADA too high,
   // and one that would have been silently too LOW had the datum grown instead.
+  //
+  // ⛔ AND ROUNDED UP TO A WHOLE ADA (F-7). The solve returns the EXACT minimum
+  // — 4,361,720 for the issuance output — and exact is the wrong side of the
+  // line for an IRREVERSIBLE step whose figure depends on an encoder this
+  // package does not own. A one-byte widening in Evolution's `TxOut` encoding
+  // under-funds the output by `coinsPerUtxoByte` and the ledger answers
+  // "insufficient Ada", pointing at the wallet rather than at the encoder.
   assert.equal(EvoAssets.lovelaceOf(pays[0].params.assets), 2_000_000n, "params output");
   assert.equal(EvoAssets.lovelaceOf(pays[1].params.assets), 3_000_000n, "registry origin");
-  assert.equal(EvoAssets.lovelaceOf(pays[2].params.assets), 4_361_720n, "issuance CBOR output");
+  assert.equal(
+    EvoAssets.lovelaceOf(pays[2].params.assets),
+    5_000_000n,
+    "issuance CBOR output: 4,361,720 solved, ceiled to a whole ADA"
+  );
 
   assert.deepEqual(
     only("attachScript").map((s) => s.params.script),
@@ -1004,4 +1175,143 @@ test("GATE: a NESTED tree is compared structurally, not by its constructor alone
     /different authority tree/,
     "threshold changed"
   );
+});
+
+// ---------------------------------------------------------------------------
+// F-5 — the splice-marker occurrence check, which had never been mutated
+// ---------------------------------------------------------------------------
+
+test("REFUSAL: the issuance_mint splice marker occurring TWICE, by name", () => {
+  // ⛔ THIS CHECK IS THE ENTIRE REASON SHIPPING A PLACEHOLDER HEX IS TOLERABLE,
+  // and round 1 never mutated it: neutering `splitParts.length !== 2` to
+  // `if (false)` left the suite 31/31 green. A guard nothing exercises is a
+  // claim, not a check.
+  //
+  // ⚑ THE FIXTURE IS REAL, NOT FABRICATED. Substituting any other validator's
+  // body was MEASURED to still yield exactly one occurrence — Evolution's
+  // `applyParamsToScript` byte-aligns the argument regardless of the script. So
+  // the reachable arm is the OTHER one the code's comment names: a body that
+  // ALREADY CONTAINS the marker byte run. Feeding back an issuance_mint that
+  // has been parameterised once produces exactly that, and it is the shape a
+  // real collision would take — the splice would silently rewrite an unrelated
+  // run of bytes.
+  // ⚠ Pre-applied with the marker `planBootstrap` ITSELF uses — imported, never
+  // re-typed. A copy here would keep passing while the module's marker moved,
+  // and the test would be exercising a collision that can no longer happen.
+  const alreadyApplied = createStandardScripts(BLUEPRINT)
+    .issuanceMint(ISSUANCE_SPLICE_MARKER, REAL.protocolParams.policyId)
+    .compiledCode;
+  const doubled = structuredClone(BLUEPRINT);
+  for (const v of doubled.validators) {
+    if (v.title === "issuance_mint.issuance_mint.mint") v.compiledCode = alreadyApplied;
+  }
+  // The fixture must genuinely contain the marker twice, or this test is
+  // asserting a refusal that fires for some unrelated reason.
+  const occurrences =
+    scriptBodyHex(
+      createStandardScripts(doubled).issuanceMint(
+        ISSUANCE_SPLICE_MARKER,
+        REAL.protocolParams.policyId
+      ).compiledCode
+    ).split(ISSUANCE_SPLICE_MARKER).length - 1;
+  assert.equal(occurrences, 2, "the fixture must reach the guard with two occurrences");
+
+  refusesNaming(
+    () => planBootstrap(previewConfig({ blueprint: doubled })),
+    /splice marker appeared 2 times in the compiled body — expected exactly once/,
+    "marker twice"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// F-11 — required is not the same as valid
+// ---------------------------------------------------------------------------
+
+test("REFUSAL: seedLovelace below the min-UTxO floor, by name and by figure", async () => {
+  const { client } = recorder();
+  // ⚠ `1n` is a positive bigint, so the round-1 type check admitted it. It
+  // builds happily and is refused at SUBMISSION as "insufficient Ada" — the
+  // exact failure min-UTxO solving exists to prevent, arriving from the one
+  // figure the builder does not solve because the caller chose it.
+  await refusesNaming(
+    () => buildSeedTx({ ...ctx(client), ownerAddress: WALLET, seedLovelace: 1n }),
+    /seedLovelace is 1 lovelace, below the min-UTxO floor of \d+/,
+    "one lovelace"
+  );
+  // And it says what it does NOT check, rather than reading as sufficiency.
+  let msg = "";
+  try {
+    await buildSeedTx({ ...ctx(client), ownerAddress: WALLET, seedLovelace: 1n });
+  } catch (e) {
+    msg = String(e.message);
+  }
+  assert.match(msg, /NECESSARY, NOT SUFFICIENT/, "the floor must not read as a sufficiency check");
+
+  // The floor is real arithmetic, not a constant: a figure above it is admitted.
+  const ok = await buildSeedTx({ ...ctx(client), ownerAddress: WALLET, seedLovelace: 5_000_000n });
+  assert.equal(ok.metadata.step, "seed");
+});
+
+test("REFUSAL: referenceScriptLovelace below what a SCRIPT-BEARING output needs, by name", async () => {
+  const plan = planBootstrap(previewConfig());
+  const { client } = recorder();
+  // ⚠ 2 ADA clears min-UTxO for a PLAIN output and is nowhere near enough for
+  // one carrying a 2.8 kB script — the script's own bytes count toward
+  // min-UTxO. A plain-output figure is the mistake this refusal is shaped for.
+  await refusesNaming(
+    () =>
+      buildReferenceScriptsTx({
+        ...ctx(client),
+        plan,
+        referenceScriptAddress: WALLET,
+        referenceScriptLovelace: 2_000_000n,
+      }),
+    /below the \d+ a script-bearing output needs at coinsPerUtxoByte 4310 — the largest script here is \w+ at \d+ bytes/,
+    "a plain-output figure"
+  );
+  // 20 ADA, what the fixture uses, is admitted.
+  const ok = await buildReferenceScriptsTx({
+    ...ctx(client),
+    plan,
+    referenceScriptAddress: WALLET,
+    referenceScriptLovelace: 20_000_000n,
+  });
+  assert.equal(ok.metadata.order.length, 7);
+});
+
+// ---------------------------------------------------------------------------
+// F-9 — the size cap this transaction is already at 76% of
+// ---------------------------------------------------------------------------
+
+test("REFUSAL: a reference-script transaction at or over the chain's maxTxSize, by name", async () => {
+  const plan = planBootstrap(previewConfig());
+  // ⚠ The stub returns a placeholder transaction, so its measured size is not
+  // the real 12,496 bytes; what this exercises is that the GUARD reads the
+  // chain's own maxTxSize and refuses against it, rather than that any
+  // particular byte count is or is not over. A cap of 1 makes every
+  // transaction over it.
+  const { client } = recorder({ maxTxSize: 1 });
+  await refusesNaming(
+    () =>
+      buildReferenceScriptsTx({
+        ...ctx(client),
+        plan,
+        referenceScriptAddress: WALLET,
+        referenceScriptLovelace: 20_000_000n,
+      }),
+    /publishing 7 reference scripts is \d+ bytes, at or over this chain's 1-byte maximum/,
+    "over the cap"
+  );
+
+  // Under a real cap it passes, and reports what it measured — so a reader can
+  // see how close to the cap a deployment is without instrumenting anything.
+  const roomy = recorder({ maxTxSize: 16384 });
+  const ok = await buildReferenceScriptsTx({
+    ...ctx(roomy.client),
+    plan,
+    referenceScriptAddress: WALLET,
+    referenceScriptLovelace: 20_000_000n,
+  });
+  assert.equal(ok.metadata.maxTxSize, 16384);
+  assert.equal(typeof ok.metadata.unsignedBytes, "number");
 });

@@ -453,6 +453,10 @@ export {
   assembleDeploymentParams,
   BOOTSTRAP_SEED_COUNT,
   BOOTSTRAP_STEPS,
+  // ⛔ A CUTTING GUIDE, NOT AN IDENTIFIER, AND NEVER DEPLOYED — see its
+  // docstring. Exported so the occurrence guard that licenses it can be
+  // exercised; do not pass it where a minting-logic hash is expected.
+  ISSUANCE_SPLICE_MARKER,
   REFERENCE_SCRIPT_ORDER,
   STAKE_REGISTRATION_ORDER,
 } from "./standard/bootstrap.js";

@@ -86,10 +86,12 @@ import { buildCip171RecordFromPin } from "../core/provenance.js";
 import { buildCip171Metadatum, CIP171_METADATA_LABEL } from "../core/cip171.js";
 import {
   buildEvoScript,
+  ceilToWholeAda,
   decodeMultisigScript,
   getInlineDatum,
   mintAssetsFromMap,
   minUtxoAtLeast,
+  minUtxoForOutput,
   multisigScriptDatum,
   outputAssets,
   protocolParamsDatum,
@@ -139,6 +141,17 @@ export const BOOTSTRAP_SEED_COUNT = 3;
  * delegates down — and a mismatch here does not fail loudly. It hands out a
  * reference input carrying the WRONG script, and the transaction dies at
  * evaluation naming neither.
+ *
+ * ⛔ AND APPENDING IS NOT FREE — THERE IS A CAP AND THIS LIST IS NEAR IT (F-9).
+ * MEASURED on devnet, 2026-09-17: the transaction publishing these seven comes
+ * to **12,496 bytes against a 16,384-byte protocol maximum — 76%**. Two more
+ * scripts of the size already here would burst it, and the failure arrives at
+ * SUBMISSION rather than at build. This is the same cap that forced the
+ * mint/publish/register split in the first place: the 0.3.x single-transaction
+ * fixture measured 21,816 bytes. `buildReferenceScriptsTx` now refuses over the
+ * chain's own `maxTxSize` rather than letting the ledger say it; when that
+ * refusal fires, the answer is a SECOND publish transaction and a second
+ * recorded tx hash, not a shorter list.
  */
 export const REFERENCE_SCRIPT_ORDER = [
   "programmableLogicBase",
@@ -197,14 +210,65 @@ export type BootstrapStepId = (typeof BOOTSTRAP_STEPS)[number];
 const MIN_UTXO_FLOOR = 2_000_000n;
 
 /**
- * Placeholder minting-logic hash, spliced out of the issuance_mint CBOR body.
+ * Solve min-UTxO for a genesis output, then ROUND UP TO A WHOLE ADA.
  *
- * ⚠ NOT A PARAMETER AND NOT A DEFAULT. It never leaves this function: it is a
- * marker applied and immediately cut back out, so that `register` can splice a
- * real minting-logic hash into the stored CBOR without re-deriving the script.
- * The `splitParts.length !== 2` check below is what proves the cut is sound.
+ * ⛔ THE ROUNDING IS DELIBERATE AND IT IS NOT TIDINESS (F-7). `minUtxoAtLeast`
+ * returns the EXACT minimum, and its own docstring promises only that the
+ * figure "only ever rises" relative to what this package used to emit — it
+ * makes no promise about the ENCODER. The figure is
+ * `coinsPerUtxoByte × (160 + serialised output size)`, and the serialised size
+ * comes from Evolution's `TxOut` encoder, which this package does not own.
+ *
+ * ⚠ THE FAILURE THAT BUYS: a one-byte widening in that encoder — a version
+ * bump, a CBOR canonicalisation change — under-funds an output by
+ * `coinsPerUtxoByte` lovelace. Evolution does NOT rescue an under-funded
+ * `payToAddress`: the shortfall survives to submission and the ledger rejects
+ * it as "insufficient Ada", which sends the reader to the wallet balance. On
+ * the protocol genesis that rejection lands on an IRREVERSIBLE step, after the
+ * multisig config UTxO already exists on chain.
+ *
+ * ⇒ A whole-ADA ceiling is a RULE, not a guessed constant, and at
+ * `coinsPerUtxoByte` 4310 it absorbs on the order of a hundred bytes of encoder
+ * drift on the largest output here. It is still an order of magnitude below the
+ * flat 15 ADA this sequence used to write.
  */
-const CBOR_SPLICE_MARKER = "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeef";
+function genesisOutputLovelace(params: Parameters<typeof minUtxoForOutput>[0]): bigint {
+  return ceilToWholeAda(minUtxoAtLeast(MIN_UTXO_FLOOR, params));
+}
+
+/**
+ * The lowest lovelace an output of this shape can legally carry — a FLOOR to
+ * refuse below, never a sufficiency check.
+ *
+ * ⚠ Clearing min-UTxO is necessary and not sufficient: a seed output also has
+ * to fund the fee of the transaction that consumes it, and this says nothing
+ * about that.
+ */
+function minLovelaceForPlainOutput(address: Address, coinsPerUtxoByte: bigint): bigint {
+  return minUtxoForOutput({ address, assets: outputAssets(0n), coinsPerUtxoByte });
+}
+
+/**
+ * The 28-byte marker `issuance_mint` is parameterised against so the stored
+ * CBOR can be cut either side of its minting-logic argument.
+ *
+ * ⛔ NOT A PARAMETER, NOT A DEFAULT, AND NEVER DEPLOYED. It is applied and
+ * immediately cut back out; what reaches the chain is `pre` and `post` with the
+ * marker gone from between them, so that a later registration can splice a REAL
+ * minting-logic hash in without re-deriving the script. Passing this value
+ * anywhere a minting-logic hash is expected would produce a policy nobody can
+ * mint under — it is a cutting guide, not an identifier.
+ *
+ * ⚑ EXPORTED SO THE OCCURRENCE GUARD CAN BE EXERCISED, and for no other reason.
+ * `splitParts.length !== 2` below is the entire reason shipping a fixed hex
+ * marker is tolerable — and an unmutated guard is a claim rather than a check.
+ * A test cannot construct a body that collides with a marker it cannot see, so
+ * the marker is visible. (MEASURED: the `pre`/`post` halves do not depend on
+ * this VALUE — two different markers yield byte-identical halves, because the
+ * argument occupies the same bit positions either way.)
+ */
+export const ISSUANCE_SPLICE_MARKER =
+  "deadbeefcafebabedeadbeefcafebabedeadbeefcafebabedeadbeef";
 
 /**
  * The three withdraw-0 delegates whose registration runs a `publish` handler.
@@ -264,6 +328,14 @@ export type UnfrackingChoice = "enabled" | "disabled";
  *
  * ⚑ THIS IS THE RESUME TOKEN. Persist it and `planBootstrap` re-derives every
  * script, address, datum and asset unit byte-identically, offline.
+ *
+ * ⛔ IT IS NOT `JSON.stringify`-ABLE AS IT STANDS, AND THE FAILURE IS LOUD
+ * RATHER THAN SILENT (F-8): `maxInlineDatumBytes` is a `bigint`, and
+ * `JSON.stringify` THROWS `TypeError: Do not know how to serialize a BigInt`
+ * on it. Persist it with that one field converted — `String(...)` on the way
+ * out, `BigInt(...)` on the way back — and never with `Number(...)`, which
+ * would make a security parameter depend on a lossy round trip. The blueprint
+ * is ordinary JSON and needs no special handling.
  */
 export interface BootstrapConfig {
   /** The standard blueprint this instance is built from. */
@@ -612,9 +684,9 @@ export function planBootstrap(config: BootstrapConfig): BootstrapPlan {
   // ⚑ TWO ARGUMENTS, CREDENTIAL FIRST: `(mintingLogicHash, paramsPolicy)`. The
   // delegate credentials it used to be compiled against now reach it through
   // the params datum instead — which is the whole point of the alpha.4 split.
-  const issuanceMarker = builders.issuanceMint(CBOR_SPLICE_MARKER, paramsPolicy);
+  const issuanceMarker = builders.issuanceMint(ISSUANCE_SPLICE_MARKER, paramsPolicy);
   const markerBody = scriptBodyHex(issuanceMarker.compiledCode);
-  const splitParts = markerBody.split(CBOR_SPLICE_MARKER);
+  const splitParts = markerBody.split(ISSUANCE_SPLICE_MARKER);
   /**
    * ⛔ A HARD FAILURE, AND IT MUST NOT BECOME A WARNING. The splice reassembles
    * the script from `pre + <real minting logic hash> + post`, so it is correct
@@ -912,6 +984,23 @@ export async function buildSeedTx(params: SeedTxParams): Promise<UnsignedTx> {
     );
   }
 
+  // ⛔ REQUIRED IS NOT THE SAME AS VALID (F-11). A caller passing `1n` built
+  // happily and failed only at submission, as "insufficient Ada" — the exact
+  // failure min-UTxO solving exists to prevent, arriving from the one figure
+  // this builder does NOT solve because the caller chose it.
+  const { coinsPerUtxoByte } = await params.client.getProtocolParameters();
+  const seedFloor = minLovelaceForPlainOutput(params.ownerAddress, coinsPerUtxoByte);
+  if (params.seedLovelace < seedFloor) {
+    throw new Error(
+      `bootstrap seed: seedLovelace is ${params.seedLovelace} lovelace, below the min-UTxO ` +
+        `floor of ${seedFloor} for a plain output at ${params.ownerAddress} ` +
+        `(coinsPerUtxoByte ${coinsPerUtxoByte}). The ledger would reject the seed transaction ` +
+        `as "insufficient Ada" at submission. ⚠ This floor is NECESSARY, NOT SUFFICIENT: each ` +
+        `seed also has to fund the fee of the transaction that consumes it, and nothing here ` +
+        `checks that.`
+    );
+  }
+
   const owner = EvoAddress.fromBech32(params.ownerAddress);
   let tx: TxBuilder = params.client.newTx();
   for (let i = 0; i < BOOTSTRAP_SEED_COUNT; i++) {
@@ -1039,7 +1128,7 @@ export async function buildMultisigGenesisTx(
   const nftUnit = plan.assetUnits.upgradeMultisigNft;
   const assets = new Map([[nftUnit, 1n]]);
   const coinsPerUtxoByte = (await params.client.getProtocolParameters()).coinsPerUtxoByte;
-  const lovelace = minUtxoAtLeast(MIN_UTXO_FLOOR, {
+  const lovelace = genesisOutputLovelace({
     address: plan.addresses.upgradeMultisig,
     assets: outputAssets(0n, assets),
     datum,
@@ -1254,7 +1343,7 @@ export async function buildProtocolGenesisTx(
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(plan.addresses.protocolParams),
     assets: outputAssets(
-      minUtxoAtLeast(MIN_UTXO_FLOOR, {
+      genesisOutputLovelace({
         address: plan.addresses.protocolParams,
         assets: outputAssets(0n, paramsNft),
         datum: plan.datums.protocolParams,
@@ -1267,12 +1356,14 @@ export async function buildProtocolGenesisTx(
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(plan.addresses.registry),
     assets: outputAssets(
-      minUtxoAtLeast(REGISTRY_NODE_MIN_ADA, {
-        address: plan.addresses.registry,
-        assets: outputAssets(0n, registryNft),
-        datum: plan.datums.registryOrigin,
-        coinsPerUtxoByte,
-      }),
+      ceilToWholeAda(
+        minUtxoAtLeast(REGISTRY_NODE_MIN_ADA, {
+          address: plan.addresses.registry,
+          assets: outputAssets(0n, registryNft),
+          datum: plan.datums.registryOrigin,
+          coinsPerUtxoByte,
+        })
+      ),
       registryNft
     ),
     datum: new InlineDatum.InlineDatum({ data: plan.datums.registryOrigin }),
@@ -1282,7 +1373,7 @@ export async function buildProtocolGenesisTx(
   tx = tx.payToAddress({
     address: EvoAddress.fromBech32(plan.addresses.issuanceCborHex),
     assets: outputAssets(
-      minUtxoAtLeast(MIN_UTXO_FLOOR, {
+      genesisOutputLovelace({
         address: plan.addresses.issuanceCborHex,
         assets: outputAssets(0n, issuanceNft),
         datum: plan.datums.issuanceCborHex,
@@ -1355,6 +1446,38 @@ export async function buildReferenceScriptsTx(
     );
   }
 
+  // ⛔ REQUIRED IS NOT THE SAME AS VALID (F-11), and a script-bearing output is
+  // where the gap bites hardest: the script's own bytes are part of the
+  // serialised output, so its min-UTxO is an order of magnitude above a plain
+  // one. A caller passing a plain-output figure builds happily and is refused
+  // at submission as "insufficient Ada".
+  //
+  // ⚠ A SOUND LOWER BOUND, NOT THE EXACT FIGURE. `minUtxoForOutput` takes no
+  // script, so this adds the largest script's own bytes at `coinsPerUtxoByte`
+  // each. The true requirement is higher by the script ref's CBOR wrapping —
+  // which is why this REFUSES BELOW the bound and never reports it as
+  // sufficient.
+  const { coinsPerUtxoByte, maxTxSize } = await params.client.getProtocolParameters();
+  let largest: { name: string; bytes: number } = { name: "(none)", bytes: 0 };
+  plan.referenceScripts.forEach((script, i) => {
+    const bytes = scriptBodyHex(script.compiledCode).length / 2;
+    if (bytes > largest.bytes) largest = { name: REFERENCE_SCRIPT_ORDER[i]!, bytes };
+  });
+  const refFloor =
+    minLovelaceForPlainOutput(params.referenceScriptAddress, coinsPerUtxoByte) +
+    coinsPerUtxoByte * BigInt(largest.bytes);
+  if (params.referenceScriptLovelace < refFloor) {
+    throw new Error(
+      `bootstrap reference-scripts: referenceScriptLovelace is ` +
+        `${params.referenceScriptLovelace} lovelace, below the ${refFloor} a script-bearing ` +
+        `output needs at coinsPerUtxoByte ${coinsPerUtxoByte} — the largest script here is ` +
+        `${largest.name} at ${largest.bytes} bytes, and a script's own bytes count toward ` +
+        `min-UTxO. The ledger would reject this as "insufficient Ada" at submission. ⚠ The ` +
+        `figure quoted is a LOWER BOUND: the true requirement is higher by the script ref's ` +
+        `CBOR wrapping.`
+    );
+  }
+
   const to = EvoAddress.fromBech32(params.referenceScriptAddress);
   let tx: TxBuilder = params.client.newTx();
   for (const script of plan.referenceScripts) {
@@ -1365,10 +1488,28 @@ export async function buildReferenceScriptsTx(
     });
   }
 
-  return finish(tx, params, "reference-scripts", {
+  const unsigned = await finish(tx, params, "reference-scripts", {
     order: [...REFERENCE_SCRIPT_ORDER],
     outputIndices: Object.fromEntries(REFERENCE_SCRIPT_ORDER.map((n, i) => [n, i])),
   });
+
+  // ⛔ THE SIZE CAP, CHECKED HERE RATHER THAN DISCOVERED AT SUBMISSION (F-9).
+  // This transaction carries every published script body at once and is the
+  // one that grows when REFERENCE_SCRIPT_ORDER grows — MEASURED at 12,496 of
+  // 16,384 bytes for the current seven. Unsigned, so this is a LOWER BOUND on
+  // the signed size; it refuses the certain failures and cannot promise the
+  // marginal ones.
+  const bytes = unsigned.cbor.length / 2;
+  if (bytes >= maxTxSize) {
+    throw new Error(
+      `bootstrap reference-scripts: the unsigned transaction publishing ` +
+        `${plan.referenceScripts.length} reference scripts is ${bytes} bytes, at or over this ` +
+        `chain's ${maxTxSize}-byte maximum — and witnesses have not been added yet. Split the ` +
+        `publication across two transactions and record both hashes; do not shorten ` +
+        `REFERENCE_SCRIPT_ORDER, whose indices a deployment record already depends on.`
+    );
+  }
+  return { ...unsigned, metadata: { ...unsigned.metadata, unsignedBytes: bytes, maxTxSize } };
 }
 
 // ---------------------------------------------------------------------------
