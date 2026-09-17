@@ -430,6 +430,51 @@ export {
   type ScriptHashCheck,
   type StandardScripts,
 } from "./standard/scripts.js";
+// ---------------------------------------------------------------------------
+// Protocol bootstrap — the transactions that stand up an instance (T-D51-1)
+//
+// ⚑ EXPORTED BECAUSE THE ALTERNATIVE WAS A SECOND IMPLEMENTATION. The platform
+// could not import `test/harness/bootstrap.ts` (`files` ships only `dist` and
+// `blueprints`), so it maintained its own port of a protocol-critical sequence —
+// and that port had already diverged CORRECTLY. See CLAUDE.md, "Protocol
+// bootstrap — AMENDED 2026-09-17", and `design/bootstrap-export.md`.
+//
+// ⛔ Orchestration stays with the caller: these builders return unsigned
+// transactions and do not sign, submit, await, fund or retry.
+export {
+  planBootstrap,
+  buildSeedTx,
+  selectBootstrapSeeds,
+  buildMultisigGenesisTx,
+  assertMultisigConfigUtxo,
+  buildProtocolGenesisTx,
+  buildReferenceScriptsTx,
+  buildStakeRegistrationTx,
+  assembleDeploymentParams,
+  BOOTSTRAP_SEED_COUNT,
+  BOOTSTRAP_STEPS,
+  REFERENCE_SCRIPT_ORDER,
+  STAKE_REGISTRATION_ORDER,
+} from "./standard/bootstrap.js";
+export type {
+  BootstrapConfig,
+  BootstrapPlan,
+  BootstrapScripts,
+  BootstrapSeeds,
+  BootstrapSeedUtxos,
+  BootstrapStepId,
+  BootstrapBuildContext,
+  BootstrapObservations,
+  UnfrackingChoice,
+  ReferenceScriptName,
+  StakeCredentialName,
+  SeedTxParams,
+  MultisigGenesisTxParams,
+  ProtocolGenesisTxParams,
+  ReferenceScriptsTxParams,
+  StakeRegistrationTxParams,
+} from "./standard/bootstrap.js";
+
 export {
   CIP171_METADATA_LABEL,
   CIP171_MAX_CHUNK_BYTES,
