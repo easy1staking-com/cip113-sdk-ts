@@ -8,8 +8,8 @@ handling, submission and confirmation stay with the caller.
 
 Success condition, restated so the shape follows the reason: **the platform can delete its port of
 `test/harness/bootstrap.ts`.** That port already diverged from the harness — it reserves the seed
-UTxOs from coin selection where the harness does not — and **the divergence is correct**. See
-§6, where that divergence turns out to be a live devnet failure at this slice's own base commit.
+UTxOs from coin selection where the harness does not — and **the divergence is correct**. See §6,
+where that divergence is examined — and where a round-1 claim about it is RETRACTED and corrected.
 
 ---
 
@@ -81,7 +81,16 @@ outrefs, the `always_fail` nonce, `maxInlineDatumBytes`, and the unfracking choi
 touches no network, holds no client and makes no decisions of its own: given the same config it
 re-derives byte-identical scripts, addresses, datums and asset units, on any machine, at any time.
 
-⇒ **Persist the config; you can rebuild the plan.** A caller resuming at step N needs:
+⇒ **Persist the config; you can rebuild the plan.**
+
+⚠ **IT IS NOT `JSON.stringify`-ABLE AS IT STANDS.** `maxInlineDatumBytes` is a `bigint`, and
+`JSON.stringify` **throws** `TypeError: Do not know how to serialize a BigInt` on it. The failure is
+loud rather than silent, which is the good direction — but a caller told to "persist the config"
+should not meet it by surprise. Convert that one field on the way out (`String(...)`) and back
+(`BigInt(...)`), and **never via `Number(...)`**: a security parameter must not depend on a lossy
+round trip. The blueprint is ordinary JSON and needs no special handling.
+
+A caller resuming at step N needs:
 
 | resuming at | needs |
 |---|---|
@@ -143,6 +152,16 @@ that order and `assembleDeploymentParams` derives every `…RefInput` index from
 delegates down, and a mismatch does not fail loudly: it hands out a reference input carrying the
 wrong script, and the transaction dies at evaluation naming neither.
 
+⛔ **AND APPENDING IS NOT FREE — THE LIST IS ALREADY AT 76% OF THE CAP.** MEASURED on devnet,
+2026-09-17: step 4's transaction comes to **12,496 bytes against a 16,384-byte protocol maximum.**
+Two more scripts the size of those already here would burst it, and the failure would arrive at
+SUBMISSION rather than at build. This is the same cap that forced the mint/publish/register split in
+the first place — the 0.3.x single-transaction fixture measured 21,816 bytes.
+`buildReferenceScriptsTx` now refuses against the chain's own `maxTxSize` and reports the measured
+size in its result metadata, so a deployment can see its headroom without instrumenting anything.
+**When that refusal fires the answer is a SECOND publish transaction and a second recorded hash —
+never a shorter list**, whose indices a deployment record already depends on.
+
 ---
 
 ## 5. Required inputs — every value the caller must decide
@@ -162,6 +181,28 @@ reason this export is safe to make. Nothing below has a default.
 | seed output size | `SEED_ADA = 5_000_000n` | `seedLovelace`, required on step 1 |
 | reference-script output size | `20_000_000n` | `referenceScriptLovelace`, required on step 4 |
 | CIP-171 provenance | read off disk from `UPSTREAM_PIN.json` | `provenancePin?: UpstreamPin`, passed in; the export reads no files |
+
+**Every caller-chosen lovelace figure is now REFUSED below its computed minimum, by name.**
+`seedLovelace` and `referenceScriptLovelace` were required but unvalidated: `1n` built happily and
+failed at submission as *"insufficient Ada"* — the exact failure min-UTxO solving exists to prevent,
+arriving from the one figure the builder does not solve because the caller chose it. The
+reference-script bound adds the largest script's own bytes at `coinsPerUtxoByte` each and is
+declared a **lower bound** (the true requirement is higher by the script ref's CBOR wrapping) so it
+cannot be read as a sufficiency check. Neither floor promises the figure is *enough* — a seed also
+funds the fee of the transaction that consumes it, and that is the caller's arithmetic.
+
+**Every datum-bearing genesis output is SOLVED and then ROUNDED UP TO A WHOLE ADA.** The solve
+returns the exact minimum — 4,361,720 lovelace for the issuance output at `coinsPerUtxoByte` 4310 —
+and exact is the wrong side of the line here. That figure is
+`coinsPerUtxoByte × (160 + serialised output size)`, and the serialised size comes from Evolution's
+`TxOut` encoder, which this package does not own; `minUtxoAtLeast`'s own docstring promises only
+that the figure rises relative to what this package used to emit, **not that the encoder holds
+still**. ⚠ **A one-byte widening there under-funds the protocol's largest output by
+`coinsPerUtxoByte`, and Evolution does not rescue an under-funded `payToAddress` — the shortfall
+survives to submission and the ledger rejects the IRREVERSIBLE genesis step as "insufficient Ada",
+pointing the reader at the wallet balance rather than at the encoder.** A whole-ADA ceiling is a
+rule rather than a guessed constant, absorbs on the order of a hundred bytes of encoder drift, and
+is still an order of magnitude below the flat 15 ADA this sequence used to write.
 
 **`unfracking` is a discriminator here and a VALUE in `DeploymentParams`, deliberately.** The
 recorded field must be a value — a deployment file opened in three years has to say what the
@@ -216,23 +257,60 @@ handling, submission or confirmation — the boundary CLAUDE.md drew.
 
 ### The one measured consequence of leaving coin selection with the caller
 
-⚠ **The devnet suite is RED at this slice's base commit `b0bcf09`**, and the mechanism is exactly
-the divergence the amendment names. Baseline run, 2026-09-17:
+⚠ **A CLAIM RETRACTED — READ THIS BEFORE CITING THE ONE IT REPLACES.** An earlier revision of this
+document, and commit `6135207`'s message, asserted that *"the devnet suite is RED at this slice's
+base commit `b0bcf09` — 14/33 — every failure ledger code 3117"*. **That measurement does not
+reproduce.** Re-run independently at `b0bcf09` in a detached worktree: **33 tests, 31 pass, 2 fail,
+ZERO occurrences of 3117, and the bootstrap step itself passing.**
 
-```
-[submit error] tx1-protocol-state: ... code 3117, "The transaction contains unknown UTxO
-references as inputs" ... unknownOutputReferences: [{ transaction: 0c9e19a3…, index: 1 }]
-```
+**The MECHANISM is real and survives the retraction; only the measurement overstated itself.** Base
+`spendable` is `all.filter(u => !u.scriptRef)` with no reservation, and step 3's `collectFrom` names
+seed objects captured before step 2 ran — so coin selection is free to take a seed for fees and the
+protocol genesis then names a spent input, which the ledger answers with code 3117, *"unknown UTxO
+references as inputs"*. That error names a UTxO and reads as a builder bug. It is not: the builder
+used exactly what it was told it could spend.
 
-Step 2 is handed `availableUtxos = spendable(all wallet UTxOs)` — which **includes the two seeds
-step 3 has not spent yet**. Coin selection is free to take one for fees. When it does, step 3's
-`collectFrom` still names the stale seed object captured before step 2 ran, the builder faithfully
-includes a spent input, and the ledger answers 3117 — an error that names a UTxO and reads as a
-builder bug. It is not: the builder used what it was told.
+⇒ **It is a LATENT, STATE-DEPENDENT failure that the reservation removes — a coin-selection race,
+not a deterministic property of the commit.** Why it cannot be read off a commit at all:
+`test/harness/yaci.mjs` uses ONE FIXED SHARED WALLET, topped up only when its balance falls below
+400 ADA. Whether coin selection reaches a seed depends on how fragmented that wallet happens to be,
+which is a function of how many suites have run on this devnet since the last top-up — **not of the
+code under test.** Two runs of the same commit can legitimately disagree, and the run that produced
+"14/33" was one of them.
 
-⇒ The reservation is not an optimisation the platform happened to add. It is the fix for a live
-failure, and the export's `availableUtxos` parameter is what lets a caller express it. The rewritten
-harness reserves the seeds at its call site, exactly as the platform's port already does.
+⚠ **Why the correction matters more than the number.** This sentence is permanent provenance for an
+expansion of a published package's public API. A reader who tries to reproduce "RED at b0bcf09"
+finds a green base and concludes the whole justification was invented — when only the measurement
+was unstable. **The requirement itself is right and does not rest on that reading:**
+`availableUtxos` is required because a default here means Evolution querying the wallet and being
+free to spend live protocol infrastructure, and because CLAUDE.md's amended clause — Giovanni's
+first-hand ruling — stands on its own without any corroboration from a devnet run.
+
+---
+
+## 6b. ACCEPTED DEVIATION — `_signBuilder` is populated on the returned `UnsignedTx`
+
+The slice contract said: *"`_signBuilder` exists on `UnsignedTx` and is load-bearing public API in
+practice — do not extend that pattern into new surface."* **The five builders populate it.** Declared
+here rather than only in a code comment, because the contract named it explicitly.
+
+**The reading taken:** the prohibition is on inventing NEW `any`-typed escape hatches. `UnsignedTx`
+is the SDK's single result type, `_signBuilder` is an existing optional field on it, and every other
+operation in this package already sets it. Returning the same object shape is using the existing
+surface, not extending it.
+
+**Why not omitting it:** the bootstrap would become the one `UnsignedTx` in the package whose result
+cannot be submitted — the exact defect `dummy.transfer` already recorded once, which surfaced at the
+CALL SITE as *"Cannot read properties of undefined (reading 'signAndSubmit')"* and read as a caller
+mistake rather than a missing field.
+
+⚠ **What this does NOT change:** the SDK still signs nothing, submits nothing and awaits nothing.
+`cbor` is the supported path and the one a key-holding caller should prefer.
+
+⛔ **KNOWN RESIDUE, seated as T-D52 rather than closed here:** the supported `cbor` path has **no
+chain-level proof**, because the devnet harness submits through `_signBuilder`. Every green devnet
+run exercises the internal field and none of them exercises the documented one. Closing it means
+submitting a cbor-reconstructed transaction on devnet.
 
 ---
 
@@ -270,3 +348,26 @@ The devnet cannot run in CI, so the export is guarded by `test/bootstrap-export.
 Chain-level proof stays where it has always been: `npm run test:devnet`, which exercises the export
 through the rewritten harness. A harness that stopped using the export would leave the export
 untested — that is why Task 3 is not tidiness.
+
+### ⛔ The devnet suite is NOT GREEN, and saying so is part of the deliverable
+
+**`npm run test:devnet` at HEAD: 33 tests, 31 pass, 2 fail, 0 skipped.** The slice contract's
+Invariant 1 said *"the devnet suite still passes"*, and it does not. **Do not read a green anywhere
+in this document.**
+
+The two failures are `not ok 3` (*freeze-and-seize: its REGISTRATION tx carries a CIP-171 record
+that recomputes*) and `not ok 5` (*the bootstrap's CIP-171 record recomputes to the deployed script
+hashes*). Both fail with *"must carry label 1984 — got labels `[]`"*.
+
+**Diagnosis, and why it is not a regression:**
+* **The identical two fail identically at base `b0bcf09`.** Measured, not assumed.
+* **The metadata IS attached.** The offline suite asserts `attachMetadata` fires under label 1984
+  with a CIP-171 record built from the plan's own parameterisations.
+* **The failure is on the READ side.** Both tests fetch the transaction back through **yaci-store on
+  `:8080`, which is stuck at slot 402,599 while the node is at 603,976** — over 201,000 slots behind
+  and not advancing. Kupo, which every other test uses, is exactly at tip. The store returns an empty
+  metadata list because it has never seen the transaction.
+
+⚠ Environmental and pre-existing. Not fixed here: a store reset is a **lifecycle** operation on a
+shared devnet and needs coordinating, and this slice's irreversible-action scope is submissions only.
+**The residue worth recording is the earlier silence about this, not the failure itself.**
