@@ -315,6 +315,17 @@ derived from the chain's **network magic**. A client pointed at a devnet or any 
 network gets `undefined`, because it is none of the three and naming it one would be a lie a
 plugin would then act on. Branch on the absence; do not coerce it to a default.
 
+⭐ **The information is not lost, and this is why `undefined` is honest rather than lossy.**
+`ctx.client.chain.networkMagic` and `ctx.client.chain.name` are on the same context object, one
+field away. If you need to distinguish private networks, read those — do not invent a default for
+`network`.
+
+⚠ **It is derived from the magic ALONE, so a private network that REUSES a public magic is
+labelled as that network.** A mainnet-fork devnet keeps magic `764824073` and reports `"mainnet"`;
+a privnet that picked magic `1` or `2` reports `"preprod"` or `"preview"`. If you gate a
+destructive path on `network !== "mainnet"`, that gate does not distinguish a mainnet fork from
+mainnet. Check `chain.name` or your own configuration as well.
+
 > ⚠ **Breaking, and it landed after 0.10.0** — the release notes name the version; this
 > block deliberately does not, because a number written here ages into a lie. This field
 > was previously typed `string` and computed from
@@ -323,6 +334,15 @@ plugin would then act on. Branch on the absence; do not coerce it to a default.
 > `ctx.network` into a `string`, or that branch on `=== "preprod"` to detect a devnet, must be
 > updated. `networkFromChain(chain)` is exported from the package root if you need the same
 > mapping for a chain of your own.
+>
+> ⛔ **AND THE ONE THE COMPILER WILL NOT CATCH.** At 0.10.0 this field was declared `string`
+> while the package exported a `Network` union, so a plugin that wanted the union **had no choice
+> but to cast**: `ctx.network as Network`. **That cast still compiles, and now yields `undefined`
+> at runtime** — an exhaustive `switch` over it falls off the end and returns `undefined`, with
+> no diagnostic anywhere. **Remove the cast.** Plain-JavaScript plugins have the same exposure
+> with no typechecker at all: `` `https://${ctx.network}.cardanoscan.io` `` becomes
+> `https://undefined.cardanoscan.io`, `ctx.network.toUpperCase()` throws, and `JSON.stringify(ctx)`
+> drops the key entirely on a devnet.
 
 ---
 

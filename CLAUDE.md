@@ -90,7 +90,7 @@ Proven on 2026-08-14/15, Node v20.20.2 / npm 10.8.2, from a clean `npm ci`:
 | `npm ci` | Lockfile installs cleanly | green |
 | `npm run typecheck` | `tsc --noEmit` over `src/**` — whole public surface typechecks | green — exit 0 |
 | `npm run build` | `tsc` emits `dist/` (js + .d.ts + maps) — the published artifact compiles | green — exit 0 |
-| `npm test` | build + offline unit tests. **Never touches the network.** | green — 236 pass, 0 fail, 0 skipped (2026-09-17) |
+| `npm test` | build + offline unit tests. **Never touches the network.** | green — 350 pass, 0 fail, 0 skipped (2026-09-17) |
 | `npm run test:devnet` | build + devnet tests against a live Yaci chain | green — 4 pass, 0 fail, 0 skipped (requires a devnet) |
 
 Other scripts: `npm run dev` (`tsc --watch`), `npm run clean` (`rm -rf dist`),
@@ -148,6 +148,9 @@ src/
   standard/
     blueprint.ts              STANDARD_VALIDATORS titles, lookup, validateStandardBlueprint().
     scripts.ts                The parameterization chain (see below) → ResolvedStandardScripts.
+    bootstrap.ts              planBootstrap() + the five step builders + assembleDeploymentParams.
+                              The exported deployment sequence (see the amended boundary above).
+                              Returns UNSIGNED transactions; never signs, submits or awaits.
     params.ts                 Type re-exports only.
   substandards/
     interface.ts              SubstandardPlugin + every *Params type + UnsignedTx.
