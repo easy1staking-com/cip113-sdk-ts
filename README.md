@@ -58,6 +58,61 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.11.0 (a wrong network label, and the bootstrap becomes public API)
+
+Two changes. The first is breaking for plugin authors and silent in one shape the compiler will
+not catch. The second is purely additive.
+
+### `SubstandardContext.network` was wrong, and its type hid it
+
+It was declared `string` and computed from `chain.id` — which is the **address** network id, `1`
+for mainnet and `0` for *every* testnet. **A preview client was therefore labelled `"preprod"`,
+and so was a devnet.** It is now `network?: Network`, derived from the chain's **network magic**,
+and a chain that is none of the three public networks yields **`undefined`** rather than a wrong
+name.
+
+```diff
+- network: string          // "preprod" on preview, and on a devnet
++ network?: Network        // "preview" on preview; undefined on a devnet
+```
+
+⛔ **The shape the compiler will NOT catch.** At 0.10.0 the field was declared `string` while the
+package exported a `Network` union, so a plugin that wanted the union **had no choice but to
+cast**:
+
+```ts
+switch (ctx.network as Network) { case "mainnet": … case "preprod": … case "preview": … }
+```
+
+**That cast still compiles and now yields `undefined` at runtime** — the exhaustive switch falls
+off the end and returns `undefined`, with no diagnostic anywhere. **Remove the cast.** Untyped
+JavaScript has the same exposure: `` `https://${ctx.network}.…` `` becomes `https://undefined.…`,
+`ctx.network.toUpperCase()` throws, and `JSON.stringify(ctx)` drops the key on a devnet.
+
+⚠ **The label is derived from the magic alone**, so a private network reusing a public magic is
+labelled as that network — a mainnet-fork devnet reports `"mainnet"`. If you gate a destructive
+path on `network !== "mainnet"`, that gate does not distinguish a fork from the real thing.
+`networkFromChain(chain)` is exported if you want the same mapping yourself, and
+`ctx.client.chain.networkMagic` / `.name` are on the same context object when you need more.
+
+### The protocol bootstrap is now exported
+
+`planBootstrap()`, five step builders and `assembleDeploymentParams()` build the transactions that
+stand up a protocol instance. **The SDK returns unsigned transactions and does not sign, submit or
+await** — orchestration, key handling and confirmation stay with the caller, which is also what
+lets a caller keep its own UTxO reservation and resume at a step rather than restart.
+
+The sequence is **stepwise, not a batch**: the one-shot minting policies are parameterised by
+output references of an earlier transaction, so step N+1 cannot be built until step N has been
+submitted and observed.
+
+⚠ **Values a caller must decide are required inputs, not defaults** — `maxInlineDatumBytes` (a
+security parameter), the one-shot nonces, the seed and reference-script lovelace, and
+`availableUtxos`. There are no devnet defaults in the published path: no mnemonic, no endpoint, no
+fixture values. `availableUtxos` is required on every step precisely so a caller can reserve its
+seed UTxOs from coin selection — a wallet-wide selection can otherwise spend a seed a later step
+names, or spend live reference scripts.
+
 ## Migrating to 0.10.0 (a required field on `DeploymentParams`)
 
 **0.10.0 adds one REQUIRED field and breaks every consumer that builds a `DeploymentParams`

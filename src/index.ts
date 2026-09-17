@@ -22,7 +22,7 @@
  * ```
  */
 
-import type { DeploymentParams, PlutusBlueprint, PolicyId } from "./types.js";
+import type { DeploymentParams, Network, PlutusBlueprint, PolicyId } from "./types.js";
 import type {
   EvoClient,
   SubstandardPlugin,
@@ -39,6 +39,70 @@ import type {
 } from "./substandards/interface.js";
 import { validateStandardBlueprint } from "./standard/blueprint.js";
 import { buildDeploymentScripts, type ResolvedStandardScripts } from "./standard/scripts.js";
+
+// ---------------------------------------------------------------------------
+// Network identification
+// ---------------------------------------------------------------------------
+
+/**
+ * Which public Cardano network a chain descriptor refers to, keyed by network
+ * magic — or `undefined` when it refers to none of them.
+ *
+ * ⛔ THE DEFECT THIS EXISTS FOR. `SubstandardContext.network` was computed as
+ * `chain.id === 1 ? "mainnet" : "preprod"`. `Chain.id` is the NETWORK ID that
+ * goes into an address: **1 for mainnet and 0 for every testnet there has ever
+ * been**. It cannot separate preview from preprod, so a client pointed at
+ * preview was handed the label `"preprod"` — silently, forever, with no reading
+ * anywhere that disagreed. Meanwhile the field was typed `string` rather than
+ * `Network`, so `"preview"` was a value the union declared and the code could
+ * not produce, and the two halves never had to agree.
+ *
+ * MEASURED, and the reason the fix is `networkMagic`:
+ *
+ * ```
+ * preview -> { id: 0, networkMagic: 2,         epochLength: 86400  }
+ * preprod -> { id: 0, networkMagic: 1,         epochLength: 432000 }
+ * mainnet -> { id: 1, networkMagic: 764824073, epochLength: 432000 }
+ * ```
+ *
+ * ⚠ AND A DEVNET IS A FOURTH THING. Evolution's own `Chain` doc invites a
+ * custom descriptor "for private networks and devnets", and this repo's devnet
+ * harness builds exactly that — a chain whose magic comes from the local
+ * cluster's Shelley genesis. It is not mainnet, not preprod and not preview,
+ * and `magic === 1 ? "preprod" : "preview"` would only relabel the same lie.
+ *
+ * ⇒ SO THE ANSWER FOR A NON-PUBLIC CHAIN IS `undefined`, deliberately, and the
+ * two alternatives were rejected for reasons worth recording:
+ *
+ *   - REFUSING (throwing at `init`) would break a configuration this SDK
+ *     supports and this repo's own devnet suite depends on, in order to defend
+ *     a field nothing inside the SDK reads.
+ *   - WIDENING `Network` with a `"custom"` / `"devnet"` member would invent a
+ *     name for a chain that has none, hand it to a consumer as if it were
+ *     knowledge, and break every exhaustive `switch` over a published union.
+ *
+ * `undefined` is the only honest value, and making the field optional forces a
+ * plugin author to meet that fact at COMPILE time rather than act on a wrong
+ * label at submission time.
+ */
+const NETWORK_BY_MAGIC: ReadonlyMap<number, Network> = new Map<number, Network>([
+  [764824073, "mainnet"],
+  [1, "preprod"],
+  [2, "preview"],
+]);
+
+/**
+ * Identify a chain descriptor's public Cardano network, or `undefined` when it
+ * is none of the three (a devnet, a private network, any custom `Chain`).
+ *
+ * Exported because a plugin that receives `undefined` from
+ * `SubstandardContext.network` may want the same mapping for a chain of its
+ * own, and because a consumer should be able to read the rule rather than
+ * re-derive it from `chain.id` — which is the derivation that was wrong.
+ */
+export function networkFromChain(chain: { readonly networkMagic: number }): Network | undefined {
+  return NETWORK_BY_MAGIC.get(chain.networkMagic);
+}
 
 // ---------------------------------------------------------------------------
 // Init configuration
@@ -165,7 +229,10 @@ export const CIP113 = {
       standardScripts: scripts,
       deployment: config.standard.deployment,
       evaluator: config.evaluator,
-      network: config.client.chain.id === 1 ? "mainnet" : "preprod",
+      // Derived from the network MAGIC, never from `chain.id` — see
+      // networkFromChain. `undefined` here means "this client is pointed at no
+      // public Cardano network", which is the true answer for a devnet.
+      network: networkFromChain(config.client.chain),
       checkStakeRegistration: config.checkStakeRegistration,
     };
 
@@ -430,6 +497,55 @@ export {
   type ScriptHashCheck,
   type StandardScripts,
 } from "./standard/scripts.js";
+// ---------------------------------------------------------------------------
+// Protocol bootstrap — the transactions that stand up an instance (T-D51-1)
+//
+// ⚑ EXPORTED BECAUSE THE ALTERNATIVE WAS A SECOND IMPLEMENTATION. The platform
+// could not import `test/harness/bootstrap.ts` (`files` ships only `dist` and
+// `blueprints`), so it maintained its own port of a protocol-critical sequence —
+// and that port had already diverged CORRECTLY. See CLAUDE.md, "Protocol
+// bootstrap — AMENDED 2026-09-17", and `design/bootstrap-export.md`.
+//
+// ⛔ Orchestration stays with the caller: these builders return unsigned
+// transactions and do not sign, submit, await, fund or retry.
+export {
+  planBootstrap,
+  buildSeedTx,
+  selectBootstrapSeeds,
+  buildMultisigGenesisTx,
+  assertMultisigConfigUtxo,
+  buildProtocolGenesisTx,
+  buildReferenceScriptsTx,
+  buildStakeRegistrationTx,
+  assembleDeploymentParams,
+  BOOTSTRAP_SEED_COUNT,
+  BOOTSTRAP_STEPS,
+  // ⛔ A CUTTING GUIDE, NOT AN IDENTIFIER, AND NEVER DEPLOYED — see its
+  // docstring. Exported so the occurrence guard that licenses it can be
+  // exercised; do not pass it where a minting-logic hash is expected.
+  ISSUANCE_SPLICE_MARKER,
+  REFERENCE_SCRIPT_ORDER,
+  STAKE_REGISTRATION_ORDER,
+} from "./standard/bootstrap.js";
+export type {
+  BootstrapConfig,
+  BootstrapPlan,
+  BootstrapScripts,
+  BootstrapSeeds,
+  BootstrapSeedUtxos,
+  BootstrapStepId,
+  BootstrapBuildContext,
+  BootstrapObservations,
+  UnfrackingChoice,
+  ReferenceScriptName,
+  StakeCredentialName,
+  SeedTxParams,
+  MultisigGenesisTxParams,
+  ProtocolGenesisTxParams,
+  ReferenceScriptsTxParams,
+  StakeRegistrationTxParams,
+} from "./standard/bootstrap.js";
+
 export {
   CIP171_METADATA_LABEL,
   CIP171_MAX_CHUNK_BYTES,
