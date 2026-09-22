@@ -57,7 +57,22 @@ jobs:
       # `npm view` serves a client cache — it returned the PREVIOUS version
       # thirty seconds after a successful publish today, and a green workflow
       # plus a stale client is indistinguishable from a publish that failed.
+      #
+      # ⛔ GATED ON HAVING ACTUALLY PUBLISHED, and the omission was a real trap.
+      # This asserts `dist-tags.latest == V`, which is true for a version we
+      # just published and FALSE FOR ANY OLDER ONE. Both triggers can fire on a
+      # version that is already live — and creating a GitHub Release for an
+      # OLD tag (backfilling release notes for a tag that shipped months ago)
+      # does exactly that. Ungated, this step then polls for 200s and fails,
+      # reporting RED on a release that is perfectly fine — the same "trains
+      # people to ignore red workflows" failure the skip guard above exists to
+      # prevent, one step further down.
+      #
+      # Nothing is lost by skipping: the check step above already proved the
+      # version is in the registry's `versions` map. That IS the verification
+      # when we did not publish.
       - name: Verify the registry actually has it
+        if: steps.check.outputs.already == 'false'
         run: |
           V="${{ steps.check.outputs.version }}"
           for i in $(seq 1 20); do
