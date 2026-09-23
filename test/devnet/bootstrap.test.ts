@@ -1,5 +1,12 @@
 /**
- * Protocol bootstrap on a live devnet — CIP-113 0.5.0-alpha.4.
+ * Protocol bootstrap on a live devnet — CIP-113 0.5.0-alpha.5.
+ *
+ * ⛔ A GREEN HERE NO LONGER SPEAKS FOR THE GENESIS ON ITS OWN. Since alpha.5
+ * the genesis carries a withdraw-0 from `upgrade_cred`, and a SUCCESS cannot
+ * distinguish "the new check passed" from "the new check never ran". The
+ * NEGATIVE CONTROL that separates those two lives in
+ * `test/devnet/upgrade-activation.test.ts`; read that file's verdict alongside
+ * this one.
  *
  * ⚠ THIS IS A FIRST-EVER EXECUTION, NOT A REGRESSION TEST. No alpha.4 bootstrap
  * has ever run. A green here is a SINGLE OBSERVATION with nothing behind it —

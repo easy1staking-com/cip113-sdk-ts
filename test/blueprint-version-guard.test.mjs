@@ -162,22 +162,33 @@ test("alpha.2 is now diagnosed as EARLIER — a real artifact, not a fixture", (
 
 test("F. the VENDORED alpha.3 blueprint is now diagnosed as EARLIER", () => {
   // In S-3 this asserted a LATER refusal. S-4 migrated the SDK to alpha.3 and
-  // it INVERTED to an acceptance. T-F02 moves the target to alpha.4, so it
-  // inverts once more — alpha.3 is now behind. Kept as ONE test through all
-  // three states rather than deleted-and-rewritten, so each flip is visible in
-  // the diff; that is the convention S-4 used one migration ago.
+  // it INVERTED to an acceptance. T-F02 moved the target to alpha.4 and it
+  // inverted once more; T-D53 moves it to alpha.5 and alpha.3 falls further
+  // behind. Kept as ONE test through all four states rather than
+  // deleted-and-rewritten, so each flip is visible in the diff; that is the
+  // convention S-4 used three migrations ago.
   const alpha3 = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
   assert.equal(alpha3.preamble.version, "0.5.0-alpha.3");
-  assert.notEqual(alpha3.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.4 IS the target now");
+  assert.notEqual(
+    alpha3.preamble.version,
+    TARGET_PROTOCOL_VERSION,
+    "alpha.5 IS the target now",
+  );
 
   const msg = messageOf(alpha3);
   assert.ok(msg, "alpha.3 is no longer the target and must be refused");
   assert.match(msg, /EARLIER CIP-113 protocol version/);
   assert.doesNotMatch(msg, /LATER/);
+  // ⛔ DERIVED FROM THE CONSTANT, NOT SPELLED OUT. A literal directory here is
+  // a second place the target version lives, and it went stale at this very
+  // migration — the assertion read `alpha.4` while the SDK had moved to
+  // alpha.5, and its message still said "must point at the alpha.4 directory".
   assert.match(
     msg,
-    /blueprints\/standard\/v0\.5\.0-alpha\.4\//,
-    "must point at the alpha.4 blueprint directory",
+    new RegExp(
+      `blueprints/standard/v${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}/`,
+    ),
+    `must point at the v${TARGET_PROTOCOL_VERSION} blueprint directory`,
   );
 });
 
@@ -273,15 +284,45 @@ test("comparator returns null — not 0 — when it cannot tell", () => {
 // around it; the comparison now runs FIRST, which is what makes it writable.
 // ---------------------------------------------------------------------------
 
-test("E. the VENDORED alpha.4 blueprint is now ACCEPTED — the flip", () => {
-  // Nothing to invert here: no earlier test asserted anything about alpha.4's
-  // acceptance, because under the old control flow it was accepted silently and
-  // wrongly. This is a new assertion, and it is the §7f control for the whole
-  // file — a gate that refuses everything is not a fixed gate.
+test("E. the VENDORED alpha.4 blueprint is now diagnosed as EARLIER — the flip back", () => {
+  // T-F01 wrote this as "alpha.4 is ACCEPTED", the §7f control proving the gate
+  // does not refuse everything. T-D53 moves the target to alpha.5 and it
+  // inverts, exactly as F did one release earlier. Kept as ONE test through
+  // both states so the flip is visible in the diff.
+  //
+  // ⛔ AND alpha.4 IS THE CASE WORTH KEEPING, because it is the one that
+  // refuses on the PREAMBLE ALONE. Every required validator title is present —
+  // alpha.5 added no title, removed none, and changed no arity — so a
+  // symbol-based gate would accept it silently and build an alpha.4 genesis
+  // transaction against alpha.5's rules. That transaction is refused by the
+  // ledger for a reason naming neither version.
   const alpha4 = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
   assert.equal(alpha4.preamble.version, "0.5.0-alpha.4");
-  assert.equal(alpha4.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.4 IS the target now");
-  assert.equal(validateStandardBlueprint(alpha4), undefined);
+  assert.notEqual(
+    alpha4.preamble.version,
+    TARGET_PROTOCOL_VERSION,
+    "alpha.5 IS the target now",
+  );
+
+  const msg = messageOf(alpha4);
+  assert.ok(msg, "alpha.4 is no longer the target and must be refused");
+  assert.match(msg, /EARLIER CIP-113 protocol version/);
+  assert.doesNotMatch(msg, /LATER/);
+  // The distinguishing clause: refused despite nothing being missing.
+  assert.match(msg, /Every required validator title IS present/);
+  assert.doesNotMatch(msg, /Missing required validator/);
+});
+
+test("E2. the VENDORED alpha.5 blueprint is ACCEPTED — the §7f control", () => {
+  // A gate that refuses everything is not a fixed gate. This is the one
+  // acceptance in the file that names a real shipped artefact rather than the
+  // target-derived path used by "the TARGET blueprint passes untouched", and it
+  // is deliberately spelled out: the two would move together if the constant
+  // itself were wrong.
+  const alpha5 = load("blueprints/standard/v0.5.0-alpha.5/plutus.json");
+  assert.equal(alpha5.preamble.version, "0.5.0-alpha.5");
+  assert.equal(alpha5.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.5 IS the target now");
+  assert.equal(validateStandardBlueprint(alpha5), undefined);
 });
 
 test("G. alpha.4 PARAMETER ARITY, read from the artefact", () => {

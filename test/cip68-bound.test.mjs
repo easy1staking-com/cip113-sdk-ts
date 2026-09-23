@@ -1,9 +1,13 @@
 /**
  * The CIP-68 inline-datum bound, measured — and the half nobody tests.
  *
- * alpha.4 NEWLY bounds the datum of a CIP-68 mint. Upstream at
- * `7e8a63198c5b240135f1aa2f043ce5d7c046b2c4`,
- * `lib/assets.ak :: is_seizable_output_shape_bounded` reads:
+ * alpha.4 NEWLY bounds the datum of a CIP-68 mint, and alpha.5 leaves it
+ * exactly where alpha.4 put it — VERIFIED at the source, not assumed from the
+ * compiled bytes: `git diff 7e8a631 b83a041 -- lib/prog_assets.ak` is comments
+ * only, which is also why `prog_assets`'s consumers compile byte-identically
+ * across the bump. Upstream at `7e8a63198c5b240135f1aa2f043ce5d7c046b2c4`
+ * (unchanged at `b83a041eaa053625c502f8ee64b607a787cf5f79`),
+ * `lib/prog_assets.ak :: is_seizable_output_shape_bounded` reads:
  *
  *     InlineDatum(d) ->
  *       bytearray.length(builtin.serialise_data(d)) <= max_inline_datum_bytes

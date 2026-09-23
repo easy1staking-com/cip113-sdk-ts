@@ -1,0 +1,36 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "ca53475332b5932f021fa134f823b932b05433ccd335bbf6251f18167826da66",
+  "declares": {
+    "title": "cardano-foundation/cip113-programmable-tokens",
+    "version": "0.5.0-alpha.5",
+    "compiler": "Aiken v1.1.23+8949565",
+    "validators": 34
+  },
+  "upstream": {
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+    "commit": "b83a041eaa053625c502f8ee64b607a787cf5f79",
+    "ref": "feat/verify-upgrade-authority-at-deployment",
+    "note": "PINNED TO THE COMMIT, NOT THE VERSION STRING, AND NOT THE BRANCH NAME — upstream publishes NO git tags, so \"0.5.0-alpha.5\" is a `version` field inside plutus.json on a MOVING branch. ⛔ THIS COMMIT IS NOT ON `main`. Reachability was VERIFIED, not assumed, by `git ls-remote` against the upstream URL on 2026-09-23: b83a041eaa053625c502f8ee64b607a787cf5f79 is BOTH `refs/heads/feat/verify-upgrade-authority-at-deployment` AND `refs/pull/143/head`, while `refs/heads/main` stood at c3d04b9ad0573f35852b1b2403d31956a685b12d. A PR head is the most perishable ref GitHub serves — a squash-merge orphans it the instant it lands, which has already bitten this repo twice (013c1154, then 2e067fe). The `refs/pull/143/head` co-reachability is what keeps this artifact fetchable after the branch is deleted; record it, do not rely on the branch name alone. ⚠ WHICH CLONE: this artifact was reproduced from /home/giovanni/Development/workspace/cip113-programmable-tokens-onchain. The sibling checkout whose path reads like \"the dependency\", workspace/deps/cip113-programmable-tokens, sits at 018415de and CANNOT produce this tree."
+  },
+  "blueprint_reproduced": true,
+  "provenance": "VERIFIED",
+  "reproduce": {
+    "requires": "Aiken v1.1.23+8949565",
+    "command": "git clone https://github.com/cardano-foundation/cip113-programmable-tokens && git fetch origin refs/pull/143/head && git checkout b83a041eaa053625c502f8ee64b607a787cf5f79 && aikup install v1.1.23 && rm plutus.json && aiken build",
+    "note": "`aikup install v1.1.23` with the version explicit, never bare `aikup install`, which follows latest and will stop reproducing this artifact the moment v1.1.24 ships. ⚠ aiken BUILDS ANYWAY on a mismatched compiler, emitting only a warning — check the preamble's compiler field, do not trust the environment."
+  },
+  "verified": {
+    "date": "2026-09-23",
+    "method": "REPRODUCED FROM SOURCE",
+    "findings": [
+      "OBSERVED: `aiken build` at upstream commit b83a041eaa053625c502f8ee64b607a787cf5f79, with Aiken v1.1.23+8949565 (the environment's installed v1.1.22 was upgraded by `aikup install v1.1.23` first), produced a plutus.json BYTE-IDENTICAL to the one upstream commits at that same commit. Both sha256 ca53475332b5932f021fa134f823b932b05433ccd335bbf6251f18167826da66, both 164120 bytes. The build ran in a THROWAWAY CLONE, and upstream's committed plutus.json was DELETED before the build so it could not be mistaken for output.",
+      "⚠ THE MUTABLE-DEPENDENCY CAVEAT THAT SCOPED EVERY EARLIER PIN IS GONE AT THIS COMMIT, AND THAT IS A CHANGE WORTH RECORDING RATHER THAN A SENTENCE WORTH DELETING. alpha.2, alpha.3 and alpha.4 all pinned `aiken-lang/fuzz` to the BRANCH `main`; at b83a041 aiken.toml pins it to the TAG `v2.2.0`. `aiken-lang/stdlib` remains the tag `v3.1.0`. Both dependencies are now immutable refs, so this reproducibility claim needs no scope note. aiken.lock's `[etags]` is empty either way — an empty etags table records nothing about what was fetched, which is exactly why the TAG, not the lockfile, is what makes this reproducible.",
+      "DELTA FROM alpha.4 (pin 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4), MEASURED by hashing every validator's compiledCode either side rather than read from upstream's diff: 34 validators either side, no title added or removed. 31 are BYTE-IDENTICAL. The only three that move are `protocol_params.protocol_params.{mint,spend,else}` — which is ONE script, since every handler of an Aiken `validator` block shares a single compiledCode and hash. alpha.4 `20e612fcd69a51d0…` -> alpha.5 `edac935fccd8215a…` (sha256 prefixes of the compiledCode).",
+      "THE FUNCTIONAL CHANGE IS ONE LINE, in `protocol_params`'s mint handler: `pairs.has_key(self.withdrawals, genesis_params.upgrade_cred)?`. The genesis transaction that mints the protocol-params NFT must now carry a withdraw-0 from the credential the genesis datum names as `upgrade_cred` — proving the initial authority exists, can run and consents BEFORE it becomes canonical, by the same trampoline every later upgrade uses. Everything else in the validator's diff is prose.",
+      "⛔ THE CASCADE, AND IT IS WHY alpha.5 IS A REDEPLOYMENT AND NOT AN UPGRADE. `protocol_params`'s hash IS `paramsPolicy`, which parameterises `programmable_logic_base` (and through it transfer / third_party / unfracking / programmable_logic_global), `issuance_logic` and `issuance_mint`. Only `always_fail`, `issuance_cbor_hex_mint`, `registry` and `upgrade_multisig` hang off seeds or nonces instead, so ONLY those four keep their alpha.4 hashes for the same DeploymentParams. Measured, not assumed — see `test/hash-cascade.test.mjs`, which derives both sides from a live alpha.4 preview record's own seeds.",
+      "⚠ THE PARAMS DATUM DID NOT MOVE. Six fields, same order as alpha.4: programmable_logic_global_cred, issuance_logic_cred, transfer_cred, third_party_cred, upgrade_cred, pending_upgrade_cred. The alpha.3 -> alpha.4 field-order hazard recorded in the alpha.4 pin does NOT recur here; a positional reader built against alpha.4 reads alpha.5 correctly. What changed is the transaction shape at genesis, not the datum.",
+      "DERIVED: because the pin is keyed to a commit on a PR branch rather than a tag, re-running `aiken build` against that branch at a LATER date will legitimately produce a different artifact. That is not drift in this pin — it is a new pin. Do not update this file's sha256 to make a newer build pass; add a new directory."
+    ]
+  }
+}

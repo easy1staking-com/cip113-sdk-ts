@@ -35,6 +35,7 @@ import {
   Bytes,
   Data,
   InlineDatum,
+  KeyHash,
   UPLC,
   Transaction as EvoTransaction,
   TransactionHash as EvoTransactionHash,
@@ -68,8 +69,33 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
 
-const BLUEPRINT = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
-const PIN = load("blueprints/standard/v0.5.0-alpha.4/UPSTREAM_PIN.json");
+const BLUEPRINT = load("blueprints/standard/v0.5.0-alpha.5/plutus.json");
+const PIN = load("blueprints/standard/v0.5.0-alpha.5/UPSTREAM_PIN.json");
+
+/**
+ * The alpha.4 artefact, retained HERE and not merely on disk.
+ *
+ * ⛔ WHAT alpha.5 COST THIS FILE, STATED PLAINLY RATHER THAN QUIETLY REPAIRED.
+ * Until 0.12.0 every assertion below had the LIVE preview deployment as its
+ * second operand — a real chain, which is what made them proofs rather than
+ * self-comparisons. alpha.5 moves `protocol_params`'s compiled bytes, and that
+ * script's hash IS the params-NFT policy, the root of the parameterisation
+ * graph. Eight of the twelve derived hashes therefore MUST differ from the live
+ * record, so "reproduces the live deployment" is no longer a true statement to
+ * assert, and `planBootstrap` cannot even be pointed at alpha.4 any more —
+ * `validateStandardBlueprint` is a version-EQUALITY gate.
+ *
+ * ⇒ The live record is kept, and its role is SPLIT rather than dropped:
+ *   * the four scripts whose bytes did NOT move (`always_fail`,
+ *     `issuance_cbor_hex_mint`, `registry`, `upgrade_multisig`) must still
+ *     reproduce it exactly — the chain is still the operand for them;
+ *   * the eight downstream of the params policy must all DIFFER from it (seven
+ *     of them are `plan.scripts` entries; `issuance_mint` is the eighth and is
+ *     built per minting logic, so no record holds it), which
+ *     is the cascade claim the 0.12.0 release makes, measured against a chain
+ *     rather than against a fixture this file derived a moment ago.
+ */
+const ALPHA4_BLUEPRINT = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
 
 /**
  * The LIVE preview alpha.4 record — an INDEPENDENT source, not a fixture this
@@ -82,7 +108,16 @@ const PIN = load("blueprints/standard/v0.5.0-alpha.4/UPSTREAM_PIN.json");
  */
 const REAL = load("deployments/preview/alpha4-7e8a631.json");
 
-/** The PLG hash the live preview instance actually deployed. ⛔ If this moves, STOP. */
+/**
+ * The PLG hash the live preview instance actually deployed.
+ *
+ * ⛔ IT IS NO LONGER A TARGET THE PLAN CAN REACH, and saying so is the point.
+ * Under alpha.5 the dispatcher hangs off the params policy, so this value is
+ * now a record of what alpha.4 deployed rather than something `planBootstrap`
+ * can reproduce. It is kept, and asserted against the record it came from, so
+ * the cascade test below has a named literal to contradict — a bare
+ * `notEqual` against a value nobody pinned proves nothing.
+ */
 const REAL_PLG = "d599d56f944d33a90b16f561ee61f183a4ba3c9185f2d779e0d356f4";
 
 /**
@@ -151,14 +186,89 @@ const keyCred = (hash) => Data.constr(0n, [Data.bytearray(hash)]);
  * `planBootstrap` visible: `issuanceLogic.scriptHash` and `transfer.scriptHash`
  * are different 28-byte values on a real chain.
  */
+/**
+ * The twelve scripts, re-derived through `createStandardScripts` — NOT through
+ * `planBootstrap`, which is the function under test.
+ *
+ * ⛔ THIS USED TO READ THE LIVE PREVIEW RECORD'S OWN FIELDS BY NAME, and that
+ * was strictly better. alpha.5 took it away: eight of these hashes cannot equal
+ * the live record's any more (see ALPHA4_BLUEPRINT above), so the record can no
+ * longer supply the expected credential for field 0, 1, 2 or 3.
+ *
+ * ⚠ WHAT THE REPLACEMENT STILL CATCHES, AND WHAT IT DOES NOT. The defect this
+ * section exists for is a SWAP INSIDE `planBootstrap` — `issuanceLogicCred`
+ * placed where `transferCred` belongs, which deploys, verifies and bricks
+ * issuance, and which the module's own comment warns about. That defect lives
+ * in planBootstrap's call to `protocolParamsDatum(...)`, and naming each script
+ * separately here still makes it visible: these are four distinct 28-byte
+ * values and the indices below are asserted against them. What it no longer
+ * catches is a defect shared by `createStandardScripts` and `planBootstrap`
+ * alike — the parameterisation chain itself. That is what the live-record
+ * section further down still holds, for the four scripts where it can.
+ */
+const IND = (() => {
+  const b = createStandardScripts(BLUEPRINT);
+  const seeds = previewConfig().seeds;
+  const max = BigInt(REAL.maxInlineDatumBytes);
+  const alwaysFail = b.alwaysFail(PREVIEW_NONCE);
+  const upgradeMultisig = b.upgradeMultisig(seeds.upgradeMultisig);
+  const protocolParams = b.protocolParams(seeds.protocolParams);
+  const programmableLogicBase = b.programmableLogicBase(protocolParams.hash);
+  const issuanceCborHexMint = b.issuanceCborHexMint(seeds.issuance, alwaysFail.hash);
+  const registry = b.registry(seeds.protocolParams, issuanceCborHexMint.hash);
+  const transfer = b.transfer(programmableLogicBase.hash, registry.hash, max);
+  const thirdParty = b.thirdParty(programmableLogicBase.hash, registry.hash, max);
+  const unfracking = b.unfracking(programmableLogicBase.hash, registry.hash, max);
+  const programmableLogicGlobal = b.programmableLogicGlobal(
+    transfer.hash,
+    thirdParty.hash,
+    unfracking.hash
+  );
+  const issuanceLogic = b.issuanceLogic(
+    programmableLogicBase.hash,
+    registry.hash,
+    protocolParams.hash,
+    max
+  );
+  return {
+    alwaysFail,
+    upgradeMultisig,
+    protocolParams,
+    programmableLogicBase,
+    issuanceCborHexMint,
+    registry,
+    transfer,
+    thirdParty,
+    unfracking,
+    programmableLogicGlobal,
+    issuanceLogic,
+  };
+})();
+
 const EXPECTED_PARAMS_DATUM = Data.constr(0n, [
-  scriptCred(REAL.programmableLogicGlobal.scriptHash), // 0 plg_cred
-  scriptCred(REAL.issuanceLogic.scriptHash), //            1 issuance_logic_cred  (INSERTED in alpha.4)
-  scriptCred(REAL.transfer.scriptHash), //                 2 transfer_cred        (displaced from 1)
-  scriptCred(REAL.thirdParty.scriptHash), //               3 third_party_cred
-  scriptCred(REAL.upgradeMultisig.scriptHash), //          4 upgrade_cred
-  Data.constr(1n, []), //                                  5 pending_upgrade_cred = None at genesis
+  scriptCred(IND.programmableLogicGlobal.hash), // 0 plg_cred
+  scriptCred(IND.issuanceLogic.hash), //           1 issuance_logic_cred  (INSERTED in alpha.4)
+  scriptCred(IND.transfer.hash), //                2 transfer_cred        (displaced from 1)
+  scriptCred(IND.thirdParty.hash), //              3 third_party_cred
+  scriptCred(IND.upgradeMultisig.hash), //         4 upgrade_cred
+  Data.constr(1n, []), //                          5 pending_upgrade_cred = None at genesis
 ]);
+
+test("the four fields most easily swapped are four DISTINCT values", () => {
+  // ⛔ WITHOUT THIS, THE INDEX PIN ABOVE COULD BE VACUOUS. If any two of these
+  // credentials were equal, a swap between them would move nothing and the
+  // assertion would pass with the defect present. The live record used to make
+  // distinctness self-evident (four values off a real chain); re-derived, it has
+  // to be asserted.
+  const four = [
+    IND.programmableLogicGlobal.hash,
+    IND.issuanceLogic.hash,
+    IND.transfer.hash,
+    IND.thirdParty.hash,
+  ];
+  assert.equal(new Set(four).size, 4, "a swap between two equal hashes is invisible");
+  for (const h of four) assert.match(h, /^[0-9a-f]{56}$/);
+});
 
 /**
  * The registry origin node — a literal fixture, because no deployment record
@@ -201,7 +311,7 @@ function scriptBodyHex(compiledCode) {
 
 const INDEPENDENT_SPLICE = scriptBodyHex(
   createStandardScripts(BLUEPRINT)
-    .issuanceMint(TEST_MARKER, REAL.protocolParams.policyId)
+    .issuanceMint(TEST_MARKER, IND.protocolParams.hash)
     .compiledCode
 ).split(TEST_MARKER);
 
@@ -255,7 +365,7 @@ test("PIN: the splice halves do not depend on the marker's VALUE — which is wh
   const other = "aa".repeat(28);
   assert.notEqual(other, TEST_MARKER);
   const halves = scriptBodyHex(
-    createStandardScripts(BLUEPRINT).issuanceMint(other, REAL.protocolParams.policyId).compiledCode
+    createStandardScripts(BLUEPRINT).issuanceMint(other, IND.protocolParams.hash).compiledCode
   ).split(other);
   assert.equal(halves.length, 2);
   assert.deepEqual(halves, INDEPENDENT_SPLICE, "two markers, byte-identical halves");
@@ -265,44 +375,123 @@ test("PIN: the splice halves do not depend on the marker's VALUE — which is wh
 // THE PIN — the chain is the second operand
 // ---------------------------------------------------------------------------
 
-test("PIN: the plan reproduces the live preview dispatcher hash", () => {
+/**
+ * The four scripts alpha.5 did NOT move, still pinned to the live chain.
+ *
+ * ⛔ THIS IS THE FILE'S LAST REMAINING NON-SELF OPERAND, so it is worth saying
+ * what it does. `always_fail` hangs off a nonce, `issuance_cbor_hex_mint` and
+ * `registry` off seeds and each other, `upgrade_multisig` off its own seed —
+ * none of them touches the params-NFT policy. Their alpha.5 hashes must
+ * therefore equal the ones a real alpha.4 bootstrap put on preview, derived
+ * from that deployment's own seeds. If one of these moves, either upstream
+ * changed a validator the pin says it did not, or the parameterisation chain
+ * drifted.
+ */
+const LIVE_UNCHANGED = [
+  ["alwaysFail", (s) => s.alwaysFail.hash, REAL.issuance.alwaysFailScriptHash],
+  ["issuanceCborHexMint", (s) => s.issuanceCborHexMint.hash, REAL.issuance.policyId],
+  ["registry", (s) => s.registry.hash, REAL.registry.scriptHash],
+  ["upgradeMultisig", (s) => s.upgradeMultisig.hash, REAL.upgradeMultisig.scriptHash],
+];
+
+/**
+ * The seven `plan.scripts` entries downstream of the params-NFT policy, plus
+ * the policy itself. Every one of these MUST differ from the live alpha.4
+ * record — see the cascade note on ALPHA4_BLUEPRINT.
+ *
+ * ⚠ `issuance_mint` is the eighth script the cascade moves and is deliberately
+ * absent: it is parameterised per minting-logic hash at registration time, so
+ * it is not a `plan.scripts` entry and no deployment record carries its hash.
+ */
+const LIVE_MOVED = [
+  ["protocolParams", (s) => s.protocolParams.hash, REAL.protocolParams.policyId],
+  ["programmableLogicBase", (s) => s.programmableLogicBase.hash, REAL.programmableLogicBase.scriptHash],
+  ["transfer", (s) => s.transfer.hash, REAL.transfer.scriptHash],
+  ["thirdParty", (s) => s.thirdParty.hash, REAL.thirdParty.scriptHash],
+  ["unfracking", (s) => s.unfracking.hash, REAL.unfracking.scriptHash],
+  ["programmableLogicGlobal", (s) => s.programmableLogicGlobal.hash, REAL.programmableLogicGlobal.scriptHash],
+  ["issuanceLogic", (s) => s.issuanceLogic.hash, REAL.issuanceLogic.scriptHash],
+];
+
+test("PIN: the four scripts alpha.5 did not move still reproduce the live preview deployment", () => {
   const plan = planBootstrap(previewConfig());
-  assert.equal(
-    plan.scripts.programmableLogicGlobal.hash,
-    REAL_PLG,
-    "the dispatcher hash moved — the parameterisation chain, an argument order, or an " +
-      "encoding changed. This pin is a hash that is on chain, not one this file derived."
+  for (const [name, get, expected] of LIVE_UNCHANGED) {
+    assert.equal(get(plan.scripts), expected, `${name} must still reproduce the live chain`);
+  }
+  // The dispatcher's recorded unfracking parameter is a FACT ABOUT THE RECORD,
+  // not a hash, and it survives the version bump unchanged.
+  assert.equal(plan.unfrackingParameter, plan.scripts.unfracking.hash);
+  assert.notEqual(plan.unfrackingParameter, UNFRACKING_DISABLED);
+});
+
+test("PIN: every script downstream of the params policy has MOVED away from the live alpha.4 deployment", () => {
+  // ⛔ THE CASCADE, AS A MEASUREMENT AGAINST A CHAIN. The 0.12.0 release note
+  // claims every hash changes and an alpha.4 instance must be redeployed rather
+  // than upgraded. This is that claim, with a live deployment record on the
+  // other side of the comparison instead of a fixture.
+  const plan = planBootstrap(previewConfig());
+  for (const [name, get, alpha4Hash] of LIVE_MOVED) {
+    assert.match(alpha4Hash, /^[0-9a-f]{56}$/, `${name}: the live record must carry a real hash`);
+    assert.notEqual(
+      get(plan.scripts),
+      alpha4Hash,
+      `${name} kept its alpha.4 hash — the params policy is its ancestor and alpha.5 moved it`
+    );
+  }
+  assert.equal(LIVE_UNCHANGED.length + LIVE_MOVED.length, 11, "all eleven core scripts accounted for");
+
+  // ⛔ THE LITERAL AND THE RECORD MUST AGREE, or the "moved" assertions above
+  // are comparing against a value nobody checked. REAL_PLG was written into
+  // this file by hand when the preview instance was deployed; the record is
+  // the file that instance produced.
+  assert.equal(REAL.programmableLogicGlobal.scriptHash, REAL_PLG);
+  assert.notEqual(plan.scripts.programmableLogicGlobal.hash, REAL_PLG);
+});
+
+test("PIN: assembleDeploymentParams reproduces the live record's SHAPE, and every script field has moved", () => {
+  const plan = planBootstrap(previewConfig());
+  const assembled = JSON.parse(
+    JSON.stringify(
+      assembleDeploymentParams(plan, {
+        protocolGenesisTxHash: REAL.txHash,
+        referenceScriptsTxHash: REAL.programmableBaseRefInput.txHash,
+        multisigConfigUtxo: REAL.upgradeMultisig.utxo,
+      })
+    )
   );
-  assert.equal(plan.unfrackingParameter, REAL.programmableLogicGlobal.unfrackingParameter);
-});
 
-test("PIN: every script the plan derives matches the live preview deployment", () => {
-  const plan = planBootstrap(previewConfig());
-  const s = plan.scripts;
-  assert.equal(s.alwaysFail.hash, REAL.issuance.alwaysFailScriptHash);
-  assert.equal(s.protocolParams.hash, REAL.protocolParams.policyId);
-  assert.equal(s.programmableLogicBase.hash, REAL.programmableLogicBase.scriptHash);
-  assert.equal(s.issuanceCborHexMint.hash, REAL.issuance.policyId);
-  assert.equal(s.registry.hash, REAL.registry.scriptHash);
-  assert.equal(s.transfer.hash, REAL.transfer.scriptHash);
-  assert.equal(s.thirdParty.hash, REAL.thirdParty.scriptHash);
-  assert.equal(s.unfracking.hash, REAL.unfracking.scriptHash);
-  assert.equal(s.programmableLogicGlobal.hash, REAL.programmableLogicGlobal.scriptHash);
-  assert.equal(s.issuanceLogic.hash, REAL.issuanceLogic.scriptHash);
-  assert.equal(s.upgradeMultisig.hash, REAL.upgradeMultisig.scriptHash);
-});
+  // ⛔ THE KEY SET IS STILL PINNED TO A REAL RECORD. `deepEqual` against the
+  // whole record is gone — alpha.5 moves eight of its hashes by design — but a
+  // FIELD appearing or vanishing is a different defect, and a deployer
+  // hand-writing this file is exactly who it bites. Both levels, because most
+  // of this type's content is one level down.
+  const shape = (o) =>
+    Object.keys(o)
+      .sort()
+      .map((k) =>
+        o[k] && typeof o[k] === "object" && !Array.isArray(o[k])
+          ? `${k}{${Object.keys(o[k]).sort().join(",")}}`
+          : k
+      );
+  assert.deepEqual(shape(assembled), shape(REAL), "the record's field set must not drift");
 
-test("PIN: assembleDeploymentParams reproduces the live preview record field for field", () => {
-  const plan = planBootstrap(previewConfig());
-  const assembled = assembleDeploymentParams(plan, {
-    protocolGenesisTxHash: REAL.txHash,
-    referenceScriptsTxHash: REAL.programmableBaseRefInput.txHash,
-    multisigConfigUtxo: REAL.upgradeMultisig.utxo,
+  // Everything that is NOT a script hash must come out identical: these are
+  // inputs and observations, and alpha.5 touched none of them.
+  assert.equal(assembled.txHash, REAL.txHash);
+  assert.deepEqual(assembled.protocolParams.txInput, REAL.protocolParams.txInput);
+  assert.deepEqual(assembled.issuance.txInput, REAL.issuance.txInput);
+  assert.deepEqual(assembled.upgradeMultisig.txInput, REAL.upgradeMultisig.txInput);
+  assert.deepEqual(assembled.upgradeMultisig.utxo, REAL.upgradeMultisig.utxo);
+  assert.equal(assembled.maxInlineDatumBytes, REAL.maxInlineDatumBytes);
+  assert.deepEqual(assembled.programmableBaseRefInput, REAL.programmableBaseRefInput);
+  assert.deepEqual(assembled.upgradeMultisigRefInput, REAL.upgradeMultisigRefInput);
+  // ⛔ AND THE AUTHORITY FIELD MUST STILL AGREE WITH THE DATUM. Nothing on
+  // chain checks these two against each other, which is why they are checked
+  // here.
+  assert.deepEqual(assembled.upgradeAuthority, {
+    type: "script",
+    hash: assembled.upgradeMultisig.scriptHash,
   });
-  // ⚑ THE WHOLE RECORD, not a selection. Every reference-input index, every
-  // one-shot outref, the unfracking parameter and the upgrade authority — all
-  // of it has to come out the same as a record written by a real bootstrap.
-  assert.deepEqual(JSON.parse(JSON.stringify(assembled)), REAL);
 
   // And it verifies against the blueprint by the SDK's own derivation check.
   const checks = assertDeploymentScripts(BLUEPRINT, assembled);
@@ -328,25 +517,60 @@ test("the plan is deterministic: the same config twice gives identical hashes", 
   assert.equal(a.issuanceCbor.post, b.issuanceCbor.post);
 });
 
+// ---------------------------------------------------------------------------
+// ⛔ THE OPERAND THESE TWO TESTS MUST USE, AND WHY IT CHANGED AT 0.12.0
+// ---------------------------------------------------------------------------
+//
+// Both used to perturb one input and assert the result differed from the LIVE
+// alpha.4 record. Under alpha.5 that comparison is VACUOUS for every script
+// downstream of the params policy: `transfer`, `thirdParty`, `unfracking`,
+// `issuanceLogic` and the dispatcher can no longer equal their alpha.4 hashes
+// whatever is fed in, so `notEqual` passes with the perturbation doing nothing
+// at all. MEASURED, not suspected — `test/hash-cascade.test.mjs` is the
+// measurement.
+//
+// ⇒ The second operand is now the UNPERTURBED PLAN at the same version. That is
+// what makes "this input reaches this script" a real question again. The live
+// chain has not been abandoned: it still anchors the four unmoved scripts in
+// the PIN section above, which is where it can still say something true.
+//
+// ⚠ `always_fail` is the exception and keeps its chain operand, because it is
+// one of the four whose hash alpha.5 did not move.
+
 test("SENSITIVITY: the always_fail nonce reaches the dispatcher", () => {
   // ⚑ If this did NOT move, the nonce would not be reaching the script and the
   // PIN above would be proving something about a constant rather than a chain.
+  const base = planBootstrap(previewConfig());
   const moved = planBootstrap(previewConfig({ alwaysFailNonce: "00".repeat(32) }));
+  // Still against the live chain: always_fail's hash is unchanged by alpha.5.
+  assert.equal(base.scripts.alwaysFail.hash, REAL.issuance.alwaysFailScriptHash);
   assert.notEqual(moved.scripts.alwaysFail.hash, REAL.issuance.alwaysFailScriptHash);
-  assert.notEqual(moved.scripts.programmableLogicGlobal.hash, REAL_PLG);
+  assert.notEqual(
+    moved.scripts.programmableLogicGlobal.hash,
+    base.scripts.programmableLogicGlobal.hash,
+    "the nonce must reach the dispatcher through always_fail -> issuance_cbor_hex_mint -> registry"
+  );
 });
 
 test("SENSITIVITY: maxInlineDatumBytes is baked into the delegates and the dispatcher", () => {
+  const base = planBootstrap(previewConfig());
   const moved = planBootstrap(previewConfig({ maxInlineDatumBytes: 512n }));
-  assert.notEqual(moved.scripts.transfer.hash, REAL.transfer.scriptHash);
-  assert.notEqual(moved.scripts.thirdParty.hash, REAL.thirdParty.scriptHash);
-  assert.notEqual(moved.scripts.unfracking.hash, REAL.unfracking.scriptHash);
-  assert.notEqual(moved.scripts.issuanceLogic.hash, REAL.issuanceLogic.scriptHash);
+  assert.notEqual(moved.scripts.transfer.hash, base.scripts.transfer.hash);
+  assert.notEqual(moved.scripts.thirdParty.hash, base.scripts.thirdParty.hash);
+  assert.notEqual(moved.scripts.unfracking.hash, base.scripts.unfracking.hash);
+  assert.notEqual(moved.scripts.issuanceLogic.hash, base.scripts.issuanceLogic.hash);
   assert.notEqual(
     moved.scripts.programmableLogicGlobal.hash,
-    REAL_PLG,
+    base.scripts.programmableLogicGlobal.hash,
     "two deployments differing only in this security parameter are DIFFERENT protocols"
   );
+  // ⚑ THE CONTROL. `maxInlineDatumBytes` must reach the delegates and NOTHING
+  // else — a change that moved every hash would pass every assertion above and
+  // mean the parameter had leaked into the one-shot policies.
+  assert.equal(moved.scripts.alwaysFail.hash, base.scripts.alwaysFail.hash);
+  assert.equal(moved.scripts.protocolParams.hash, base.scripts.protocolParams.hash);
+  assert.equal(moved.scripts.registry.hash, base.scripts.registry.hash);
+  assert.equal(moved.scripts.upgradeMultisig.hash, base.scripts.upgradeMultisig.hash);
 });
 
 test("SENSITIVITY: each seed reaches only the one-shot policy it belongs to", () => {
@@ -375,13 +599,24 @@ test("SENSITIVITY: each seed reaches only the one-shot policy it belongs to", ()
 });
 
 test("SENSITIVITY: the unfracking choice is a different protocol, and only the dispatcher moves", () => {
+  const enabled = planBootstrap(previewConfig());
   const disabled = planBootstrap(previewConfig({ unfracking: "disabled" }));
   assert.equal(disabled.unfrackingParameter, UNFRACKING_DISABLED);
-  assert.notEqual(disabled.scripts.programmableLogicGlobal.hash, REAL_PLG);
+  assert.notEqual(
+    disabled.scripts.programmableLogicGlobal.hash,
+    enabled.scripts.programmableLogicGlobal.hash
+  );
+  // ⚠ THE SECOND OPERAND IS THE SIBLING PLAN, NOT THE LIVE RECORD, since
+  // alpha.5. These two hashes moved away from preview together (the params
+  // policy is their ancestor) — what this test is about is that they do not
+  // move with the unfracking CHOICE, and for that the sibling plan is the
+  // right comparison. The live record still anchors `unfracking`'s ancestors
+  // in the PIN section above.
+  assert.equal(disabled.scripts.unfracking.hash, enabled.scripts.unfracking.hash);
+  assert.equal(disabled.scripts.transfer.hash, enabled.scripts.transfer.hash);
   // Unfracking stays DEPLOYED — deployed and unreachable are different facts,
   // and a record legitimately carries both.
-  assert.equal(disabled.scripts.unfracking.hash, REAL.unfracking.scriptHash);
-  assert.equal(disabled.scripts.transfer.hash, REAL.transfer.scriptHash);
+  assert.notEqual(disabled.scripts.unfracking.hash, UNFRACKING_DISABLED);
 });
 
 test("SENSITIVITY: networkId changes every derived address and no script hash", () => {
@@ -420,13 +655,22 @@ test("the reference-script order and the stake-registration order are what the r
   ]);
   assert.equal(STAKE_REGISTRATION_ORDER.length, 6, "six withdraw-0 credentials, not four");
   assert.equal(BOOTSTRAP_SEED_COUNT, 3);
+  // ⛔ THE ORDER MOVED AT 0.12.0 AND THE STRINGS DID NOT — the shape a caller
+  // driving the sequence by hand will miss. `stake-registrations` is now THIRD:
+  // alpha.5's genesis withdraws from `upgrade_cred`, and a reward account
+  // cannot be withdrawn from in the transaction that registers it.
   assert.deepEqual([...BOOTSTRAP_STEPS], [
     "seed",
     "multisig-genesis",
+    "stake-registrations",
     "protocol-genesis",
     "reference-scripts",
-    "stake-registrations",
   ]);
+  assert.ok(
+    BOOTSTRAP_STEPS.indexOf("stake-registrations") <
+      BOOTSTRAP_STEPS.indexOf("protocol-genesis"),
+    "the registrations must precede the genesis — it is a ledger rule, not a preference"
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -590,6 +834,11 @@ function recorder({ coinsPerUtxoByte = 4310n, maxTxSize = 16384, txHash = "cc".r
     attachScript: record("attachScript"),
     attachMetadata: record("attachMetadata"),
     registerStake: record("registerStake"),
+    // alpha.5's genesis activates the upgrade authority: a withdraw-0, the
+    // config UTxO as a reference input, and the tree's signers.
+    withdraw: record("withdraw"),
+    readFrom: record("readFrom"),
+    addSigner: record("addSigner"),
     async build(options) {
       ops.push({ op: "build", params: options });
       return {
@@ -639,6 +888,28 @@ const seedUtxos = (plan) => ({
   protocolParams: fakeUtxo({ ...plan.config.seeds.protocolParams }),
   issuance: fakeUtxo({ ...plan.config.seeds.issuance }),
   upgradeMultisig: fakeUtxo({ ...plan.config.seeds.upgradeMultisig }),
+});
+
+/**
+ * The `upgrade_multisig` config UTxO the genesis must reference.
+ *
+ * ⚠ At `plan.addresses.upgradeMultisig`, not at WALLET: the genesis builder
+ * refuses a UTxO parked anywhere else, because the address payment credential
+ * IS the config NFT's policy IS the withdraw-0 credential.
+ */
+const configUtxo = (plan, overrides = {}) => ({
+  transactionId: EvoTransactionHash.fromHex("dd".repeat(32)),
+  index: 0,
+  address: EvoAddress.fromBech32(plan.addresses.upgradeMultisig),
+  assets: outputAssets(2_000_000n, new Map([[plan.assetUnits.upgradeMultisigNft, 1n]])),
+  datumOption: new InlineDatum.InlineDatum({ data: multisigScriptDatum(TREE) }),
+  ...overrides,
+});
+
+/** Everything alpha.5's genesis needs beyond the two seeds. */
+const activation = (plan) => ({
+  upgradeMultisigConfigUtxo: configUtxo(plan),
+  upgradeAuthoritySigners: [TREE.keyHash],
 });
 
 const ctx = (client, available) => ({
@@ -746,7 +1017,7 @@ test("STEP 2 REFUSAL: no signer tree, by name", async () => {
   );
 });
 
-test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, three witnesses", async () => {
+test("STEP 4 protocol-genesis: two seeds in, three mints, three state outputs, and the activation", async () => {
   const plan = planBootstrap(previewConfig());
   const { client, only } = recorder();
   const seeds = seedUtxos(plan);
@@ -755,6 +1026,7 @@ test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, t
     plan,
     protocolParamsSeedUtxo: seeds.protocolParams,
     issuanceSeedUtxo: seeds.issuance,
+    ...activation(plan),
   });
 
   const collected = only("collectFrom");
@@ -820,6 +1092,11 @@ test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, t
   assert.deepEqual(
     only("attachScript").map((s) => s.params.script),
     [
+      // ⛔ FOUR, NOT THREE, AND THE FOURTH IS ATTACHED RATHER THAN REFERENCED.
+      // `upgrade_multisig` runs here under the WITHDRAW purpose, and the
+      // reference scripts are not published until the next step — there is
+      // nothing to reference yet.
+      buildEvoScript(plan.scripts.upgradeMultisig.compiledCode),
       buildEvoScript(plan.scripts.registry.compiledCode),
       buildEvoScript(plan.scripts.protocolParams.compiledCode),
       buildEvoScript(plan.scripts.issuanceCborHexMint.compiledCode),
@@ -831,9 +1108,69 @@ test("STEP 3 protocol-genesis: two seeds in, three mints, three state outputs, t
     registryOrigin: 1,
     issuanceCborHex: 2,
   });
+
+  // -----------------------------------------------------------------------
+  // THE ACTIVATION (alpha.5) — the one line upstream added, answered here
+  // -----------------------------------------------------------------------
+  //
+  // ⛔ `protocol_params.mint` now requires
+  // `pairs.has_key(self.withdrawals, genesis_params.upgrade_cred)`. Three
+  // things have to be present together, and the devnet NEGATIVE CONTROL in
+  // `test/devnet/bootstrap.test.ts` is what shows the ledger actually refuses
+  // their absence — this test can only show the builder emits them.
+  const withdrawals = only("withdraw");
+  assert.equal(withdrawals.length, 1, "exactly one withdraw-0, from the upgrade authority");
+  assert.equal(
+    hex(withdrawals[0].params.stakeCredential.hash),
+    plan.scripts.upgradeMultisig.hash,
+    "the credential must be the one the params datum names as upgrade_cred"
+  );
+  // ⛔ AND IT MUST BE THE SAME VALUE THE DATUM CARRIES. Two independent
+  // placements of one credential; nothing on chain compares them.
+  assert.deepEqual(
+    EXPECTED_PARAMS_DATUM.fields[4],
+    scriptCred(hex(withdrawals[0].params.stakeCredential.hash))
+  );
+  assert.equal(withdrawals[0].params.amount, 0n, "withdraw-0: a trampoline, not a payout");
+  assert.ok(withdrawals[0].params.redeemer, "a script withdrawal needs a redeemer");
+
+  const refs = only("readFrom");
+  assert.equal(refs.length, 1);
+  assert.deepEqual(
+    refs[0].params.referenceInputs.map((u) => EvoTransactionHash.toHex(u.transactionId)),
+    ["dd".repeat(32)],
+    "upgrade_multisig.withdraw reads its authority tree from the REFERENCE inputs"
+  );
+
+  const signers = only("addSigner");
+  assert.equal(signers.length, 1);
+  // ⚠ `KeyHash` is a BRANDED WRAPPER, not the bytes: its `.hash` is a
+  // Uint8Array and its JSON form is a hex string, so neither `hex(keyHash)`
+  // nor `keyHash.hash` reads as the hash. `KeyHash.toHex` is the accessor.
+  assert.equal(KeyHash.toHex(signers[0].params.keyHash), TREE.keyHash);
+
+  assert.deepEqual(result.metadata.upgradeActivation, {
+    withdrawal: plan.scripts.upgradeMultisig.hash,
+    configUtxo: `${"dd".repeat(32)}#0`,
+    signers: [TREE.keyHash],
+  });
+
+  // ⚑ THE SIZE IS REPORTED. The stub returns a placeholder transaction, so the
+  // NUMBER here says nothing about a real genesis — what this pins is that the
+  // measurement is emitted at all, and against the chain's own cap rather than
+  // a constant. alpha.5 added a fourth script body to a transaction that also
+  // carries the whole spliced issuance_mint body as a datum, and this repo has
+  // burst 16,384 on this very step before.
+  assert.equal(typeof result.metadata.unsignedBytes, "number");
+  assert.equal(result.metadata.maxTxSize, 16384, "taken from the chain, not hard-coded");
 });
 
-test("STEP 3: a provenance pin attaches a CIP-171 record under label 1984", async () => {
+test("STEP 4: an EMPTY signer set is accepted and emits no signer — required, not defaulted", async () => {
+  // ⛔ THE CONTROL FOR THE REFUSALS BELOW. `[]` is a legitimate answer: a tree
+  // of `Script` or time leaves alone needs no signature. A check that refused
+  // empty would be refusing a real deployment, and one that silently invented
+  // a signer would be the inferring default CLAUDE.md bans. So: accepted,
+  // passed through verbatim, nothing added.
   const plan = planBootstrap(previewConfig());
   const { client, only } = recorder();
   const seeds = seedUtxos(plan);
@@ -842,6 +1179,80 @@ test("STEP 3: a provenance pin attaches a CIP-171 record under label 1984", asyn
     plan,
     protocolParamsSeedUtxo: seeds.protocolParams,
     issuanceSeedUtxo: seeds.issuance,
+    upgradeMultisigConfigUtxo: configUtxo(plan),
+    upgradeAuthoritySigners: [],
+  });
+  assert.equal(only("addSigner").length, 0, "no signers asked for, none added");
+  assert.equal(only("withdraw").length, 1, "the withdrawal is not optional either way");
+  assert.deepEqual(result.metadata.upgradeActivation.signers, []);
+});
+
+test("STEP 4 REFUSAL: the activation's two inputs, by name", async () => {
+  const plan = planBootstrap(previewConfig());
+  const { client } = recorder();
+  const seeds = seedUtxos(plan);
+  const base = {
+    ...ctx(client),
+    plan,
+    protocolParamsSeedUtxo: seeds.protocolParams,
+    issuanceSeedUtxo: seeds.issuance,
+    ...activation(plan),
+  };
+
+  await refusesNaming(
+    () => buildProtocolGenesisTx({ ...base, upgradeMultisigConfigUtxo: undefined }),
+    /upgradeMultisigConfigUtxo is required/,
+    "absent config UTxO"
+  );
+
+  // ⛔ AT THE WRONG ADDRESS IS NOT THE SAME AS ABSENT, and it is the likelier
+  // mistake: a caller who passes A UTxO — a wallet output, a seed — rather than
+  // THE config UTxO. The address payment credential is the config NFT's policy,
+  // so anything else cannot be this deployment's authority.
+  await refusesNaming(
+    () =>
+      buildProtocolGenesisTx({
+        ...base,
+        upgradeMultisigConfigUtxo: configUtxo(plan, {
+          address: EvoAddress.fromBech32(WALLET),
+        }),
+      }),
+    /upgrade_multisig address is/,
+    "config UTxO at the wrong address"
+  );
+
+  // ⛔ OMITTED IS NOT EMPTY. `[]` is a decision the caller made; `undefined` is
+  // a decision nobody made, and the whole reason this is a required input is
+  // that the package must not make it for them.
+  await refusesNaming(
+    () => buildProtocolGenesisTx({ ...base, upgradeAuthoritySigners: undefined }),
+    /upgradeAuthoritySigners is required/,
+    "absent signer set"
+  );
+  await refusesNaming(
+    () => buildProtocolGenesisTx({ ...base, upgradeAuthoritySigners: "ab".repeat(28) }),
+    /upgradeAuthoritySigners is required and must be an array/,
+    "a bare string instead of an array"
+  );
+  // A key hash of the wrong length can never match a Signature leaf, so the
+  // tree would be unsatisfiable and the genesis refused on chain.
+  await refusesNaming(
+    () => buildProtocolGenesisTx({ ...base, upgradeAuthoritySigners: ["abcd"] }),
+    /upgradeAuthoritySigners\[0\] must be exactly 28 bytes/,
+    "a short key hash"
+  );
+});
+
+test("STEP 4: a provenance pin attaches a CIP-171 record under label 1984", async () => {
+  const plan = planBootstrap(previewConfig());
+  const { client, only } = recorder();
+  const seeds = seedUtxos(plan);
+  const result = await buildProtocolGenesisTx({
+    ...ctx(client),
+    plan,
+    protocolParamsSeedUtxo: seeds.protocolParams,
+    issuanceSeedUtxo: seeds.issuance,
+    ...activation(plan),
     provenancePin: PIN,
   });
   const meta = only("attachMetadata");
@@ -854,7 +1265,7 @@ test("STEP 3: a provenance pin attaches a CIP-171 record under label 1984", asyn
   assert.equal(plan.parameterizations.length, 11);
 });
 
-test("STEP 4 reference-scripts: seven outputs, in REFERENCE_SCRIPT_ORDER", async () => {
+test("STEP 5 reference-scripts: seven outputs, in REFERENCE_SCRIPT_ORDER", async () => {
   const plan = planBootstrap(previewConfig());
   const { client, only } = recorder();
   const result = await buildReferenceScriptsTx({
@@ -884,7 +1295,7 @@ test("STEP 4 reference-scripts: seven outputs, in REFERENCE_SCRIPT_ORDER", async
   });
 });
 
-test("STEP 5 stake-registrations: six RegCerts, each with its own script witness", async () => {
+test("STEP 3 stake-registrations: six RegCerts, each with its own script witness", async () => {
   const plan = planBootstrap(previewConfig());
   const { client, only } = recorder();
   await buildStakeRegistrationTx({ ...ctx(client), plan });
