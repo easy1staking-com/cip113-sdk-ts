@@ -58,6 +58,103 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.12.0 (CIP-113 0.5.0-alpha.5 — the upgrade authority activates itself)
+
+⛔ **EVERY SCRIPT HASH DOWNSTREAM OF THE PARAMS POLICY CHANGES — EIGHT OF TWELVE.** An alpha.4
+instance **cannot be upgraded; it must be REDEPLOYED.** The four that survive (`always_fail`,
+`issuance_cbor_hex_mint`, `registry`, `upgrade_multisig`) hang off seeds and nonces rather than the
+params policy — and a redeployment uses fresh seeds, so they cannot collide with the old instance in
+practice.
+
+There is no migration path for a running deployment, and nothing in this SDK will pretend otherwise:
+`validateStandardBlueprint` is a version-**equality** gate, so 0.12.0 refuses an alpha.4 blueprint as
+firmly as it refuses an alpha.3 one. Stay on 0.11.x for as long as you need to keep operating an
+alpha.4 instance.
+
+⚠ **An earlier draft of this note said "every script hash changes". That was FALSE and it is
+recorded here rather than quietly corrected**, because the false version is *checkable*: one
+operator deriving `registry` at their old seeds finds it identical, and the credibility of the whole
+migration note goes with it. The eight/four split is measured in `test/hash-cascade.test.mjs`. The
+operational conclusion did not change.
+
+### What upstream changed — one line
+
+`protocol_params.mint` gained a single check:
+
+```aiken
+pairs.has_key(self.withdrawals, genesis_params.upgrade_cred)?
+```
+
+The transaction that mints the protocol-params NFT must now carry a **withdraw-0 from the
+credential its own datum names as the upgrade authority**. The authority has to *run* — through
+the same trampoline every later upgrade uses — before it becomes canonical, so a typo or the hash
+of a script nobody deployed can never take the protocol's upgrade seat. Measured against alpha.4:
+34 validators either side, **31 byte-identical**, and the only compiled code that moved is
+`protocol_params`'s.
+
+### Why one line relocates eight of the twelve
+
+`protocol_params`'s hash **is** the params-NFT policy id, and that policy id is the parameter at the
+root of the parameterisation graph. It feeds `programmable_logic_base`, and through it `transfer`,
+`third_party`, `unfracking` and `programmable_logic_global`; it feeds `issuance_logic` and
+`issuance_mint` directly. Only the four scripts that hang off seeds and nonces instead —
+`always_fail`, `issuance_cbor_hex_mint`, `registry`, `upgrade_multisig` — keep their alpha.4 hashes
+for the same inputs. This is measured in `test/hash-cascade.test.mjs` against a live alpha.4
+deployment record, not asserted.
+
+### What moved in this package's API
+
+**`buildProtocolGenesisTx` takes two new REQUIRED fields.**
+
+```diff
+  await buildProtocolGenesisTx({
+    client, changeAddress, availableUtxos, evaluator, plan,
+    protocolParamsSeedUtxo, issuanceSeedUtxo,
++   upgradeMultisigConfigUtxo,   // REQUIRED — the config UTxO, as a reference input
++   upgradeAuthoritySigners,     // REQUIRED — key hashes for `extra_signatories`; may be []
+  });
+```
+
+`upgradeMultisigConfigUtxo` is the UTxO `assertMultisigConfigUtxo()` already returns: read it back
+off the chain rather than reconstructing it from a record, because a signer rotation spends and
+recreates it. `upgrade_multisig.withdraw` finds its authority tree among the transaction's
+**reference inputs**, so without it the withdrawal cannot be decided.
+
+`upgradeAuthoritySigners` **cannot be defaulted or inferred, and that is structural.** A
+`MultisigScript` tree has seven node kinds; only `Signature` names a key hash. `Script` names
+another withdraw-0, `Before`/`After` name a validity bound, and `AnyOf`/`AtLeast` leave a genuine
+choice of *which branch* to satisfy. Picking a branch is the caller's decision. Pass `[]` if your
+tree needs no signature — but pass it.
+
+⚠ **What this builder does not do for you.** It adds signers, the withdrawal, the reference input
+and the script witness. A tree whose satisfying branch needs a `Script` leaf (a second withdraw-0)
+or a `Before`/`After` leaf (a validity interval) is **not** served by this step; such a deployment
+must build its own genesis, or this builder must grow those inputs first. Left out deliberately
+rather than guessed at.
+
+**`BOOTSTRAP_STEPS` reordered, and the strings did not change.** `stake-registrations` moved from
+last to **third**, ahead of `protocol-genesis`:
+
+```diff
+- seed → multisig-genesis → protocol-genesis → reference-scripts → stake-registrations
++ seed → multisig-genesis → stake-registrations → protocol-genesis → reference-scripts
+```
+
+This is a ledger rule, not a preference: a reward account cannot be withdrawn from in the same
+transaction that registers it, because withdrawals are applied against the state **before**
+certificates. A caller that drives the sequence off `BOOTSTRAP_STEPS` follows automatically. One
+that hard-coded the old order gets ledger code **3141**, *"rewards withdrawals must consume rewards
+in full"* — a message that names a balance problem and not a missing certificate.
+
+### The blueprint
+
+`blueprints/standard/v0.5.0-alpha.5/` ships alongside the older directories, pinned to upstream
+`b83a041eaa053625c502f8ee64b607a787cf5f79` and **reproduced from source** (Aiken v1.1.23+8949565,
+sha256 `ca53475332b5932f021fa134f823b932b05433ccd335bbf6251f18167826da66`, 164120 bytes). ⚠ That
+commit is a **PR branch head** (`refs/pull/143/head`), not a commit on `main`; see
+`blueprints/standard/v0.5.0-alpha.5/UPSTREAM_PIN.json` for why the pull ref is recorded alongside
+the branch name.
+
 ## Migrating to 0.11.0 (a wrong network label, and the bootstrap becomes public API)
 
 Two changes. The first is breaking for plugin authors and silent in one shape the compiler will

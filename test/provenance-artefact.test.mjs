@@ -121,9 +121,16 @@ test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
         `checked: ${pinDirsError.message}`
     );
   }
+  // ⛔ THE FLOOR MOVES WITH THE SHIPPED SET, OR IT STOPS MEANING ANYTHING. It
+  // said 7 while 8 pins shipped, which tolerated a walk that missed exactly one
+  // directory — most plausibly the NEWEST, which is the one a migration just
+  // added and the one nothing else here would notice. The eight today:
+  // standard/{v0.3.0, v0.5.0-alpha.2, v0.5.0-alpha.3, v0.5.0-alpha.4,
+  // v0.5.0-alpha.5}, substandards/dummy/{v0.1.0, v0.2.0},
+  // substandards/freeze-and-seize/v0.1.0.
   assert.ok(
-    pinDirs.length >= 7,
-    `expected the walk of ${BLUEPRINTS_DIR} to find at least 7 UPSTREAM_PIN.json ` +
+    pinDirs.length >= 8,
+    `expected the walk of ${BLUEPRINTS_DIR} to find at least 8 UPSTREAM_PIN.json ` +
       `directories, found ${pinDirs.length}: ${pinDirs.map((d) => relative(ROOT, d)).join(", ")}`
   );
 });

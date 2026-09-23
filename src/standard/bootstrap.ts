@@ -1,7 +1,7 @@
 /**
  * Protocol bootstrap — the transactions that stand up a CIP-113 instance.
  *
- * TARGETS CIP-113 0.5.0-alpha.4 (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
+ * TARGETS CIP-113 0.5.0-alpha.5 (upstream b83a041eaa053625c502f8ee64b607a787cf5f79).
  *
  * ⚑ WHY THIS IS EXPORTED AT ALL. Until 2026-09-17 this sequence lived only in
  * `test/harness/bootstrap.ts`, which `files: ["dist","blueprints"]` does not
@@ -34,16 +34,29 @@
  *
  *   1  buildSeedTx                  -> three distinct seed UTxOs
  *   2  buildMultisigGenesisTx       -> the upgrade authority's config UTxO
- *   3  buildProtocolGenesisTx       -> params, registry origin, issuance CBOR
- *   4  buildReferenceScriptsTx      -> the seven reference scripts
- *   5  buildStakeRegistrationTx     -> the six withdraw-0 registrations
+ *   3  buildStakeRegistrationTx     -> the six withdraw-0 registrations
+ *   4  buildProtocolGenesisTx       -> params, registry origin, issuance CBOR
+ *   5  buildReferenceScriptsTx      -> the seven reference scripts
  *      assembleDeploymentParams     -> DeploymentParams (pure)
+ *
+ * ⛔ STEPS 3 AND 4 SWAPPED AT 0.12.0, AND THE ORDER IS A LEDGER RULE RATHER
+ * THAN A PREFERENCE. alpha.5's `protocol_params.mint` requires a withdraw-0
+ * from `upgrade_cred`, and a reward account cannot be withdrawn from in the
+ * same transaction that registers it — the ledger applies withdrawals against
+ * the state BEFORE certificates. So `upgrade_multisig`'s stake credential must
+ * be registered in an EARLIER transaction than the genesis. The registrations
+ * were last because nothing needed them yet; now one does. The other five
+ * registrations are dragged along only because they ride the same transaction,
+ * and none of the six `publish` handlers reads any chain state the genesis
+ * creates — they admit `RegisterCredential` and nothing else — so moving the
+ * whole step earlier is safe.
  *
  * ⚑ RESUMPTION. `planBootstrap(config)` is pure and deterministic: persist the
  * CONFIG and every hash, address, datum and asset unit can be re-derived on any
  * machine with no chain access. No step needs an earlier step's CONSUMED
  * inputs, which is the property that makes resuming at step N work at all — by
- * the time you resume at step 4 the seeds are spent and unfetchable.
+ * the time you resume at step 5 (reference scripts) the seeds are spent and
+ * unfetchable.
  */
 
 import {
@@ -53,6 +66,7 @@ import {
   Credential,
   Data,
   InlineDatum,
+  KeyHash,
   Transaction as EvoTransaction,
   TransactionHash as EvoTransactionHash,
   UPLC,
@@ -186,13 +200,24 @@ export const STAKE_REGISTRATION_ORDER = [
 
 export type StakeCredentialName = (typeof STAKE_REGISTRATION_ORDER)[number];
 
-/** The five steps, in order. Exported so a caller can name where it resumed. */
+/**
+ * The five steps, in order. Exported so a caller can name where it resumed.
+ *
+ * ⛔ THE ORDER CHANGED AT 0.12.0 AND THE STRINGS DID NOT, which is the shape a
+ * caller can miss. `stake-registrations` moved from last to THIRD, ahead of
+ * `protocol-genesis`: alpha.5's genesis carries a withdraw-0 from
+ * `upgrade_cred`, and a reward account cannot be withdrawn from in the same
+ * transaction that registers it. A caller that drives the steps off this array
+ * follows automatically; one that hard-coded the old sequence builds a genesis
+ * the ledger refuses as code 3141, "rewards withdrawals must consume rewards in
+ * full" — a message that names a balance problem and not a missing certificate.
+ */
 export const BOOTSTRAP_STEPS = [
   "seed",
   "multisig-genesis",
+  "stake-registrations",
   "protocol-genesis",
   "reference-scripts",
-  "stake-registrations",
 ] as const;
 
 export type BootstrapStepId = (typeof BOOTSTRAP_STEPS)[number];
@@ -1077,8 +1102,9 @@ export interface MultisigGenesisTxParams extends BootstrapBuildContext {
  * Step 2 — mint the `upgrade_multisig` one-shot NFT and lock it with the signer
  * tree, BEFORE the protocol genesis names this authority.
  *
- * ⛔ THE ORDER IS THE POINT, AND IT IS NOT A STYLE CHOICE. Step 3 writes a
- * genesis datum naming `upgrade_cred = Script(upgrade_multisig)`. That authority
+ * ⛔ THE ORDER IS THE POINT, AND IT IS NOT A STYLE CHOICE. The protocol
+ * genesis (step 4) writes a genesis datum naming
+ * `upgrade_cred = Script(upgrade_multisig)`. That authority
  * is usable only while its config UTxO exists — the tree lives there, not in the
  * script's parameters. Running this AFTER the protocol genesis and failing
  * leaves a protocol on chain naming an authority whose config UTxO does not
@@ -1098,7 +1124,7 @@ export interface MultisigGenesisTxParams extends BootstrapBuildContext {
  * nothing about bundling. Change is a separate output.
  *
  * ⚠ NO `script:` ON THE OUTPUT — rail 4 requires `reference_script == None`.
- * The reference script is published in step 4 like every other one.
+ * The reference script is published in step 5 like every other one.
  *
  * ⚑ Additional outputs are the CALLER's to add in their own transaction if they
  * want them. Rail 3 uses `list.expect_find`, which SKIPS a non-matching output
@@ -1161,8 +1187,11 @@ export async function buildMultisigGenesisTx(
  * could not be registered at all: every hash reproduced, every read-back
  * matched, every test passed, and the protocol's upgrade path was permanently
  * unsatisfiable. "It exists and is well-formed" left "and can be used" untested.
- * Run this between step 2 and step 3, so it is structurally impossible for the
- * genesis datum to name an authority that is not there.
+ * Run this between step 2 and the protocol genesis (step 4), so it is
+ * structurally impossible for the genesis datum to name an authority that is
+ * not there. ⚠ "Between step 2 and step 3" is what this said before 0.12.0 and
+ * step 3 is now the stake registrations — the sentence stayed true-looking
+ * while naming the wrong transaction.
  *
  * ⚑ FILTERS STRUCTURALLY, BY POLICY, EXACTLY AS THE VALIDATOR DOES — not by
  * equality against a unit string we ourselves built. A lookup keyed on our own
@@ -1252,7 +1281,7 @@ function sameTree(a: MultisigScriptTree, b: MultisigScriptTree): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — protocol genesis
+// Step 4 — protocol genesis
 // ---------------------------------------------------------------------------
 
 export interface ProtocolGenesisTxParams extends BootstrapBuildContext {
@@ -1275,17 +1304,88 @@ export interface ProtocolGenesisTxParams extends BootstrapBuildContext {
    * verifies — against the wrong source.
    */
   readonly provenancePin?: UpstreamPin;
+  /**
+   * The `upgrade_multisig` config UTxO, supplied as a REFERENCE INPUT — REQUIRED
+   * since 0.12.0.
+   *
+   * ⚑ WHY THE GENESIS SUDDENLY NEEDS IT. alpha.5's `protocol_params.mint`
+   * demands a withdraw-0 from the credential the genesis datum names as
+   * `upgrade_cred`, and that withdrawal runs `upgrade_multisig.withdraw`, which
+   * finds its own config UTxO among `self.reference_inputs` by the config NFT's
+   * policy and decides on the `MultisigScript` tree inside it. No config UTxO in
+   * the reference inputs, no authority decision, no genesis.
+   *
+   * ⛔ IT MUST CARRY THE CONFIG NFT AND ITS INLINE DATUM. Read it back off the
+   * chain and put it through the exported {@link assertMultisigConfigUtxo},
+   * which returns the very UTxO this field wants and refuses a decoy parked at
+   * the same address. Do not reconstruct it from a record: a signer rotation
+   * spends and recreates this UTxO, so a stored reference goes stale.
+   */
+  readonly upgradeMultisigConfigUtxo: UTxO;
+  /**
+   * Key hashes to place in the transaction's `extra_signatories`, so the
+   * authority tree in the config UTxO is SATISFIED — REQUIRED since 0.12.0.
+   * May be an empty array, but never omitted.
+   *
+   * ⛔ THIS CANNOT BE INFERRED FROM THE TREE, AND THE REASON IS STRUCTURAL
+   * RATHER THAN A MISSING FEATURE. `MultisigScript` has seven node kinds, and
+   * only `Signature` names a key hash. `Script` names another withdraw-0
+   * credential, `Before`/`After` name a validity bound, and `AnyOf`/`AtLeast`
+   * leave a genuine CHOICE of which branch to satisfy — a walker would have to
+   * pick one, and picking is the caller's decision, not this package's. So the
+   * signer set is a required input (CLAUDE.md, "a value the caller must decide
+   * is a required input, never a default").
+   *
+   * ⚠ WHAT THIS BUILDER DOES NOT DO FOR YOU. It adds signers and nothing else.
+   * A tree whose satisfying branch needs a `Script` leaf (a second withdraw-0)
+   * or a `Before`/`After` leaf (a validity interval) cannot be satisfied by this
+   * step as written; such a deployment must build its genesis itself, or the
+   * builder must grow those inputs first. It is left out deliberately rather
+   * than guessed at — see `docs/api-reference.md`.
+   *
+   * ⚠ NAMING A SIGNER IS NOT THE SAME AS HAVING ONE. `addSigner` writes a
+   * `required_signers` entry; the witness still has to be there at submission.
+   * A key hash nobody signs for yields `MissingVKeyWitnessesUTXOW`, which names
+   * the hash and not the reason.
+   */
+  readonly upgradeAuthoritySigners: readonly HexString[];
 }
 
 /**
- * Step 3 — the protocol genesis: three one-shot mints and the three UTxOs that
- * hold this instance's state.
+ * Step 4 — the protocol genesis: three one-shot mints, the three UTxOs that
+ * hold this instance's state, and THE ACTIVATION OF THE UPGRADE AUTHORITY.
  *
  * Outputs, and the indices are POSITIONAL — `assembleDeploymentParams` reads
  * output 0 and nothing checks the rest but the chain:
  *   0  the params UTxO          (NFT + the six-field params datum)
  *   1  the registry origin node (NFT + the sentinel head of the linked list)
  *   2  the issuance CBOR UTxO   (NFT + the spliced issuance_mint body)
+ *
+ * ⛔ THE ACTIVATION, NEW IN alpha.5 AND THE REASON THIS STEP'S SIGNATURE MOVED.
+ * Upstream added one line to `protocol_params.mint`:
+ *
+ *     pairs.has_key(self.withdrawals, genesis_params.upgrade_cred)?
+ *
+ * The transaction that creates the protocol-params NFT must carry a withdraw-0
+ * from the credential its OWN datum names as the upgrade authority. The point
+ * is that a typo, or the hash of a script nobody deployed, can never become the
+ * authority: the authority has to RUN, in the genesis transaction, before it is
+ * canonical. It is the same trampoline every later upgrade uses, so nothing is
+ * being proven here that is not proven again on every upgrade.
+ *
+ * Four things go in together, and three of them are consequences of the fourth:
+ *   1. `withdraw({ stakeCredential: Script(upgrade_multisig), amount: 0n })`;
+ *   2. the `upgrade_multisig` SCRIPT BODY, attached — the reference scripts are
+ *      published in the NEXT step, so there is nothing to reference yet;
+ *   3. the config UTxO as a REFERENCE INPUT, because that is where
+ *      `upgrade_multisig.withdraw` reads the authority tree from;
+ *   4. the `extra_signatories` the tree asks for — a caller input.
+ *
+ * ⛔ AND THE CREDENTIAL MUST ALREADY BE REGISTERED, IN AN EARLIER TRANSACTION.
+ * `buildStakeRegistrationTx` now runs BEFORE this step. Nothing here can check
+ * that it did: an unregistered credential does not fail with "not registered",
+ * it fails as ledger code 3141, *"rewards withdrawals must consume rewards in
+ * full"*, which reads as a balance problem and sends the reader to the wallet.
  */
 export async function buildProtocolGenesisTx(
   params: ProtocolGenesisTxParams
@@ -1298,7 +1398,46 @@ export async function buildProtocolGenesisTx(
   requireSeedMatches(params.protocolParamsSeedUtxo, plan.config.seeds.protocolParams, "protocolParams");
   requireSeedMatches(params.issuanceSeedUtxo, plan.config.seeds.issuance, "issuance");
 
-  const coinsPerUtxoByte = (await params.client.getProtocolParameters()).coinsPerUtxoByte;
+  // ⛔ THE ACTIVATION'S TWO CALLER INPUTS, CHECKED BY NAME BEFORE ANYTHING IS
+  // BUILT. Both were added at 0.12.0 for alpha.5; a caller still passing the
+  // 0.11.x argument object reaches this and is told which field is missing and
+  // why, rather than building a transaction the ledger refuses for a reason
+  // that names neither.
+  const configUtxo = params.upgradeMultisigConfigUtxo;
+  if (!configUtxo || typeof configUtxo !== "object" || configUtxo.transactionId === undefined) {
+    throw new Error(
+      `bootstrap protocol-genesis: upgradeMultisigConfigUtxo is required — the upgrade_multisig ` +
+        `config UTxO, carrying the config NFT and the authority tree as an inline datum, read ` +
+        `back off the chain. alpha.5's protocol_params.mint demands a withdraw-0 from ` +
+        `upgrade_cred, and upgrade_multisig.withdraw reads its tree from this UTxO among the ` +
+        `reference inputs. Get it from assertMultisigConfigUtxo(), which also refuses a decoy ` +
+        `parked at the same address.`
+    );
+  }
+  const configAddress = EvoAddress.toBech32(configUtxo.address);
+  if (configAddress !== plan.addresses.upgradeMultisig) {
+    throw new Error(
+      `bootstrap protocol-genesis: upgradeMultisigConfigUtxo sits at ${configAddress}, but this ` +
+        `plan's upgrade_multisig address is ${plan.addresses.upgradeMultisig}. A UTxO at any ` +
+        `other address cannot be this deployment's config: the address payment credential IS ` +
+        `the config NFT's policy id IS the withdraw-0 credential, one value in three roles.`
+    );
+  }
+  if (!Array.isArray(params.upgradeAuthoritySigners)) {
+    throw new Error(
+      `bootstrap protocol-genesis: upgradeAuthoritySigners is required and must be an array of ` +
+        `28-byte key hashes (hex), got ${JSON.stringify(params.upgradeAuthoritySigners)}. It ` +
+        `may be EMPTY — a tree of Script or time leaves alone needs no signature — but it may ` +
+        `not be omitted. It cannot be derived from the tree: only a Signature leaf names a key ` +
+        `hash, and AnyOf/AtLeast leave a genuine choice of which branch to satisfy. Which ` +
+        `branch you are satisfying is your decision, not this package's.`
+    );
+  }
+  const signers = params.upgradeAuthoritySigners.map((k, i) =>
+    requireHex(k, `upgradeAuthoritySigners[${i}]`, 28)
+  );
+
+  const { coinsPerUtxoByte, maxTxSize } = await params.client.getProtocolParameters();
   const paramsNft = new Map([[plan.assetUnits.protocolParamsNft, 1n]]);
   const registryNft = new Map([[plan.assetUnits.registryNode, 1n]]);
   const issuanceNft = new Map([[plan.assetUnits.issuanceCborHexNft, 1n]]);
@@ -1318,6 +1457,30 @@ export async function buildProtocolGenesisTx(
   }
 
   tx = tx.collectFrom({ inputs: [params.protocolParamsSeedUtxo, params.issuanceSeedUtxo] });
+
+  // --- The upgrade authority activates itself (alpha.5) --------------------
+  //
+  // ⚠ ORDER OF THE THREE CALLS DOES NOT MATTER — the builder defers and
+  // canonicalises — but the SET does. Drop any one and the mint handler,
+  // upgrade_multisig.withdraw, or the ledger refuses, each for a different
+  // reason and none of them naming the other two.
+  tx = tx.readFrom({ referenceInputs: [configUtxo] });
+  tx = tx.withdraw({
+    stakeCredential: Credential.makeScriptHash(
+      Bytes.fromHex(plan.scripts.upgradeMultisig.hash)
+    ),
+    amount: 0n,
+    // `upgrade_multisig.withdraw` binds its redeemer as `_redeemer: Data` and
+    // never reads it. Void is the smallest thing that satisfies the ledger's
+    // "a script witness needs a redeemer" rule.
+    redeemer: voidData(),
+  });
+  // Attached, not referenced: step 5 has not published the reference scripts
+  // yet, and this transaction is the one that must run before they exist.
+  tx = tx.attachScript({ script: buildEvoScript(plan.scripts.upgradeMultisig.compiledCode) });
+  for (const keyHash of signers) {
+    tx = tx.addSigner({ keyHash: KeyHash.fromHex(keyHash) });
+  }
 
   // ⚠ THREE POLICIES, THREE REDEEMERS, EACH THE GENESIS ARM OF ITS OWN
   // VALIDATOR. The indices are not a shared enum and do not correspond to each
@@ -1388,14 +1551,43 @@ export async function buildProtocolGenesisTx(
   tx = tx.attachScript({ script: buildEvoScript(plan.scripts.protocolParams.compiledCode) });
   tx = tx.attachScript({ script: buildEvoScript(plan.scripts.issuanceCborHexMint.compiledCode) });
 
-  return finish(tx, params, "protocol-genesis", {
+  const unsigned = await finish(tx, params, "protocol-genesis", {
     outputIndices: { protocolParams: 0, registryOrigin: 1, issuanceCborHex: 2 },
     cip171: Boolean(params.provenancePin),
+    // ⚑ EMITTED SO A CALLER CAN ASSERT ON IT. The activation is invisible in
+    // the output list and in the datums; without this, "did the genesis carry
+    // the withdraw-0?" is answerable only by decoding the CBOR.
+    upgradeActivation: {
+      withdrawal: plan.scripts.upgradeMultisig.hash,
+      configUtxo: refKey({
+        txHash: EvoTransactionHash.toHex(configUtxo.transactionId),
+        outputIndex: Number(configUtxo.index),
+      }),
+      signers,
+    },
   });
+
+  // ⚑ THE SIZE, REPORTED RATHER THAN ASSUMED — and alpha.5 is why it is worth
+  // reporting. This transaction already carried three script bodies, the
+  // six-field params datum and the issuance datum, which holds the whole
+  // spliced `issuance_mint` body; the activation adds a FOURTH script, and at
+  // this blueprint `upgrade_multisig` is the largest of the four. The repo has
+  // burst the 16,384-byte cap here before — MEASURED at 21,816 when the stake
+  // registrations rode along — and the failure arrives at SUBMISSION, naming a
+  // size and not a cause.
+  //
+  // ⚠ REPORTED, NOT REFUSED, and the asymmetry with `buildReferenceScriptsTx`
+  // is deliberate. That step's content is this package's own fixed list, so a
+  // refusal there names something the caller can act on. This step's size is
+  // dominated by a caller-chosen datum, and a hard refusal here would reject a
+  // transaction the ledger might still take. The figure is a LOWER BOUND
+  // either way: witnesses are not added yet.
+  const bytes = unsigned.cbor.length / 2;
+  return { ...unsigned, metadata: { ...unsigned.metadata, unsignedBytes: bytes, maxTxSize } };
 }
 
 // ---------------------------------------------------------------------------
-// Step 4 — publish the reference scripts
+// Step 5 — publish the reference scripts
 // ---------------------------------------------------------------------------
 
 export interface ReferenceScriptsTxParams extends BootstrapBuildContext {
@@ -1415,10 +1607,12 @@ export interface ReferenceScriptsTxParams extends BootstrapBuildContext {
 }
 
 /**
- * Step 4 — publish the seven reference scripts, in {@link REFERENCE_SCRIPT_ORDER}.
+ * Step 5 — publish the seven reference scripts, in {@link REFERENCE_SCRIPT_ORDER}.
  *
- * Cannot be folded into step 3: a transaction cannot reference a script it is
- * itself creating.
+ * Cannot be folded into the genesis: a transaction cannot reference a script it
+ * is itself creating. That is also why the genesis ATTACHES the
+ * `upgrade_multisig` body rather than referencing it — at genesis time there is
+ * no published reference script to reach for.
  */
 export async function buildReferenceScriptsTx(
   params: ReferenceScriptsTxParams
@@ -1513,7 +1707,7 @@ export async function buildReferenceScriptsTx(
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — register the withdraw-0 stake credentials
+// Step 3 — register the withdraw-0 stake credentials
 // ---------------------------------------------------------------------------
 
 export interface StakeRegistrationTxParams extends BootstrapBuildContext {
@@ -1521,7 +1715,16 @@ export interface StakeRegistrationTxParams extends BootstrapBuildContext {
 }
 
 /**
- * Step 5 — the six Conway `RegCert`s, in one transaction.
+ * Step 3 — the six Conway `RegCert`s, in one transaction.
+ *
+ * ⛔ THIS RAN LAST UNTIL 0.12.0 AND NOW RUNS BEFORE THE GENESIS. alpha.5's
+ * `protocol_params.mint` requires a withdraw-0 from `upgrade_cred`, and the
+ * ledger applies withdrawals against the reward-account state BEFORE it applies
+ * certificates — so registering and withdrawing in one transaction is not a
+ * transaction, it is two. Only `upgradeMultisig` is forced earlier by that
+ * rule; the other five ride along because they share this transaction, and
+ * every one of the six `publish` handlers admits `RegisterCredential` and reads
+ * no chain state, so none of them cares that the protocol does not exist yet.
  *
  * ⛔ `registerStake` + `attachScript` + a void redeemer, NEVER
  * `registerAndDelegateTo`, FOR A SCRIPT CREDENTIAL. MEASURED: a combined
@@ -1535,8 +1738,8 @@ export interface StakeRegistrationTxParams extends BootstrapBuildContext {
  * the withdrawal itself. The DRep delegation is the FOURTH thing a key
  * credential needs, and a script cannot have one.
  *
- * ⚠ Kept separate from step 3 because each certificate executes its script under
- * the PUBLISH purpose: carrying all six script bodies alongside the mint
+ * ⚠ Kept separate from the genesis because each certificate executes its script
+ * under the PUBLISH purpose: carrying all six script bodies alongside the mint
  * witnesses is what breaks the 16,384-byte size cap. MEASURED at 21,816 bytes
  * when this was one transaction.
  */
@@ -1570,9 +1773,9 @@ export async function buildStakeRegistrationTx(
 
 /** The four things only a submitted chain can tell you. */
 export interface BootstrapObservations {
-  /** Step 3's transaction hash. Becomes `txHash` and the params UTxO reference. */
+  /** Step 4's transaction hash. Becomes `txHash` and the params UTxO reference. */
   readonly protocolGenesisTxHash: TxHash;
-  /** Step 4's transaction hash. Becomes all seven reference inputs. */
+  /** Step 5's transaction hash. Becomes all seven reference inputs. */
   readonly referenceScriptsTxHash: TxHash;
   /**
    * The multisig config UTxO, READ BACK OFF THE CHAIN — see

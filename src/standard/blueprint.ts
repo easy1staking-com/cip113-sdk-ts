@@ -7,8 +7,32 @@ import type { PlutusBlueprint, BlueprintValidator, HexString } from "../types.js
 /**
  * Standard validator titles as they appear in the blueprint.
  *
- * Targets CIP-113 0.5.0-alpha.4 (upstream commit 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4). See
+ * Targets CIP-113 0.5.0-alpha.5 (upstream commit b83a041eaa053625c502f8ee64b607a787cf5f79). See
  * PLAN.md D-11.
+ *
+ * --- What alpha.5 moved, and what it did NOT -----------------------------
+ *
+ * NO TITLE CHANGED AND NO ARITY CHANGED. 34 handlers either side, and 31 of the
+ * 34 compiled to BYTE-IDENTICAL code; the only script whose bytes moved is
+ * `protocol_params`, whose three handlers share one hash. So every check in
+ * this file — titles, count, arity — is blind to alpha.5 by construction, and
+ * that is the hazard rather than a reassurance.
+ *
+ * ⛔ WHAT DID MOVE IS THE TRANSACTION SHAPE AT GENESIS, WHICH NO BLUEPRINT
+ * CHECK CAN SEE. `protocol_params.mint` gained one line —
+ * `pairs.has_key(self.withdrawals, genesis_params.upgrade_cred)` — so the
+ * genesis transaction must now carry a withdraw-0 from the credential its own
+ * datum names as the upgrade authority. An SDK holding alpha.5's blueprint but
+ * building alpha.4's genesis transaction passes every gate here and is refused
+ * by the ledger. `src/standard/bootstrap.ts` is where that is answered.
+ *
+ * ⛔ AND THE PARAMS-NFT POLICY IS THE ROOT OF THE PARAMETERISATION GRAPH, so
+ * one script's bytes moving relocates EVERY hash downstream of it:
+ * `programmable_logic_base`, `transfer`, `third_party`, `unfracking`,
+ * `programmable_logic_global`, `issuance_logic`, `issuance_mint`. No alpha.5
+ * deployment shares a hash with an alpha.4 one except the four that hang off
+ * seeds and nonces instead (`always_fail`, `issuance_cbor_hex_mint`,
+ * `registry`, `upgrade_multisig`). Measured in `test/hash-cascade.test.mjs`.
  *
  * --- What alpha.4 moved --------------------------------------------------
  *
@@ -90,10 +114,10 @@ export const STANDARD_VALIDATORS = {
  * ⚠ SINGLE SOURCE OF TRUTH for the version verdict. A migration flips this one
  * constant; nothing else should encode a target version.
  */
-export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.4";
+export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.5";
 
 /** Upstream commit the target version's blueprint was built from. */
-export const TARGET_PROTOCOL_COMMIT = "7e8a631";
+export const TARGET_PROTOCOL_COMMIT = "b83a041";
 
 /**
  * Validator titles that existed in an ADJACENT CIP-113 release and are absent

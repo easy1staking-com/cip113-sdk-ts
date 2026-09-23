@@ -39,19 +39,26 @@ import {
   previewChain,
 } from "../dist/index.js";
 import * as scriptsModule from "../dist/standard/scripts.js";
+import { TARGET_PROTOCOL_VERSION } from "../dist/standard/blueprint.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(resolve(ROOT, p), "utf-8");
 const load = (p) => JSON.parse(read(p));
 
-const blueprint = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+// ⛔ FOLLOWS THE TARGET, NEVER A LITERAL PATH. `validateStandardBlueprint` is a
+// version-EQUALITY gate, so a hard-coded directory turns every protocol
+// migration into a wall of failures in a file whose subject is the NETWORK
+// label and nothing else. MEASURED at the alpha.4 -> alpha.5 bump: five tests
+// here went red for a reason none of their names mention.
+const blueprint = load(`blueprints/standard/v${TARGET_PROTOCOL_VERSION}/plutus.json`);
 
 // ---------------------------------------------------------------------------
 // Scaffolding — a deployment `init` will accept
 // ---------------------------------------------------------------------------
 
 /**
- * A self-consistent alpha.4 deployment, derived from the blueprint.
+ * A self-consistent deployment at the SDK's target version, derived from the
+ * blueprint.
  *
  * Scaffolding only: `buildDeploymentScripts` REFUSES a record whose hashes do
  * not reproduce, so `CIP113.init` cannot be reached with an arbitrary object.

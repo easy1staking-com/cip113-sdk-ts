@@ -25,7 +25,7 @@
  * for the delegates actually deployed. A stale dispatcher fails at withdrawal
  * time with an index error that names neither cause.
  *
- * TARGET: CIP-113 0.5.0-alpha.4 (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
+ * TARGET: CIP-113 0.5.0-alpha.5 (upstream b83a041eaa053625c502f8ee64b607a787cf5f79).
  *
  * The preprod deployment this repo used to assert against was a 0.3.x protocol
  * instance and is no longer REPRESENTABLE — programmable_logic_global does not
@@ -46,12 +46,21 @@ import {
   DeploymentMismatchError,
 } from "../dist/standard/scripts.js";
 import * as scriptsModule from "../dist/standard/scripts.js";
-import { validateStandardBlueprint } from "../dist/standard/blueprint.js";
+import {
+  validateStandardBlueprint,
+  TARGET_PROTOCOL_VERSION,
+} from "../dist/standard/blueprint.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
 
-const blueprint = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+// ⛔ FOLLOWS THE TARGET CONSTANT RATHER THAN NAMING A DIRECTORY. This file's
+// subject is the deployment-hash assertion, not the version gate, and a
+// hard-coded path makes every protocol migration redden it for an unrelated
+// reason. alpha.5 changes no title and no arity here — only `protocol_params`'s
+// bytes, and therefore every hash downstream of the params policy, which this
+// file re-derives rather than pins.
+const blueprint = load(`blueprints/standard/v${TARGET_PROTOCOL_VERSION}/plutus.json`);
 
 /** Arbitrary but fixed inputs — nothing here needs to be a real deployment. */
 const PP_TX = { txHash: "aa".repeat(32), outputIndex: 0 };
@@ -188,7 +197,7 @@ const EXPECTED_CHECKS = [
   "upgrade_multisig",
 ];
 
-test("POSITIVE: every derivable 0.5.0-alpha.4 script is checked and reproduces", () => {
+test("POSITIVE: every derivable target-version script is checked and reproduces", () => {
   const checks = assertDeploymentScripts(blueprint, DEPLOYMENT);
   assert.deepEqual(
     checks.map((c) => c.name).sort(),
@@ -292,14 +301,21 @@ test("a 0.3.x blueprint is diagnosed by protocol version, not as a corrupt file"
       assert.match(err.message, /registry_mint|registry_spend|protocol_params_mint/,
         "must name what it found");
       assert.match(err.message, /merged/, "must say what replaced it");
-      assert.match(err.message, /v0\.5\.0-alpha\.4/, "must name where to go");
+      // Derived from the constant: the literal `v0.5.0-alpha.4` written here
+      // went stale the moment the target moved, and its own message still
+      // claimed to be checking "where to go".
+      assert.match(
+        err.message,
+        new RegExp(`v${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}`),
+        "must name where to go",
+      );
       return true;
     },
     "loading old contracts must explain the version gap, not report a missing validator"
   );
 });
 
-test("the shipped 0.5.0-alpha.4 blueprint validates", () => {
+test("the shipped target-version blueprint validates", () => {
   // ⚑ The §7f control for this file: the gate got STRICTER (the preamble
   // verdict now runs before the missing-title check), and a guard that refuses
   // everything is not a fixed guard. This must stay green.

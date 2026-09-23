@@ -24,7 +24,13 @@
  * It is not a supported way to deploy a production protocol. Do not point it at
  * preprod or mainnet.
  *
- * TARGETS CIP-113 0.5.0-alpha.4 (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
+ * TARGETS CIP-113 0.5.0-alpha.5 (upstream b83a041eaa053625c502f8ee64b607a787cf5f79).
+ *
+ * ⚠ alpha.5 changed ONE thing in this sequence and it is not in the list
+ * below: the protocol genesis now carries a withdraw-0 from `upgrade_cred`, so
+ * the stake registrations moved AHEAD of it (a reward account cannot be
+ * withdrawn from in the transaction that registers it). The topology itself is
+ * unchanged.
  *
  * The topology this fixture stands up, and the three things alpha.4 changed:
  *
@@ -168,6 +174,30 @@ function loadUpstreamPin(): UpstreamPin {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
+ * What {@link bootstrapProtocol}'s `beforeProtocolGenesis` hook is handed.
+ *
+ * Everything the genesis step is about to use, and nothing else — so a caller
+ * can build a VARIANT of that transaction against the very same plan, seeds and
+ * config UTxO. Any difference between the two is then the variant's own.
+ */
+export interface BeforeProtocolGenesisContext {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  readonly client: any;
+  readonly plan: BootstrapPlan;
+  readonly evaluator: Evaluator | undefined;
+  /** Bech32 change address — the fixture wallet's. */
+  readonly changeAddress: string;
+  /** The same UTxO reservation the genesis will use. */
+  readonly availableUtxos: () => Promise<EvoUTxO.UTxO[]>;
+  readonly protocolParamsSeedUtxo: EvoUTxO.UTxO;
+  readonly issuanceSeedUtxo: EvoUTxO.UTxO;
+  /** The config UTxO, read back off the chain and vetted. */
+  readonly upgradeMultisigConfigUtxo: EvoUTxO.UTxO;
+  /** The key hash this fixture's one-leaf `Signature` tree names. */
+  readonly upgradeAuthoritySigner: string;
+}
+
+/**
  * Bootstrap a protocol instance on a TESTNET. Returns DeploymentParams.
  *
  * Defaults to the local Yaci devnet. Pass `client`/`evaluator` to run the same
@@ -203,6 +233,26 @@ export async function bootstrapProtocol(
      * afterwards.
      */
     awaitTx?: (txHash: string) => Promise<void>;
+    /**
+     * FIXTURE HOOK — runs immediately before the protocol genesis is built,
+     * with the plan and everything the genesis itself is about to use.
+     *
+     * ⛔ IT EXISTS FOR ONE THING: THE NEGATIVE CONTROL. alpha.5's genesis
+     * carries a withdraw-0 from `upgrade_cred`, and a bootstrap that SUCCEEDS
+     * cannot distinguish "the new check passed" from "the new check never ran".
+     * Only submitting the same genesis WITHOUT the withdrawal, at the same
+     * seeds, and watching the ledger refuse it, tells those two apart.
+     *
+     * ⚠ AND THE BYPASS LIVES IN THE CALLER, NOT HERE. This hook hands over the
+     * materials; `test/devnet/upgrade-activation.test.ts` builds the
+     * alpha.4-shaped genesis itself. Putting a "skip the activation" flag on
+     * the exported builder — or on this harness — would be shipping the
+     * footgun in order to test the safety catch.
+     *
+     * ⚠ A refused submission consumes nothing, so the seeds this runs against
+     * are still unspent when the real genesis follows it.
+     */
+    beforeProtocolGenesis?: (ctx: BeforeProtocolGenesisContext) => Promise<void>;
   } = {}
 ): Promise<DeploymentParams> {
   const client = opts.client ?? (await makeClient());
@@ -511,7 +561,59 @@ export async function bootstrapProtocol(
   });
 
   // =========================================================================
-  // STEP 3 — the protocol genesis
+  // STEP 3 — register the six withdraw-0 stake credentials
+  // =========================================================================
+  //
+  // ⛔ BEFORE THE GENESIS SINCE alpha.5, AND THIS IS A LEDGER RULE. The genesis
+  // now carries a withdraw-0 from `upgrade_cred` = Script(upgrade_multisig),
+  // and withdrawals are applied against the reward-account state BEFORE
+  // certificates — so the credential cannot be registered in the transaction
+  // that withdraws from it. It used to be last because nothing needed it yet.
+  //
+  // ⛔ T-D19, MEASURED: `registerStake`'s own `build()` raises the same
+  // `Kupmios getProtocolParameters failed` transient from Evolution's
+  // Stake.ts:64. Wrapped for the same reason — a stake op's build is
+  // side-effect-free until submitAndWait runs.
+  const regTx = await retryTransient(
+    async () =>
+      buildStakeRegistrationTx({
+        client,
+        changeAddress: address,
+        availableUtxos: await spendable(),
+        evaluator,
+        plan,
+      }),
+    { label: "step3-stake-registrations build" }
+  );
+  await submitUnsigned(regTx, "step3-stake-registrations");
+
+  // The withdrawal in STEP 4 reads reward-account state that this transaction
+  // just wrote. Settling here is not belt-and-braces: an unregistered
+  // credential is refused as Conway 3141, "rewards withdrawals must consume
+  // rewards in full", which reads as a balance problem and sends the reader to
+  // the wallet rather than to the certificate that had not landed yet.
+  await settleIndexer();
+
+  if (opts.beforeProtocolGenesis) {
+    await opts.beforeProtocolGenesis({
+      client,
+      plan,
+      evaluator,
+      changeAddress: address,
+      availableUtxos: () => spendable(),
+      protocolParamsSeedUtxo: seedUtxos.protocolParams,
+      issuanceSeedUtxo: seedUtxos.issuance,
+      upgradeMultisigConfigUtxo: multisigConfig.utxo,
+      upgradeAuthoritySigner: adminPkh,
+    });
+    // The hook submits a transaction the ledger is expected to REFUSE. A
+    // refusal consumes nothing, but the wallet view still churns, and the
+    // genesis below names specific seeds.
+    await settleIndexer();
+  }
+
+  // =========================================================================
+  // STEP 4 — the protocol genesis
   // =========================================================================
   //
   // ⚠ CIP-171 provenance rides this transaction because that is what was asked
@@ -529,11 +631,22 @@ export async function bootstrapProtocol(
     protocolParamsSeedUtxo: seedUtxos.protocolParams,
     issuanceSeedUtxo: seedUtxos.issuance,
     provenancePin: loadUpstreamPin(),
+    // ⛔ THE ACTIVATION, alpha.5. The config UTxO is the one read back off the
+    // chain and vetted by `assertMultisigConfigUtxo` above — not a
+    // reconstruction — because `upgrade_multisig.withdraw` decides on the tree
+    // it finds in the REFERENCE INPUTS.
+    upgradeMultisigConfigUtxo: multisigConfig.utxo,
+    // ⛔ A FIXTURE VALUE, AND THE EXPORT SHIPS NO DEFAULT FOR IT. This harness
+    // configures a one-leaf `Signature` tree over its own wallet, so the
+    // satisfying signer set is that one key hash. A real deployment's tree may
+    // be `AnyOf`/`AtLeast`, where WHICH branch to satisfy is a decision nothing
+    // can make on the caller's behalf.
+    upgradeAuthoritySigners: [adminPkh],
   });
-  const protocolGenesisTxHash = await submitUnsigned(genesisTx, "step3-protocol-genesis");
+  const protocolGenesisTxHash = await submitUnsigned(genesisTx, "step4-protocol-genesis");
 
   // =========================================================================
-  // STEP 4 — publish the reference scripts
+  // STEP 5 — publish the reference scripts
   // =========================================================================
   const refTx = await buildReferenceScriptsTx({
     client,
@@ -546,7 +659,7 @@ export async function bootstrapProtocol(
     referenceScriptAddress: address,
     referenceScriptLovelace: REF_SCRIPT_ADA,
   });
-  const referenceScriptsTxHash = await submitUnsigned(refTx, "step4-reference-scripts");
+  const referenceScriptsTxHash = await submitUnsigned(refTx, "step5-reference-scripts");
 
   // ---- FIXTURE ONLY: the wallet's own stake key, REGISTERED **AND** DELEGATED
   //
@@ -640,26 +753,6 @@ export async function bootstrapProtocol(
     await delegateOnly();
   }
 
-  // =========================================================================
-  // STEP 5 — register the six withdraw-0 stake credentials
-  // =========================================================================
-  //
-  // ⛔ T-D19, MEASURED: `registerStake`'s own `build()` raises the same
-  // `Kupmios getProtocolParameters failed` transient from Evolution's
-  // Stake.ts:64. Wrapped for the same reason — a stake op's build is
-  // side-effect-free until submitAndWait runs.
-  const regTx = await retryTransient(
-    async () =>
-      buildStakeRegistrationTx({
-        client,
-        changeAddress: address,
-        availableUtxos: await spendable(),
-        evaluator,
-        plan,
-      }),
-    { label: "step5-stake-registrations build" }
-  );
-  await submitUnsigned(regTx, "step5-stake-registrations");
 
   // The caller will immediately build against this wallet, and the indexer is
   // still catching up. Settling here rather than in every caller keeps the
