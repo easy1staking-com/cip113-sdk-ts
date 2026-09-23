@@ -71,15 +71,26 @@ jobs:
       # Nothing is lost by skipping: the check step above already proved the
       # version is in the registry's `versions` map. That IS the verification
       # when we did not publish.
+      #
+      # ⛔ THE BUDGET IS SIZED AGAINST MEASURED PROPAGATION, NOT A GUESS — and the
+      # previous 20 x 10s = 200s was UNDER it, so a SUCCESSFUL publish reported RED.
+      # MEASURED from a client polling the raw registry immediately after the tag
+      # push: v0.11.0 became visible at ~175s, v0.12.0 at ~225s. v0.12.0's own run
+      # therefore failed HERE with the package already live and correct.
+      #
+      # 40 x 15s = 600s leaves room above the worst reading rather than sitting on
+      # top of it. If this ever fires for real, the publish step above it succeeded
+      # and the package is probably fine — check the registry before assuming a
+      # failed release.
       - name: Verify the registry actually has it
         if: steps.check.outputs.already == 'false'
         run: |
           V="${{ steps.check.outputs.version }}"
-          for i in $(seq 1 20); do
+          for i in $(seq 1 40); do
             LATEST=$(curl -s "https://registry.npmjs.org/@easy1staking%2Fcip113-sdk-ts" \
                       | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{
                           try{console.log(JSON.parse(s)['dist-tags'].latest)}catch{console.log('')}})")
-            [ "$LATEST" = "$V" ] && { echo "registry dist-tags.latest = $LATEST"; exit 0; }
-            sleep 10
+            [ "$LATEST" = "$V" ] && { echo "registry dist-tags.latest = $LATEST after ~$((i*15))s"; exit 0; }
+            sleep 15
           done
           echo "::error::registry never reported $V (last saw '$LATEST')"; exit 1
