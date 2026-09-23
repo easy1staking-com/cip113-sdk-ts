@@ -55,7 +55,8 @@
  * CONFIG and every hash, address, datum and asset unit can be re-derived on any
  * machine with no chain access. No step needs an earlier step's CONSUMED
  * inputs, which is the property that makes resuming at step N work at all — by
- * the time you resume at step 4 the seeds are spent and unfetchable.
+ * the time you resume at step 5 (reference scripts) the seeds are spent and
+ * unfetchable.
  */
 
 import {
@@ -1101,8 +1102,9 @@ export interface MultisigGenesisTxParams extends BootstrapBuildContext {
  * Step 2 — mint the `upgrade_multisig` one-shot NFT and lock it with the signer
  * tree, BEFORE the protocol genesis names this authority.
  *
- * ⛔ THE ORDER IS THE POINT, AND IT IS NOT A STYLE CHOICE. Step 3 writes a
- * genesis datum naming `upgrade_cred = Script(upgrade_multisig)`. That authority
+ * ⛔ THE ORDER IS THE POINT, AND IT IS NOT A STYLE CHOICE. The protocol
+ * genesis (step 4) writes a genesis datum naming
+ * `upgrade_cred = Script(upgrade_multisig)`. That authority
  * is usable only while its config UTxO exists — the tree lives there, not in the
  * script's parameters. Running this AFTER the protocol genesis and failing
  * leaves a protocol on chain naming an authority whose config UTxO does not
@@ -1122,7 +1124,7 @@ export interface MultisigGenesisTxParams extends BootstrapBuildContext {
  * nothing about bundling. Change is a separate output.
  *
  * ⚠ NO `script:` ON THE OUTPUT — rail 4 requires `reference_script == None`.
- * The reference script is published in step 4 like every other one.
+ * The reference script is published in step 5 like every other one.
  *
  * ⚑ Additional outputs are the CALLER's to add in their own transaction if they
  * want them. Rail 3 uses `list.expect_find`, which SKIPS a non-matching output
@@ -1185,8 +1187,11 @@ export async function buildMultisigGenesisTx(
  * could not be registered at all: every hash reproduced, every read-back
  * matched, every test passed, and the protocol's upgrade path was permanently
  * unsatisfiable. "It exists and is well-formed" left "and can be used" untested.
- * Run this between step 2 and step 3, so it is structurally impossible for the
- * genesis datum to name an authority that is not there.
+ * Run this between step 2 and the protocol genesis (step 4), so it is
+ * structurally impossible for the genesis datum to name an authority that is
+ * not there. ⚠ "Between step 2 and step 3" is what this said before 0.12.0 and
+ * step 3 is now the stake registrations — the sentence stayed true-looking
+ * while naming the wrong transaction.
  *
  * ⚑ FILTERS STRUCTURALLY, BY POLICY, EXACTLY AS THE VALIDATOR DOES — not by
  * equality against a unit string we ourselves built. A lookup keyed on our own
@@ -1276,7 +1281,7 @@ function sameTree(a: MultisigScriptTree, b: MultisigScriptTree): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — protocol genesis
+// Step 4 — protocol genesis
 // ---------------------------------------------------------------------------
 
 export interface ProtocolGenesisTxParams extends BootstrapBuildContext {
@@ -1768,9 +1773,9 @@ export async function buildStakeRegistrationTx(
 
 /** The four things only a submitted chain can tell you. */
 export interface BootstrapObservations {
-  /** Step 3's transaction hash. Becomes `txHash` and the params UTxO reference. */
+  /** Step 4's transaction hash. Becomes `txHash` and the params UTxO reference. */
   readonly protocolGenesisTxHash: TxHash;
-  /** Step 4's transaction hash. Becomes all seven reference inputs. */
+  /** Step 5's transaction hash. Becomes all seven reference inputs. */
   readonly referenceScriptsTxHash: TxHash;
   /**
    * The multisig config UTxO, READ BACK OFF THE CHAIN — see

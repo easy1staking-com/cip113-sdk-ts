@@ -32,6 +32,30 @@
  *
  * LOCAL DEVNET ONLY. `requireDevnet()` refuses anything else, and
  * `bootstrapProtocol` refuses a non-testnet network id on top of that.
+ *
+ * ---------------------------------------------------------------------------
+ * ⛔ THE PROOF THAT THIS CONTROL IS NOT VACUOUS — A CHECKABLE ARTEFACT
+ * ---------------------------------------------------------------------------
+ *
+ * A control that is refused proves nothing unless the same transaction WITH the
+ * activation would have been accepted. That was measured twice, by two people,
+ * by putting the withdrawal back and watching the ledger take it:
+ *
+ *   2026-09-23  implementer  restored-activation control ACCEPTED; it then
+ *               spent the seeds, so the real genesis that followed died with
+ *               Conway 3117 ("unknown UTxO references as inputs") — a message
+ *               naming a UTxO, reading as a builder bug, three transactions
+ *               downstream of the cause. That is why the accepted branch below
+ *               throws AT the observation instead of asserting after it.
+ *   2026-09-23  auditor      reproduced independently, devnet tx
+ *               8b5699f197ec529e04c3bb3fc7b4866134f7cbcfad8a9c3da689d27ee11cd659
+ *
+ * ⚠ That hash is the artefact, and it is recorded because the claim was
+ * otherwise only prose: true on the day, uncheckable by anyone afterwards
+ * without redoing the work. It is a LOCAL devnet hash — it means nothing on a
+ * public chain, and it is only verifiable against the cluster that produced it,
+ * which is exactly why the date is recorded with it. A reset cluster invalidates
+ * the lookup, not the finding.
  */
 
 import { test, before } from "node:test";
@@ -53,7 +77,7 @@ import {
   InlineDatum,
 } from "@evolution-sdk/evolution";
 
-import { requireDevnet } from "../harness/yaci.mjs";
+import { requireDevnet, retryTransient } from "../harness/yaci.mjs";
 import {
   bootstrapProtocol,
   type BeforeProtocolGenesisContext,
@@ -178,7 +202,25 @@ test("NEGATIVE CONTROL then SUBJECT: the genesis is refused without the withdraw
 
       let built;
       try {
-        built = await buildGenesisWithoutActivation(c);
+        // ⛔ RETRIED, AND IT CANNOT MASK THE REFUSAL. MEASURED by the audit:
+        // this test failed 2 of 3 standalone runs with
+        // `ProviderError: Kupmios getUtxos failed` before reaching any
+        // assertion — the shared devnet wallet holds ~4,581 UTxOs, so every
+        // `spendable()` is a multi-megabyte fetch. There is no devnet CI; this
+        // is run BY HAND, ONCE, at release time, and it is the one test that
+        // carries the release's evidence. A 2-in-3 flake there trains the
+        // operator to re-run until green, which is the reflex that makes a
+        // flake indistinguishable from a regression.
+        //
+        // ⛔ WHY THE RETRY IS SAFE HERE OF ALL PLACES. `retryTransient` checks
+        // `LEDGER_VERDICT` FIRST and it wins: 3010 and 3012 — the exact codes
+        // this control is trying to observe — are rethrown on the first
+        // attempt, never retried. Only transport signatures
+        // (`Kupmios getUtxos failed`, ECONNRESET, …) are retried. A retry that
+        // could swallow the verdict would destroy the experiment.
+        built = await retryTransient(() => buildGenesisWithoutActivation(c), {
+          label: "negative-control genesis build",
+        });
       } catch (err) {
         // ⛔ A BUILD failure is NOT the observation this test wants. Phase-2
         // evaluation runs during build, so the script may refuse here rather
@@ -243,8 +285,11 @@ test("NEGATIVE CONTROL then SUBJECT: the genesis is refused without the withdraw
   assert.ok(
     failing,
     "the control was refused, but not by a MINT script — so it was refused for some reason " +
-      "other than the activation, and this fixture is measuring the wrong thing. Ledger " +
-      "response: " + controlOutcome.text
+      "other than the activation, and this fixture is measuring the wrong thing. ⚠ If the text " +
+      "below names a PROVIDER failure (Kupmios getUtxos failed, ECONNRESET, fetch failed) then " +
+      "this is a TRANSPORT error that outlived its retries, NOT a ledger refusal, and nothing " +
+      "was measured at all — re-run, do not read it as a green control. Ledger response: " +
+      controlOutcome.text
   );
   // Mint redeemers are indexed by the position of the policy id in the mint
   // field, which the ledger keeps sorted. Three policies mint here; only one of

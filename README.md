@@ -60,11 +60,22 @@ await client.awaitTx(txHash);
 
 ## Migrating to 0.12.0 (CIP-113 0.5.0-alpha.5 — the upgrade authority activates itself)
 
-⛔ **EVERY SCRIPT HASH CHANGES. An alpha.4 instance cannot be upgraded to alpha.5 — it must be
-REDEPLOYED.** There is no migration path for a running deployment, and nothing in this SDK will
-pretend otherwise: `validateStandardBlueprint` is a version-**equality** gate, so 0.12.0 refuses an
-alpha.4 blueprint as firmly as it refuses an alpha.3 one. Stay on 0.11.x for as long as you need to
-keep operating an alpha.4 instance.
+⛔ **EVERY SCRIPT HASH DOWNSTREAM OF THE PARAMS POLICY CHANGES — EIGHT OF TWELVE.** An alpha.4
+instance **cannot be upgraded; it must be REDEPLOYED.** The four that survive (`always_fail`,
+`issuance_cbor_hex_mint`, `registry`, `upgrade_multisig`) hang off seeds and nonces rather than the
+params policy — and a redeployment uses fresh seeds, so they cannot collide with the old instance in
+practice.
+
+There is no migration path for a running deployment, and nothing in this SDK will pretend otherwise:
+`validateStandardBlueprint` is a version-**equality** gate, so 0.12.0 refuses an alpha.4 blueprint as
+firmly as it refuses an alpha.3 one. Stay on 0.11.x for as long as you need to keep operating an
+alpha.4 instance.
+
+⚠ **An earlier draft of this note said "every script hash changes". That was FALSE and it is
+recorded here rather than quietly corrected**, because the false version is *checkable*: one
+operator deriving `registry` at their old seeds finds it identical, and the credibility of the whole
+migration note goes with it. The eight/four split is measured in `test/hash-cascade.test.mjs`. The
+operational conclusion did not change.
 
 ### What upstream changed — one line
 
@@ -81,7 +92,7 @@ of a script nobody deployed can never take the protocol's upgrade seat. Measured
 34 validators either side, **31 byte-identical**, and the only compiled code that moved is
 `protocol_params`'s.
 
-### Why one line relocates every hash
+### Why one line relocates eight of the twelve
 
 `protocol_params`'s hash **is** the params-NFT policy id, and that policy id is the parameter at the
 root of the parameterisation graph. It feeds `programmable_logic_base`, and through it `transfer`,

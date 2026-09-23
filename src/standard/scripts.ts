@@ -1,6 +1,17 @@
 /**
- * Standard script parameterization — CIP-113 0.5.0-alpha.4
- * (upstream 7e8a63198c5b240135f1aa2f043ce5d7c046b2c4).
+ * Standard script parameterization — CIP-113 0.5.0-alpha.5
+ * (upstream b83a041eaa053625c502f8ee64b607a787cf5f79).
+ *
+ * ⛔ IF YOU OPENED THIS FILE BECAUSE A HASH DOES NOT MATCH, READ THIS FIRST.
+ * alpha.5 changed ONE line in `protocol_params` and nothing else — 31 of 34
+ * validators are byte-identical to alpha.4. But `protocol_params`'s hash IS
+ * `params_policy`, the root of the graph below, so EIGHT of the twelve scripts
+ * this file derives move between alpha.4 and alpha.5 for the same inputs.
+ * Only `always_fail`, `issuance_cbor_hex_mint`, `registry` and
+ * `upgrade_multisig` keep their hashes — they hang off seeds and nonces, not
+ * off the params policy. Measured in `test/hash-cascade.test.mjs`.
+ * ⇒ A mismatch on one of those EIGHT against an alpha.4 record is expected and
+ * is not a defect here. A mismatch on one of the FOUR is.
  *
  * Uses Evolution SDK directly for UPLC.applyParamsToScript and ScriptHash.
  *

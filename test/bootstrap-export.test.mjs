@@ -8,9 +8,16 @@
  * reader infer coverage that is not present:
  *
  *  * PROVEN OFFLINE, against an INDEPENDENT source: the parameterisation chain
- *    reproduces a LIVE preview deployment — every script hash, every one-shot
- *    outref, every reference-input index — field for field. Those hashes came
- *    off a real chain, not off this test.
+ *    still reproduces a LIVE preview deployment for the FOUR scripts alpha.5
+ *    did not move, and is shown to have moved AWAY from it for the other
+ *    eight. Every one-shot outref and every reference-input index still
+ *    reproduces field for field. Those values came off a real chain, not off
+ *    this test.
+ *    ⚠ "Every script hash reproduces the live deployment" was true until
+ *    0.12.0 and is now FALSE — see the split on `LIVE_UNCHANGED` /
+ *    `LIVE_MOVED` below. The sentence is corrected rather than deleted because
+ *    a header that overstates coverage is the exact failure this block exists
+ *    to prevent.
  *  * PROVEN OFFLINE: every required input is refused BY NAME when absent,
  *    empty, or of the wrong kind; the plan is deterministic; and each build
  *    step assembles the inputs, mints, outputs, certificates and script
@@ -426,9 +433,15 @@ test("PIN: the four scripts alpha.5 did not move still reproduce the live previe
 
 test("PIN: every script downstream of the params policy has MOVED away from the live alpha.4 deployment", () => {
   // ⛔ THE CASCADE, AS A MEASUREMENT AGAINST A CHAIN. The 0.12.0 release note
-  // claims every hash changes and an alpha.4 instance must be redeployed rather
+  // claims EIGHT OF TWELVE hashes change — every one downstream of the params
+  // policy — and that an alpha.4 instance must therefore be redeployed rather
   // than upgraded. This is that claim, with a live deployment record on the
   // other side of the comparison instead of a fixture.
+  //
+  // ⚠ The note first said "every script hash changes", which is false and,
+  // worse, CHECKABLE: an operator deriving `registry` at their old seeds finds
+  // it identical. The companion assertion on LIVE_UNCHANGED above is what
+  // keeps this file from repeating it.
   const plan = planBootstrap(previewConfig());
   for (const [name, get, alpha4Hash] of LIVE_MOVED) {
     assert.match(alpha4Hash, /^[0-9a-f]{56}$/, `${name}: the live record must carry a real hash`);
@@ -821,7 +834,20 @@ test("REFUSAL: a blueprint with no publish handlers cannot bootstrap, and says w
 /** A minimal, valid transaction. The stub returns this so `finish` can serialise. */
 const PLACEHOLDER_TX = EvoTransaction.fromCBORHex("84a3008001800200a0f5f6");
 
-function recorder({ coinsPerUtxoByte = 4310n, maxTxSize = 16384, txHash = "cc".repeat(32) } = {}) {
+/**
+ * The recorder's DEFAULT cap, named rather than repeated.
+ *
+ * ⛔ IT IS ALSO THE REAL MAINNET/DEVNET VALUE, which is what made an assertion
+ * against the literal 16384 unable to tell a chain read from a hard-code. Any
+ * test that means "the step asked the client" must pass a cap that is NOT this.
+ */
+const CHAIN_MAX_TX_SIZE = 16384;
+
+function recorder({
+  coinsPerUtxoByte = 4310n,
+  maxTxSize = CHAIN_MAX_TX_SIZE,
+  txHash = "cc".repeat(32),
+} = {}) {
   const ops = [];
   const record = (name) => (params) => {
     ops.push({ op: name, params });
@@ -1162,7 +1188,41 @@ test("STEP 4 protocol-genesis: two seeds in, three mints, three state outputs, a
   // carries the whole spliced issuance_mint body as a datum, and this repo has
   // burst 16,384 on this very step before.
   assert.equal(typeof result.metadata.unsignedBytes, "number");
-  assert.equal(result.metadata.maxTxSize, 16384, "taken from the chain, not hard-coded");
+  assert.equal(result.metadata.maxTxSize, CHAIN_MAX_TX_SIZE);
+});
+
+test("STEP 4: maxTxSize is READ FROM THE CHAIN, not hard-coded", async () => {
+  // ⛔ THE ASSERTION THIS REPLACES COULD NOT FAIL, AND SAID IN ITS OWN MESSAGE
+  // THAT IT COULD. It read
+  //
+  //     assert.equal(result.metadata.maxTxSize, 16384, "taken from the chain, not hard-coded")
+  //
+  // and 16,384 is the RECORDER'S DEFAULT. Chain-read and hard-coded produce the
+  // same number, so the guard distinguished nothing while its message claimed
+  // precisely that it did. MEASURED by the audit: replacing the chain read in
+  // `buildProtocolGenesisTx` with `const maxTxSize = 16384` left the whole
+  // offline suite at 361/361 green.
+  //
+  // ⇒ A cap the chain would never volunteer. If the step stops asking the
+  // client, this number cannot appear. The sibling reference-scripts guard
+  // already does exactly this with `recorder({ maxTxSize: 1 })`, which is what
+  // makes the old assertion an oversight rather than a pattern.
+  const plan = planBootstrap(previewConfig());
+  const { client } = recorder({ maxTxSize: 12345 });
+  const seeds = seedUtxos(plan);
+  const result = await buildProtocolGenesisTx({
+    ...ctx(client),
+    plan,
+    protocolParamsSeedUtxo: seeds.protocolParams,
+    issuanceSeedUtxo: seeds.issuance,
+    ...activation(plan),
+  });
+  assert.equal(
+    result.metadata.maxTxSize,
+    12345,
+    "the genesis step must report the CHAIN's maxTxSize — a literal cannot produce this value"
+  );
+  assert.notEqual(result.metadata.maxTxSize, CHAIN_MAX_TX_SIZE, "not the recorder's default");
 });
 
 test("STEP 4: an EMPTY signer set is accepted and emits no signer — required, not defaulted", async () => {
@@ -1338,6 +1398,13 @@ test("REFUSAL: availableUtxos absent or empty, by name, on every step", async ()
         }),
     ],
     [
+      // ⛔ THE ACTIVATION INPUTS BELONG HERE, and their absence made this row
+      // pass for the WRONG REASON. `requireBuildContext` happens to run ahead
+      // of the activation checks, so a row missing them still threw
+      // "availableUtxos is required" — the needle this test matches. Reorder
+      // those two validations in `bootstrap.ts` and the row reddens naming a
+      // cause its own title does not mention. A test whose green depends on
+      // validation ORDER is testing the order, not the thing it names.
       "protocol-genesis",
       (c) =>
         buildProtocolGenesisTx({
@@ -1345,6 +1412,7 @@ test("REFUSAL: availableUtxos absent or empty, by name, on every step", async ()
           plan,
           protocolParamsSeedUtxo: seeds.protocolParams,
           issuanceSeedUtxo: seeds.issuance,
+          ...activation(plan),
         }),
     ],
     [

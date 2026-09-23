@@ -496,7 +496,12 @@ export function minUtxoAtLeast(
  * `tail_list` depths in `validators/programmable_logic/params.ak` are the
  * authority, and the vendored blueprint agrees with them. Never take a shape
  * from prose — take it from
- * `blueprints/standard/v0.5.0-alpha.4/plutus.json`'s `definitions`.
+ * `blueprints/standard/v0.5.0-alpha.5/plutus.json`'s `definitions`, under the
+ * key `programmable_logic/params/ProtocolParams`.
+ * ⚑ The layout is UNCHANGED from alpha.4 — asserted, not assumed, by
+ * `test/hash-cascade.test.mjs` ("the datum layouts are IDENTICAL across the
+ * bump"), which compares the two artefacts' `definitions` field by field.
+ * alpha.5 moved the genesis TRANSACTION, not the datum.
  *
  * ⛔ Nor from upstream's CONTRACT_SURFACE_CHANGES.md, which has now been wrong
  * about this repository twice — see the block comment at the top of
