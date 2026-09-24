@@ -14,8 +14,29 @@
  *
  * The discriminating pair below is the point of the file: TWO blueprints that
  * carry the SAME retired symbol and differ ONLY in their preamble version must
- * produce OPPOSITE verdicts. A test that only checked the old direction would
- * pass against the broken implementation.
+ * be judged on that string and nothing else. A test that only checked the old
+ * direction would pass against the broken implementation.
+ *
+ * ⛔ WHAT 0.13.0 TOOK OUT OF EVERY ASSERTION IN THIS FILE, AND WHY IT IS NOT A
+ * WEAKENING. The refusal used to say EARLIER or LATER, and upstream proved it
+ * could not: `v0.0.1` is upstream's FIRST MAINNET RELEASE CANDIDATE and is
+ * byte-identical to `0.5.0-alpha.5`, yet `0.0.1 < 0.5.0-alpha.5` under semver.
+ * The newest artefact upstream has ever published compares as the oldest, so
+ * every blueprint this repo ships was diagnosed as "LATER" and its holder told
+ * to upgrade an SDK that was already ahead of them.
+ *
+ * ⇒ A version string orders releases only while its publisher keeps ONE series.
+ * The gate is EQUALITY, so the ordering was never load-bearing — it was a
+ * diagnostic nicety, and a nicety that can be confidently wrong is worse than
+ * one that is absent. The refusal now names the blueprint's declared version,
+ * names the SDK's target, and claims NO direction.
+ *
+ * ⚠ THE ASSERTIONS DID NOT GET LOOSER, THEY MOVED. Each test below that read
+ * `/EARLIER|LATER/` now reads the two version strings it must name, which is
+ * strictly more content than a single direction word: a message naming
+ * "0.5.0-alpha.4" and "0.0.1" can only come from a gate that read the preamble.
+ * `⛔ NO DIRECTION, EVER` at the foot of the file is the guard that fails if the
+ * words come back.
  */
 
 import { test } from "node:test";
@@ -60,6 +81,9 @@ const NEWER_WITH_SAME_SYMBOL = {
   preamble: { ...OLD.preamble, version: "0.9.9" },
 };
 
+/** A version string as a literal regex fragment. */
+const esc = (v) => v.replace(/\./g, "\\.");
+
 const messageOf = (bp) => {
   try {
     validateStandardBlueprint(bp);
@@ -69,25 +93,49 @@ const messageOf = (bp) => {
   }
 };
 
-test("THE DISCRIMINATING PAIR: same retired symbol, opposite verdicts", () => {
+test("THE DISCRIMINATING PAIR: same retired symbols, and the verdict still comes from the preamble", () => {
   const older = messageOf(OLD);
   const newer = messageOf(NEWER_WITH_SAME_SYMBOL);
 
   assert.ok(older, "an unusable blueprint must be refused");
   assert.ok(newer, "an unusable blueprint must be refused");
 
-  assert.match(older, /EARLIER CIP-113 protocol version/);
-  assert.match(newer, /LATER CIP-113 protocol version/);
-
-  // The regression, stated directly: the newer one must NEVER be called older.
-  assert.doesNotMatch(
+  // ⛔ WHAT THIS PAIR ASSERTED UNTIL 0.13.0, RECORDED RATHER THAN DELETED. It
+  // demanded OPPOSITE verdicts — "EARLIER" for one, "LATER" for the other —
+  // because that was the sharpest available proof that the DIRECTION came from
+  // the preamble and not from the symbols, which are IDENTICAL across these two
+  // fixtures. The refusal no longer claims a direction at all, so there is no
+  // direction left to oppose.
+  //
+  // ⇒ THE PAIR'S PURPOSE IS INTACT, on a property that is still there and is
+  // strictly more specific: each message QUOTES THE VERSION ITS OWN PREAMBLE
+  // DECLARES. These two fixtures carry the same validator set, the same missing
+  // titles and the same retired titles, and differ ONLY in that string — so an
+  // implementation that read the SYMBOLS would emit the SAME message twice.
+  assert.match(older, /It declares "0\.3\.0"/, "must quote the version this blueprint declares");
+  assert.match(newer, /It declares "0\.9\.9"/, "must quote the version this blueprint declares");
+  assert.notEqual(
+    older,
     newer,
-    /EARLIER/,
-    "a blueprint newer than the target was reported as earlier — the original defect",
+    "identical symbols, different preambles — two identical messages would mean the symbols decided",
   );
 
-  // And the reader must be told it is a migration gap, not a bad file.
-  assert.match(newer, /not a stale or corrupt file/);
+  // The original defect, restated for a gate that no longer has a direction to
+  // get wrong: neither reader is told which of the two is newer.
+  assert.doesNotMatch(older, /EARLIER|LATER/);
+  assert.doesNotMatch(newer, /EARLIER|LATER/);
+
+  // And the reader must still be told this is a MIGRATION GAP rather than a bad
+  // file. "not a stale or corrupt file" was the old wording; the same fact is
+  // now carried by the two-sided remedy — move the blueprint, or move the SDK.
+  for (const msg of [older, newer]) {
+    assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+    assert.match(
+      msg,
+      /an SDK release that targets/,
+      "a version gap has two remedies and the message must offer both",
+    );
+  }
 });
 
 test("both verdicts still carry a retired-symbol hint as colour", () => {
@@ -146,39 +194,45 @@ test("the TARGET blueprint passes untouched", () => {
   );
 });
 
-test("alpha.2 is now diagnosed as EARLIER — a real artifact, not a fixture", () => {
+test("alpha.2 is refused BY VERSION, and the message names both — a real artifact, not a fixture", () => {
   // The SDK moved past it in S-4. It is still shipped, because a live preview
   // instance runs it, so this is the message a caller pointed at the old
   // blueprint will actually see.
+  //
+  // ⚠ It asserted "EARLIER" until 0.13.0. What replaces it is not a looser
+  // check: the message must name "0.5.0-alpha.2" AND the target, which one
+  // direction word never established.
   const msg = messageOf(load("blueprints/standard/v0.5.0-alpha.2/plutus.json"));
   assert.ok(msg, "alpha.2 is no longer the target and must be refused");
-  assert.match(msg, /EARLIER CIP-113 protocol version/);
-  assert.doesNotMatch(msg, /LATER/);
+  assert.match(msg, /It declares "0\.5\.0-alpha\.2"/, "must name the version the artifact declares");
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
 });
 
 // ---------------------------------------------------------------------------
 // The real alpha.3 artifact — the case that exposed the defect
 // ---------------------------------------------------------------------------
 
-test("F. the VENDORED alpha.3 blueprint is now diagnosed as EARLIER", () => {
+test("F. the VENDORED alpha.3 blueprint is refused, and the refusal names both versions", () => {
   // In S-3 this asserted a LATER refusal. S-4 migrated the SDK to alpha.3 and
   // it INVERTED to an acceptance. T-F02 moved the target to alpha.4 and it
-  // inverted once more; T-D53 moves it to alpha.5 and alpha.3 falls further
-  // behind. Kept as ONE test through all four states rather than
-  // deleted-and-rewritten, so each flip is visible in the diff; that is the
-  // convention S-4 used three migrations ago.
+  // inverted once more; T-D53 moved it to alpha.5. 0.13.0 moves it to 0.0.1 and
+  // drops the direction word entirely. Kept as ONE test through all five states
+  // rather than deleted-and-rewritten, so each flip is visible in the diff;
+  // that is the convention S-4 used four migrations ago.
   const alpha3 = load("blueprints/standard/v0.5.0-alpha.3/plutus.json");
   assert.equal(alpha3.preamble.version, "0.5.0-alpha.3");
   assert.notEqual(
     alpha3.preamble.version,
     TARGET_PROTOCOL_VERSION,
-    "alpha.5 IS the target now",
+    "0.0.1 IS the target now",
   );
 
   const msg = messageOf(alpha3);
   assert.ok(msg, "alpha.3 is no longer the target and must be refused");
-  assert.match(msg, /EARLIER CIP-113 protocol version/);
-  assert.doesNotMatch(msg, /LATER/);
+  assert.match(msg, /It declares "0\.5\.0-alpha\.3"/, "must name the version the artifact declares");
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
   // ⛔ DERIVED FROM THE CONSTANT, NOT SPELLED OUT. A literal directory here is
   // a second place the target version lives, and it went stale at this very
   // migration — the assertion read `alpha.4` while the SDK had moved to
@@ -284,11 +338,12 @@ test("comparator returns null — not 0 — when it cannot tell", () => {
 // around it; the comparison now runs FIRST, which is what makes it writable.
 // ---------------------------------------------------------------------------
 
-test("E. the VENDORED alpha.4 blueprint is now diagnosed as EARLIER — the flip back", () => {
+test("E. the VENDORED alpha.4 blueprint is refused ON THE PREAMBLE ALONE — the flip back", () => {
   // T-F01 wrote this as "alpha.4 is ACCEPTED", the §7f control proving the gate
-  // does not refuse everything. T-D53 moves the target to alpha.5 and it
-  // inverts, exactly as F did one release earlier. Kept as ONE test through
-  // both states so the flip is visible in the diff.
+  // does not refuse everything. T-D53 moved the target to alpha.5 and it
+  // inverted, exactly as F did one release earlier; 0.13.0 moves the target to
+  // 0.0.1 and takes the direction word out of the refusal. Kept as ONE test
+  // through all three states so each flip is visible in the diff.
   //
   // ⛔ AND alpha.4 IS THE CASE WORTH KEEPING, because it is the one that
   // refuses on the PREAMBLE ALONE. Every required validator title is present —
@@ -301,28 +356,51 @@ test("E. the VENDORED alpha.4 blueprint is now diagnosed as EARLIER — the flip
   assert.notEqual(
     alpha4.preamble.version,
     TARGET_PROTOCOL_VERSION,
-    "alpha.5 IS the target now",
+    "0.0.1 IS the target now",
   );
 
   const msg = messageOf(alpha4);
   assert.ok(msg, "alpha.4 is no longer the target and must be refused");
-  assert.match(msg, /EARLIER CIP-113 protocol version/);
-  assert.doesNotMatch(msg, /LATER/);
+  assert.match(msg, /It declares "0\.5\.0-alpha\.4"/, "must name the version the artifact declares");
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
   // The distinguishing clause: refused despite nothing being missing.
   assert.match(msg, /Every required validator title IS present/);
   assert.doesNotMatch(msg, /Missing required validator/);
 });
 
-test("E2. the VENDORED alpha.5 blueprint is ACCEPTED — the §7f control", () => {
+test("E2. the VENDORED v0.0.1 blueprint is ACCEPTED and alpha.5 is not — the §7f control, and the relabel's edge", () => {
   // A gate that refuses everything is not a fixed gate. This is the one
   // acceptance in the file that names a real shipped artefact rather than the
   // target-derived path used by "the TARGET blueprint passes untouched", and it
   // is deliberately spelled out: the two would move together if the constant
   // itself were wrong.
+  //
+  // T-F01 wrote it on alpha.4, T-D53 flipped it to alpha.5, and 0.13.0 flips it
+  // to v0.0.1 — kept as ONE test so the flip is visible in the diff.
+  const v001 = load("blueprints/standard/v0.0.1/plutus.json");
+  assert.equal(v001.preamble.version, "0.0.1");
+  assert.equal(v001.preamble.version, TARGET_PROTOCOL_VERSION, "0.0.1 IS the target now");
+  assert.equal(validateStandardBlueprint(v001), undefined);
+
+  // ⛔ THE SHARPEST CASE IN THE FILE, AND IT IS NEW AT 0.13.0. alpha.5 is
+  // BYTE-IDENTICAL to v0.0.1 — 34 validators, same compiledCode, same
+  // definitions, same metadata; only `preamble.version` differs (measured in
+  // `test/relabel-0.0.1.test.mjs`). It is nonetheless REFUSED, because the gate
+  // is version EQUALITY and nothing else. That is the breaking half of the
+  // 0.13.0 migration note stated as an assertion: identical bytes, refused at
+  // `init`, while every derived hash is unchanged on chain.
   const alpha5 = load("blueprints/standard/v0.5.0-alpha.5/plutus.json");
-  assert.equal(alpha5.preamble.version, "0.5.0-alpha.5");
-  assert.equal(alpha5.preamble.version, TARGET_PROTOCOL_VERSION, "alpha.5 IS the target now");
-  assert.equal(validateStandardBlueprint(alpha5), undefined);
+  assert.deepEqual(
+    alpha5.validators.map((v) => v.compiledCode),
+    v001.validators.map((v) => v.compiledCode),
+    "sanity: the refusal below must be about the version string and nothing else",
+  );
+  const msg = messageOf(alpha5);
+  assert.ok(msg, "alpha.5 is no longer the target and must be refused despite identical bytes");
+  assert.match(msg, /It declares "0\.5\.0-alpha\.5"/);
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
 });
 
 test("G. alpha.4 PARAMETER ARITY, read from the artefact", () => {
@@ -431,13 +509,31 @@ const LATER_WITH_EVERY_TITLE = (() => {
   return { ...bp, preamble: { ...bp.preamble, version: "0.9.9" } };
 })();
 
-test("A. a strictly LATER blueprint with EVERY required title PRESENT is refused as LATER", () => {
+test("A. a blueprint ABOVE the target with EVERY required title PRESENT is refused on the PREAMBLE ALONE", () => {
   const msg = messageOf(LATER_WITH_EVERY_TITLE);
 
-  assert.ok(msg, "a blueprint from a later protocol version must be refused");
-  assert.match(msg, /LATER CIP-113 protocol version/);
-  assert.match(msg, /not a stale or corrupt file/);
-  assert.doesNotMatch(msg, /EARLIER/, "it is not earlier, and must never be called earlier");
+  // The fixture really is above the target — stated, not assumed, because the
+  // whole point of this entrance is that `missing` is empty and the version is
+  // the only thing left to refuse on.
+  assert.ok(
+    compareProtocolVersions("0.9.9", TARGET_PROTOCOL_VERSION) > 0,
+    "the fixture must stay above the target or it enters through a different door",
+  );
+
+  assert.ok(msg, "a blueprint that is not at the target version must be refused");
+  assert.match(msg, /It declares "0\.9\.9"/, "must name the version the blueprint declares");
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  // ⚠ The old assertion here was `/not a stale or corrupt file/`, and its
+  // PURPOSE — tell the reader this is a migration gap rather than a bad file —
+  // is carried now by the two-sided remedy plus the explicit "not a
+  // missing-symbol failure" clause below. The phrase went; the reassurance did
+  // not.
+  assert.match(
+    msg,
+    /an SDK release that targets/,
+    "a version gap has two remedies and the message must offer both",
+  );
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
 
   // ⚠ And it must not name a defect it did not find. Nothing is missing here,
   // so an empty "Missing required validator(s):" list would be the guard
@@ -449,16 +545,34 @@ test("A. a strictly LATER blueprint with EVERY required title PRESENT is refused
   );
 });
 
-test("B. the missing twin: EVERY title present, version BELOW the target, refused as EARLIER", () => {
-  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
-  const msg = messageOf({ ...bp, preamble: { ...bp.preamble, version: "0.4.0" } });
+test("B. the missing twin: EVERY title present, version BELOW the target, refused the SAME way", () => {
+  // ⛔ THE FIXTURE'S LABEL MOVED AT 0.13.0 AND IT HAD TO. It was "0.4.0", chosen
+  // when the target was an 0.5.0 prerelease. The target is now "0.0.1", so
+  // "0.4.0" is ABOVE it — this twin would have quietly become a duplicate of
+  // test A, entering through the same side and proving half of what it claims.
+  // A fixture whose whole job is to sit on the other side of the target stops
+  // doing that job silently, which is the hazard NEWER_WITH_SAME_SYMBOL's note
+  // already records one door along.
+  const BELOW = "0.0.0";
+  assert.ok(
+    compareProtocolVersions(BELOW, TARGET_PROTOCOL_VERSION) < 0,
+    `${BELOW} must stay BELOW the target or this is test A with a different label`,
+  );
 
-  assert.ok(msg, "a blueprint from an earlier protocol version must be refused");
-  assert.match(msg, /EARLIER CIP-113 protocol version/);
-  assert.doesNotMatch(msg, /LATER/);
+  const bp = load("blueprints/standard/v0.5.0-alpha.4/plutus.json");
+  const msg = messageOf({ ...bp, preamble: { ...bp.preamble, version: BELOW } });
+
+  assert.ok(msg, "a blueprint that is not at the target version must be refused");
+  // ⇒ The point of the twin, now that no direction is claimed: BOTH sides get
+  // the SAME treatment, each naming its own declared version. Before 0.13.0
+  // this asserted the opposite word from test A; the property that survives is
+  // that the side of the target does not change the shape of the answer.
+  assert.match(msg, new RegExp(`It declares "${esc(BELOW)}"`), "must name the declared version");
+  assert.match(msg, new RegExp(`this SDK targets ${esc(TARGET_PROTOCOL_VERSION)}`));
+  assert.doesNotMatch(msg, /EARLIER|LATER/, "the refusal claims no direction");
   assert.match(
     msg,
-    new RegExp(`blueprints/standard/v${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}/`),
+    new RegExp(`blueprints/standard/v${esc(TARGET_PROTOCOL_VERSION)}/`),
     "must point at the blueprint directory for the target",
   );
 
@@ -484,5 +598,97 @@ test("C. EVERY title present and an UNPARSEABLE version claims no direction", ()
     msg,
     /Missing required validator\(s\): \./,
     "an empty missing-validator list names a defect that is not present",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ THE RULING, AS A GUARD: no refusal may claim a direction, ever again
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ WHY THIS IS A SWEEP AND NOT A LINE IN EACH TEST ABOVE. The tests above each
+ * assert `doesNotMatch(/EARLIER|LATER/)` on ONE message, so a NEW refusal branch
+ * added tomorrow — or an existing one reworded — is covered by none of them.
+ * This one enumerates EVERY way `validateStandardBlueprint` can refuse and holds
+ * all of them to the ruling at once.
+ *
+ * ⚠ ASSERTED AGAINST THE THROWN MESSAGE, NEVER AGAINST THE SOURCE TEXT. A grep
+ * over `src/standard/blueprint.ts` would go red on the file's own COMMENTS,
+ * which are required to say EARLIER and LATER — they record why the words left.
+ * A guard that cannot tell the explanation from the defect is a guard nobody
+ * keeps.
+ */
+test("⛔ NO DIRECTION, EVER: not one refusal message says EARLIER or LATER", () => {
+  const relabel = (bp, version) => ({ ...bp, preamble: { ...bp.preamble, version } });
+  const target = load(`blueprints/standard/v${TARGET_PROTOCOL_VERSION}/plutus.json`);
+
+  const cases = [
+    ["the vendored v0.3.0 artefact", OLD],
+    ["the vendored alpha.2 artefact", load("blueprints/standard/v0.5.0-alpha.2/plutus.json")],
+    ["the vendored alpha.3 artefact", load("blueprints/standard/v0.5.0-alpha.3/plutus.json")],
+    ["the vendored alpha.4 artefact", load("blueprints/standard/v0.5.0-alpha.4/plutus.json")],
+    [
+      "the vendored alpha.5 artefact — byte-identical to the target, refused on its version string",
+      load("blueprints/standard/v0.5.0-alpha.5/plutus.json"),
+    ],
+    ["every title present, version ABOVE the target", relabel(target, "0.9.9")],
+    ["every title present, version BELOW the target", relabel(target, "0.0.0")],
+    ["every title present, version UNPARSEABLE", relabel(target, "main")],
+    ["the target version on an artefact that is missing titles", relabel(OLD, TARGET_PROTOCOL_VERSION)],
+  ];
+
+  const messages = [];
+  for (const [what, bp] of cases) {
+    const msg = messageOf(bp);
+
+    // ⚠ NON-VACUITY, PER CASE. A case that stopped throwing would otherwise
+    // satisfy every `doesNotMatch` below by having no message at all — the
+    // exact shape of a guard that cannot fail.
+    assert.ok(msg, `${what}: must be REFUSED — a case that does not throw proves nothing here`);
+
+    assert.doesNotMatch(
+      msg,
+      /EARLIER|LATER/,
+      `${what}: the refusal claims a direction again. Upstream restarted its version series, ` +
+        `so the strings do not order its releases — see blueprint.ts and the 0.13.0 migration note`,
+    );
+    // The same ruling in lower case, so a reworded message cannot smuggle the
+    // claim back past the two capitalised words.
+    assert.doesNotMatch(
+      msg,
+      /\b(?:earlier|later|older|newer)\s+(?:CIP-113\s+)?protocol\s+version\b/i,
+      `${what}: the refusal claims a direction in prose`,
+    );
+
+    // And the contract the direction word was replaced BY, asserted on every
+    // path: both versions named, every time.
+    assert.ok(
+      msg.includes(bp.preamble.version),
+      `${what}: must name the version the blueprint declares (${bp.preamble.version})`,
+    );
+    assert.ok(
+      msg.includes(TARGET_PROTOCOL_VERSION),
+      `${what}: must name the version this SDK targets`,
+    );
+    messages.push(msg);
+  }
+
+  assert.equal(messages.length, 9, "every refusal path must stay enumerated here");
+
+  // ⚠ THE SWEEP MUST REACH MORE THAN ONE BRANCH. All nine messages coming out
+  // of a single `throw` would satisfy everything above while testing one line.
+  const distinct = new Set(
+    messages.map((m) =>
+      /could not be parsed/.test(m)
+        ? "unparseable"
+        : /does not match its own version string/.test(m)
+          ? "artefact-mismatch"
+          : "version-mismatch",
+    ),
+  );
+  assert.deepEqual(
+    [...distinct].sort(),
+    ["artefact-mismatch", "unparseable", "version-mismatch"],
+    "the sweep must exercise all three refusal branches, or it speaks for only one",
   );
 });

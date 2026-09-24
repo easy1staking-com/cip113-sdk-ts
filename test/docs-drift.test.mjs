@@ -237,7 +237,7 @@ test("the README's migration note names the silent redeemer change", () => {
 
 test("package version and the migration note agree", () => {
   const pkg = JSON.parse(read("package.json"));
-  assert.equal(pkg.version, "0.12.0");
+  assert.equal(pkg.version, "0.13.0");
   assert.match(read("README.md"), new RegExp(`Migrating to ${pkg.version.replace(/\./g, "\\.")}`));
 });
 

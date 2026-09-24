@@ -1,5 +1,5 @@
 /**
- * Protocol bootstrap on a live devnet — CIP-113 0.5.0-alpha.5.
+ * Protocol bootstrap on a live devnet — CIP-113 v0.0.1 (a byte-identical relabel of 0.5.0-alpha.5).
  *
  * ⛔ A GREEN HERE NO LONGER SPEAKS FOR THE GENESIS ON ITS OWN. Since alpha.5
  * the genesis carries a withdraw-0 from `upgrade_cred`, and a SUCCESS cannot

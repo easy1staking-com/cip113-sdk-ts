@@ -290,10 +290,22 @@ test("a 0.3.x blueprint is diagnosed by protocol version, not as a corrupt file"
   assert.throws(
     () => validateStandardBlueprint(old),
     (err) => {
-      // Casing changed when the verdict moved from symbol-presence to the
-      // preamble version (see blueprint-version-guard.test.mjs); the assertion
-      // itself is unchanged — an older blueprint must still be named as older.
-      assert.match(err.message, /EARLIER CIP-113 protocol version/);
+      // ⛔ THE DIRECTION WORD LEFT AT 0.13.0; THE DIAGNOSIS DID NOT. Casing
+      // changed first, when the verdict moved from symbol-presence to the
+      // preamble version (see blueprint-version-guard.test.mjs). Then upstream
+      // cut `0.0.1` as a RELABEL of `0.5.0-alpha.5`, which compares BELOW it
+      // under semver, and "EARLIER"/"LATER" stopped being facts the SDK could
+      // establish. What this test is for — that an old blueprint is diagnosed
+      // by its PROTOCOL VERSION rather than reported as a corrupt file or a
+      // missing validator — is unchanged, and is now asserted as the two
+      // version strings the message must name.
+      assert.match(err.message, /It declares "0\.3\.0"/, "must name the version it read");
+      assert.match(
+        err.message,
+        new RegExp(`this SDK targets ${TARGET_PROTOCOL_VERSION.replace(/\./g, "\\.")}`),
+        "must name the version this SDK targets",
+      );
+      assert.doesNotMatch(err.message, /EARLIER|LATER/, "the refusal claims no direction");
       // ⚠ The named symbol MOVED with the target. Until S-4 this asserted
       // `programmable_logic_global`; alpha.3 REQUIRES that validator, so it is
       // no longer a retired-symbol hint, and alpha.4 retires nothing further.
