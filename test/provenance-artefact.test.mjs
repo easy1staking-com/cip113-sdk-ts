@@ -129,8 +129,8 @@ test("provenance-artefact: the walk finds at least 7 shipped pins", () => {
   // v0.5.0-alpha.5}, substandards/dummy/{v0.1.0, v0.2.0},
   // substandards/freeze-and-seize/v0.1.0.
   assert.ok(
-    pinDirs.length >= 8,
-    `expected the walk of ${BLUEPRINTS_DIR} to find at least 8 UPSTREAM_PIN.json ` +
+    pinDirs.length >= 9,
+    `expected the walk of ${BLUEPRINTS_DIR} to find at least 9 UPSTREAM_PIN.json ` +
       `directories, found ${pinDirs.length}: ${pinDirs.map((d) => relative(ROOT, d)).join(", ")}`
   );
 });

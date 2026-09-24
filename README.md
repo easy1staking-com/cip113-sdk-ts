@@ -58,6 +58,60 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.13.0 (CIP-113 `v0.0.1` — a relabel, breaking at `init` and inert on chain)
+
+Upstream cut **`v0.0.1`**, its first mainnet release candidate. It is a **relabel of
+`0.5.0-alpha.5`**: all 34 validators' `compiledCode` are byte-identical, `definitions` is
+identical, every validator's metadata is identical, and `preamble.version` is the **only**
+difference in the file — an 8-byte size delta that is exactly the length difference of the two
+version strings. Measured in `test/relabel-0.0.1.test.mjs`, not taken from a release note.
+
+Read the two halves separately, because they point opposite ways.
+
+### It IS breaking at `init`
+
+`validateStandardBlueprint` is a version-**equality** gate. `TARGET_PROTOCOL_VERSION` is now
+`"0.0.1"`, so **an alpha.5 blueprint is refused** — the same bytes this SDK accepted in 0.12.0, now
+rejected on the version string alone. Point your `standard.blueprint` at
+`blueprints/standard/v0.0.1/plutus.json` (pinned to upstream `6b75ba3286b4692ca23059ff51285db357fb09c6`,
+the commit behind annotated tag `v0.0.1`, **reproduced from source** with Aiken v1.1.23+8949565,
+sha256 `b6c8cb096a15e02f1b9c719fb8c617b624c1aa7719f2258d45faa3e8f144e7b9`, 164112 bytes).
+
+That is the whole upgrade for a caller: one path.
+
+### It is NOT breaking on chain — and this is the half that matters
+
+**Every derived script hash is unchanged.** Same seeds, same nonce, same `maxInlineDatumBytes`, same
+twelve hashes: `always_fail`, `upgrade_multisig`, `protocol_params`, `programmable_logic_base`,
+`issuance_cbor_hex_mint`, `registry`, `transfer`, `third_party`, `unfracking`,
+`programmable_logic_global`, `issuance_logic`, `issuance_mint`. An **alpha.5 deployment keeps every
+credential, every address and every policy id, and needs no redeployment.** Your
+`DeploymentParams` record is still correct as written.
+
+This is the exact inverse of the 0.12.0 bump, which moved eight of those twelve and forced a
+redeployment. Both claims are measured by the same derivation at the same fixed inputs —
+`hash-cascade.test.mjs` asserts the eight that moved, `relabel-0.0.1.test.mjs` asserts that none of
+them move here.
+
+### ⚠ The directory listing is not a timeline
+
+Upstream **restarted its version series**. `v0.0.1` sorts *before* `v0.3.0` and `v0.5.0-alpha.*` in
+`blueprints/standard/`, alphabetically and under semver, while being **newer than all of them**.
+`0.0.1 < 0.5.0-alpha.5` is what a comparator says; it is not what upstream shipped.
+
+### Consequently, the refusal no longer says which blueprint is newer
+
+Until 0.13.0 a version mismatch was reported as an **EARLIER** or **LATER** protocol version. Under
+a restarted series that diagnosis became confidently wrong: every blueprint this repo ships was
+suddenly "LATER", and every holder of one was told to upgrade an SDK that was already ahead of
+them. The gate is equality, so the ordering was never load-bearing — it was a diagnostic nicety,
+and a nicety that can be confidently wrong is worse than one that is absent.
+
+The message now names the blueprint's declared version, names the version this SDK targets, offers
+both remedies (move the blueprint, or use an SDK release that targets yours), and **claims no
+direction**. Which one is newer lives in upstream's release history, which is the only thing that
+actually records it.
+
 ## Migrating to 0.12.0 (CIP-113 0.5.0-alpha.5 — the upgrade authority activates itself)
 
 ⛔ **EVERY SCRIPT HASH DOWNSTREAM OF THE PARAMS POLICY CHANGES — EIGHT OF TWELVE.** An alpha.4

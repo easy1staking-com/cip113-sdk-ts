@@ -1,0 +1,28 @@
+{
+  "artifact": "plutus.json",
+  "sha256": "b6c8cb096a15e02f1b9c719fb8c617b624c1aa7719f2258d45faa3e8f144e7b9",
+  "declares": {
+    "title": "cardano-foundation/cip113-programmable-tokens",
+    "version": "0.0.1",
+    "compiler": "Aiken v1.1.23+8949565",
+    "validators": 34
+  },
+  "upstream": {
+    "repo": "https://github.com/cardano-foundation/cip113-programmable-tokens",
+    "commit": "6b75ba3286b4692ca23059ff51285db357fb09c6",
+    "ref": "refs/tags/v0.0.1 (annotated tag 03399d065728a3ae6e034687720b46f47278b7ac -> commit 6b75ba32...)",
+    "path": null,
+    "env": null,
+    "note": "UPSTREAM'S FIRST MAINNET RELEASE CANDIDATE, AND IT IS A RELABEL OF 0.5.0-alpha.5. MEASURED: all 34 validators' compiledCode are BYTE-IDENTICAL to b83a041 (alpha.5); `definitions` is identical; every validator's non-compiledCode metadata is identical. The ONLY difference in the whole artefact is preamble.version, '0.5.0-alpha.5' -> '0.0.1' \u2014 an 8-byte file-size delta that is exactly the length difference of the two version strings (164120 -> 164112). => EVERY DERIVED SCRIPT HASH IS UNCHANGED. A deployment made against alpha.5 remains valid under 0.0.1; this is the opposite of the alpha.4 -> alpha.5 bump, which moved eight of twelve. PINNED TO THE COMMIT, NOT THE TAG: v0.0.1 is an ANNOTATED tag (03399d06...) whose target is commit 6b75ba32...; a tag can be moved or re-cut, a commit cannot. DIRECTORY-NAME HAZARD: upstream RESTARTED its version series here, so v0.0.1 sorts BEFORE v0.3.0 and v0.5.0-alpha.* in this directory while being NEWER than all of them. Do not read the directory listing as a timeline."
+  },
+  "blueprint_reproduced": true,
+  "provenance": "VERIFIED",
+  "reproduce": {
+    "command": "git clone https://github.com/cardano-foundation/cip113-programmable-tokens && cd cip113-programmable-tokens && git fetch origin tag v0.0.1 && git checkout 6b75ba3286b4692ca23059ff51285db357fb09c6 && aikup install v1.1.23 && rm plutus.json && aiken build && sha256sum plutus.json",
+    "note": "REPRODUCED 2026-09-24: `aiken build` at 6b75ba32 with Aiken v1.1.23+8949565, in a THROWAWAY CLONE with upstream's own plutus.json DELETED BEFORE the build so it could not be mistaken for the output, produced a plutus.json BYTE-IDENTICAL to upstream's committed artefact: sha256 b6c8cb09..., 164112 bytes. aiken.toml pins stdlib v3.1.0 and fuzz v2.2.0, both immutable TAGS, so this reproducibility claim needs no scope note (unlike alpha.2/3/4, which pinned fuzz to the mutable branch `main`). CLONE HAZARD, inherited from the alpha.5 pin and still true: the right local checkout is workspace/cip113-programmable-tokens-onchain. workspace/deps/cip113-programmable-tokens is a different, older tree and cannot produce this commit."
+  },
+  "verified": {
+    "date": "2026-09-24",
+    "by": "reproduction from source; see reproduce.note"
+  }
+}

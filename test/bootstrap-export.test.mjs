@@ -76,8 +76,31 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const load = (p) => JSON.parse(readFileSync(resolve(ROOT, p), "utf-8"));
 
-const BLUEPRINT = load("blueprints/standard/v0.5.0-alpha.5/plutus.json");
-const PIN = load("blueprints/standard/v0.5.0-alpha.5/UPSTREAM_PIN.json");
+/**
+ * ⚠ THE TARGET ARTEFACT IS NOW `v0.0.1`, AND IT IS A RELABEL OF alpha.5 — so
+ * every sentence below that says "alpha.5" is still TRUE OF THESE BYTES.
+ *
+ * Upstream cut `v0.0.1` as its first mainnet release candidate and it is
+ * BYTE-IDENTICAL to `0.5.0-alpha.5`: all 34 validators' compiledCode,
+ * `definitions` and validator metadata are the same, and `preamble.version` is
+ * the only difference in the file (measured in `test/relabel-0.0.1.test.mjs`).
+ * Every hash pinned in this file therefore holds unchanged across the
+ * repointing — which is exactly why the paths could move without a single
+ * expected value moving with them.
+ *
+ * ⛔ WHAT FORCED THE REPOINT rather than leaving the alpha.5 path alone:
+ * `validateStandardBlueprint` is a version-EQUALITY gate, so `planBootstrap`
+ * refuses an alpha.5 artefact the moment `TARGET_PROTOCOL_VERSION` becomes
+ * "0.0.1". The bytes are accepted; the version string is not.
+ *
+ * ⚠ SPELLED OUT, NOT DERIVED FROM `TARGET_PROTOCOL_VERSION`. The pins below are
+ * about THESE bytes. A path derived from the constant would silently follow the
+ * next migration to a different artefact and re-point every pin in this file at
+ * whatever the SDK now targets, which is the second operand quietly changing
+ * under a green suite.
+ */
+const BLUEPRINT = load("blueprints/standard/v0.0.1/plutus.json");
+const PIN = load("blueprints/standard/v0.0.1/UPSTREAM_PIN.json");
 
 /**
  * The alpha.4 artefact, retained HERE and not merely on disk.

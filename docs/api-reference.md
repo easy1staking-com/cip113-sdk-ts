@@ -21,7 +21,7 @@ const protocol = CIP113.init({
 
 ### Core Operations
 
-> ⚠ Since 0.5.0-alpha.4 (and unchanged in alpha.5, the SDK's current target), every `register`, `mint`, and `burn` transaction carries `issuance_logic`'s withdraw-0; omitting it refuses the mint without naming a missing withdrawal, policy, or index.
+> ⚠ Since 0.5.0-alpha.4 (and unchanged in alpha.5, and in `v0.0.1` — the SDK's current target and a byte-identical relabel of alpha.5), every `register`, `mint`, and `burn` transaction carries `issuance_logic`'s withdraw-0; omitting it refuses the mint without naming a missing withdrawal, policy, or index.
 
 | Method | Description |
 |--------|-------------|
@@ -175,7 +175,7 @@ On-chain protocol deployment references. Obtained from the bootstrap transaction
 > test sitting green. A check classified by its shape ("it pins `DeploymentParams`") rather than by
 > what gets past it is the same defect this section exists to record, one level down.
 >
-> ⚠ **For 0.5.0-alpha.4 and alpha.5 alike, this is the six-field deployment shape** — alpha.5 moved the genesis TRANSACTION, not the datum. The params datum inserts
+> ⚠ **For 0.5.0-alpha.4, alpha.5 and `v0.0.1` alike, this is the six-field deployment shape** — alpha.5 moved the genesis TRANSACTION, not the datum. The params datum inserts
 > `issuance_logic_cred` at index 1, shifting the credential-valued slots at indices 1, 2 and 3.
 > Every `register`, `mint`, and `burn` transaction also carries `issuance_logic`'s withdraw-0;
 > omitting it refuses the mint without naming a missing withdrawal, policy, or index.

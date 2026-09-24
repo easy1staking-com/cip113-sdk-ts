@@ -114,10 +114,10 @@ export const STANDARD_VALIDATORS = {
  * ⚠ SINGLE SOURCE OF TRUTH for the version verdict. A migration flips this one
  * constant; nothing else should encode a target version.
  */
-export const TARGET_PROTOCOL_VERSION = "0.5.0-alpha.5";
+export const TARGET_PROTOCOL_VERSION = "0.0.1";
 
 /** Upstream commit the target version's blueprint was built from. */
-export const TARGET_PROTOCOL_COMMIT = "b83a041";
+export const TARGET_PROTOCOL_COMMIT = "6b75ba3";
 
 /**
  * Validator titles that existed in an ADJACENT CIP-113 release and are absent
@@ -344,7 +344,7 @@ export function validateStandardBlueprint(blueprint: PlutusBlueprint): void {
   if (cmp === null) {
     throw new Error(
       `Standard blueprint "${label}" cannot be used: its preamble version could not be ` +
-        `parsed, so this SDK cannot establish whether it is behind or ahead of the target ` +
+        `parsed, so this SDK cannot establish whether it is the target ` +
         `${TARGET_PROTOCOL_VERSION} (upstream ${TARGET_PROTOCOL_COMMIT}), and a verdict this ` +
         `SDK cannot establish is not one it will guess. ${detail}${hint} ` +
         `Give the blueprint a semver-parseable preamble version (e.g. "${TARGET_PROTOCOL_VERSION}"), ` +
@@ -353,21 +353,39 @@ export function validateStandardBlueprint(blueprint: PlutusBlueprint): void {
     );
   }
 
-  if (cmp < 0) {
+  // ⛔ THE VERDICT NAMES BOTH VERSIONS AND CLAIMS NO DIRECTION, AND THAT IS
+  // DELIBERATE — it used to say EARLIER or LATER and upstream proved it could
+  // not.
+  //
+  // MEASURED 2026-09-24: upstream cut `0.0.1` as its first mainnet release
+  // candidate, BYTE-IDENTICAL to `0.5.0-alpha.5` — same 34 compiled validators,
+  // same definitions, the version string the only difference in the file. Under
+  // semver `0.0.1 < 0.5.0-alpha.5`, so the NEWEST artefact upstream has ever
+  // published compares as the oldest. Every blueprint this repo has ever
+  // vendored was suddenly diagnosed as "LATER", and every such user was told to
+  // upgrade the SDK when their blueprint was the stale half.
+  //
+  // ⇒ A VERSION STRING ORDERS RELEASES ONLY WHILE ITS PUBLISHER KEEPS ONE
+  // SERIES, and that is the publisher's choice rather than a property of the
+  // protocol. The gate here is EQUALITY, so the ordering was never load-bearing
+  // — it was a diagnostic nicety, and a nicety that can be confidently wrong is
+  // worse than one that is absent.
+  //
+  // So the message says only what it knows: the two versions, and which one
+  // this SDK targets. A reader who needs to know which is newer consults
+  // upstream's release history, which is the only thing that actually records
+  // it. `test/blueprint-version-guard.test.mjs` fails if EARLIER or LATER ever
+  // returns to this message.
+  if (cmp !== 0) {
     throw new Error(
-      `Blueprint "${label}" targets an EARLIER CIP-113 protocol version than this SDK ` +
-        `supports (target ${TARGET_PROTOCOL_VERSION}, upstream ${TARGET_PROTOCOL_COMMIT}). ` +
-        `${detail}${hint} Use a blueprint from blueprints/standard/v${TARGET_PROTOCOL_VERSION}/, ` +
-        `or an SDK release pinned to the older contracts.`
-    );
-  }
-
-  if (cmp > 0) {
-    throw new Error(
-      `Blueprint "${label}" targets a LATER CIP-113 protocol version than this SDK supports ` +
-        `(target ${TARGET_PROTOCOL_VERSION}, upstream ${TARGET_PROTOCOL_COMMIT}). This is not a ` +
-        `stale or corrupt file — the SDK has not been migrated to it yet. ${detail}${hint} ` +
-        `Upgrade the SDK, or pin the blueprint to v${TARGET_PROTOCOL_VERSION}.`
+      `Blueprint "${label}" is not the CIP-113 protocol version this SDK targets. ` +
+        `It declares "${version}"; this SDK targets ${TARGET_PROTOCOL_VERSION} ` +
+        `(upstream ${TARGET_PROTOCOL_COMMIT}). ${detail}${hint} ` +
+        `Use a blueprint from blueprints/standard/v${TARGET_PROTOCOL_VERSION}/, or an SDK ` +
+        `release that targets "${version}". ` +
+        `⚠ This SDK does not tell you which of the two is newer: upstream has restarted its ` +
+        `version series, so the strings do not order its releases. Check upstream's release ` +
+        `history.`
     );
   }
 

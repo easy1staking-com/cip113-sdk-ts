@@ -24,7 +24,11 @@
  * It is not a supported way to deploy a production protocol. Do not point it at
  * preprod or mainnet.
  *
- * TARGETS CIP-113 0.5.0-alpha.5 (upstream b83a041eaa053625c502f8ee64b607a787cf5f79).
+ * TARGETS CIP-113 v0.0.1 (upstream 6b75ba3286b4692ca23059ff51285db357fb09c6), which is a
+ * BYTE-IDENTICAL RELABEL of 0.5.0-alpha.5 (b83a041) — so every alpha.5 statement below is
+ * still true of these bytes, and every derived hash is unchanged. The blueprint directory is
+ * derived from TARGET_PROTOCOL_VERSION below, so this comment is the only place the version
+ * is written out.
  *
  * ⚠ alpha.5 changed ONE thing in this sequence and it is not in the list
  * below: the protocol genesis now carries a withdraw-0 from `upgrade_cred`, so
