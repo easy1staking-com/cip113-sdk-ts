@@ -53,6 +53,8 @@ import {
   buildSeedTx,
   selectBootstrapSeeds,
   buildMultisigGenesisTx,
+  buildCip171RecordFromPin,
+  computeScriptHash,
   assertMultisigConfigUtxo,
   buildProtocolGenesisTx,
   buildReferenceScriptsTx,
@@ -1323,6 +1325,99 @@ test("STEP 4 REFUSAL: the activation's two inputs, by name", async () => {
     () => buildProtocolGenesisTx({ ...base, upgradeAuthoritySigners: ["abcd"] }),
     /upgradeAuthoritySigners\[0\] must be exactly 28 bytes/,
     "a short key hash"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// STEP 2 provenance — the same option, and the omission is the load-bearing half
+// ---------------------------------------------------------------------------
+//
+// ⚑ WHY STEP 2 CARRIES IT TOO, AND IT IS TIMING NOT COVERAGE. CIP-171 keys a
+// record by SCRIPT HASH, so step 4's record already names `upgrade_multisig`.
+// What step 2 adds is WHEN: between step 2 and step 4 there is no provenance on
+// chain at all, and that is precisely when a driver wants to verify the upgrade
+// authority it has just installed. MEASURED on a real preview bootstrap
+// 2026-09-30 — the multisig tx carried no metadata label, the genesis carried
+// 1984.
+
+test("STEP 2: a provenance pin attaches a CIP-171 record under label 1984", async () => {
+  const plan = planBootstrap(previewConfig());
+  const { client, only } = recorder();
+  const result = await buildMultisigGenesisTx({
+    ...ctx(client),
+    plan,
+    seedUtxo: seedUtxos(plan).upgradeMultisig,
+    upgradeMultisigTree: TREE,
+    provenancePin: PIN,
+  });
+  const meta = only("attachMetadata");
+  assert.equal(meta.length, 1, "exactly one metadatum");
+  assert.equal(BigInt(meta[0].params.label), 1984n);
+  assert.equal(result.metadata.cip171, true, "the flag must agree with the input");
+});
+
+test("STEP 2: the record COVERS upgrade_multisig — by RAW hash plus params, which is how CIP-171 works", async () => {
+  // ⛔ THE ASSERTION THAT MAKES THIS CHANGE WORTH MAKING, and it nearly got
+  // written wrong. A record published here is useless if it does not cover the
+  // script this transaction installs — but a CIP-171 entry is keyed by the
+  // UNPARAMETERISED script hash and carries the params that yield the deployed
+  // one. A verifier recomputes raw+params and matches that against the
+  // on-chain script hash. So looking for the DEPLOYED hash in the record finds
+  // nothing and proves nothing: the first version of this test asserted
+  // exactly that and failed, which is the only reason the mechanism got
+  // checked rather than assumed.
+  const plan = planBootstrap(previewConfig());
+  const { client, only } = recorder();
+  await buildMultisigGenesisTx({
+    ...ctx(client),
+    plan,
+    seedUtxo: seedUtxos(plan).upgradeMultisig,
+    upgradeMultisigTree: TREE,
+    provenancePin: PIN,
+  });
+  assert.equal(only("attachMetadata").length, 1);
+
+  // Derive the raw hash the same way the record does, from the blueprint.
+  const v = BLUEPRINT.validators.find(
+    (x) => x.title.startsWith("upgrade_multisig") && x.title.endsWith(".mint")
+  );
+  assert.ok(v, "the blueprint must declare upgrade_multisig.mint");
+  const raw = computeScriptHash(v.compiledCode);
+  assert.notEqual(
+    raw,
+    plan.scripts.upgradeMultisig.hash,
+    "raw and deployed must differ — otherwise this test is not distinguishing them"
+  );
+
+  const record = buildCip171RecordFromPin(BLUEPRINT, PIN, plan.parameterizations);
+  const entry = record.scripts.find((e) => e.rawScriptHash === raw);
+  assert.ok(entry, `the record must carry an entry for upgrade_multisig's raw hash ${raw}`);
+  assert.ok(
+    Array.isArray(entry.params) && entry.params.length > 0,
+    "and it must carry the params that turn that raw script into the deployed one"
+  );
+});
+
+test("⭐ STEP 2: OMITTING the pin leaves the transaction exactly as it was — back-compat", async () => {
+  // ⛔ THIS IS THE ONE THAT MATTERS. The option is additive, so a caller that
+  // does not pass it must get the transaction it got before the option
+  // existed. If an attach ever became unconditional, every multisig genesis
+  // would carry metadata its caller never asked for — and because a bootstrap
+  // is one-shot, that is not a thing you notice and redo.
+  const plan = planBootstrap(previewConfig());
+  const { client, only, ops } = recorder();
+  const result = await buildMultisigGenesisTx({
+    ...ctx(client),
+    plan,
+    seedUtxo: seedUtxos(plan).upgradeMultisig,
+    upgradeMultisigTree: TREE,
+  });
+  assert.deepEqual(only("attachMetadata"), [], "NO metadatum may be attached");
+  assert.equal(result.metadata.cip171, false, "the flag must agree with the omission");
+  // And nothing else moved: no attach appears anywhere in the recorded ops.
+  assert.ok(
+    !ops.some((o) => o.op === "attachMetadata"),
+    "no attachMetadata anywhere in the recorded operation log"
   );
 });
 
