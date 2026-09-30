@@ -58,6 +58,35 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.14.0 (provenance on the multisig genesis — additive, nothing to do)
+
+**Nothing changes unless you opt in.** `buildMultisigGenesisTx` gains an optional
+`provenancePin`. Omit it and the transaction it returns is exactly the one 0.13.0 returned — that
+is asserted, and the assertion was proven to catch a regression by making the attach unconditional
+and watching it go red.
+
+```diff
+  buildMultisigGenesisTx({
+    plan, seedUtxo, upgradeMultisigTree,
++   provenancePin: pin,   // optional: attaches the CIP-171 record under label 1984
+  })
+```
+
+**Why it is worth opting in, and it is about timing rather than coverage.** CIP-171 keys a record by
+script hash, so the protocol-genesis record already names `upgrade_multisig` — publishing again adds
+no new *fact*. What it adds is *when* the fact exists. Between the multisig genesis and the protocol
+genesis there is no provenance on chain at all, and that gap is precisely when a driver wants to
+verify the upgrade authority it has just installed. Measured on a real preview bootstrap
+(2026-09-30): the multisig transaction carried no metadata label; the protocol genesis carried 1984.
+
+⚠ **Build the record from the pin, never by hand.** `buildCip171RecordFromPin` derives each entry's
+arity from the blueprint and the parameterisation events. A record with the wrong arity is
+**discarded silently** by the reference registry — it does not error, it simply never appears.
+
+**Not extended to the stake-registration or reference-script transactions**, deliberately: records
+are keyed by script hash and the genesis record already names those hashes, so it would be
+duplication rather than earlier availability.
+
 ## Migrating to 0.13.0 (CIP-113 `v0.0.1` — a relabel, breaking at `init` and inert on chain)
 
 Upstream cut **`v0.0.1`**, its first mainnet release candidate. It is a **relabel of

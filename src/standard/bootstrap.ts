@@ -1096,6 +1096,22 @@ export interface MultisigGenesisTxParams extends BootstrapBuildContext {
    * authority check becomes "permanently unsatisfiable, with no repair path".
    */
   readonly upgradeMultisigTree: MultisigScriptTree;
+  /**
+   * OPTIONAL CIP-171 provenance record, attached to THIS transaction.
+   *
+   * ⚑ WHY HERE AS WELL AS ON THE GENESIS, AND IT IS ABOUT TIMING RATHER THAN
+   * COVERAGE. CIP-171 keys a record by SCRIPT HASH, so the protocol genesis's
+   * record already names `upgrade_multisig` — publishing again adds no new
+   * fact. What it adds is WHEN the fact is available: between this transaction
+   * and the genesis there is no provenance on chain at all, and that gap is
+   * exactly when a driver wants to verify the upgrade authority it has just
+   * installed. MEASURED on a real preview bootstrap 2026-09-30: this tx carried
+   * no metadata label; the genesis carried 1984.
+   *
+   * Omit it and the transaction is byte-identical to one built before this
+   * option existed. That is asserted, not assumed.
+   */
+  readonly provenancePin?: UpstreamPin;
 }
 
 /**
@@ -1162,6 +1178,23 @@ export async function buildMultisigGenesisTx(
   });
 
   let tx: TxBuilder = params.client.newTx();
+
+  // ⛔ BUILT FROM THE PIN, NEVER ASSEMBLED BY HAND. A record whose arity is
+  // wrong is DISCARDED SILENTLY by the reference registry — it does not error,
+  // it simply does not appear — so the only safe construction derives arity
+  // from the blueprint and the parameterisation events.
+  if (params.provenancePin) {
+    const record = buildCip171RecordFromPin(
+      plan.config.blueprint,
+      params.provenancePin,
+      plan.parameterizations
+    );
+    tx = tx.attachMetadata({
+      label: CIP171_METADATA_LABEL,
+      metadata: buildCip171Metadatum(record),
+    });
+  }
+
   tx = tx.collectFrom({ inputs: [params.seedUtxo] });
   tx = tx.mintAssets({ assets: mintAssetsFromMap(assets), redeemer: voidData() });
   tx = tx.payToAddress({
@@ -1175,6 +1208,7 @@ export async function buildMultisigGenesisTx(
     configUtxoOutputIndex: 0,
     nftUnit,
     address: plan.addresses.upgradeMultisig,
+    cip171: Boolean(params.provenancePin),
   });
 }
 
