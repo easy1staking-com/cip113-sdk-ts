@@ -58,6 +58,74 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.15.0 (`transfer` stops destroying CIP-68 metadata — BREAKING, and you want it)
+
+**What breaks:** `transfer` now refuses any input carrying a non-void inline datum, and `seize`
+refuses a **(100)**-labelled asset whose UTxO still holds one. Calls that used to succeed now
+throw.
+
+**Why that is the fix and not a regression.** Asked to move a CIP-68 (100) reference token, 0.14.0
+built the transaction without complaint, **the ledger accepted it**, and the output's datum changed:
+
+```
+before: d8799fbf446e616d654543656c6c31…ff0101ff   the CIP-68 metadata
+after:  d87980                                    Constr(0, []) — the void datum
+```
+
+Measured twice on devnet (txs `df4db48f…`, `7ee37fd2…`). The metadata was **gone from the live
+UTxO set** and the reference NFT sat at an address its issuer no longer controlled. Nothing failed
+anywhere — not the build, the evaluation, the submission, or this package's test suite. The
+independent Java implementation of the same operation already refused it, so the SDK was strictly
+worse than the reference on a data-destroying path.
+
+**What to do:** move the **(333)** user token — the one holders are meant to hold — and leave the
+(100) reference token where `register` put it, at the issuer's programmable-logic-base address.
+
+```diff
+- protocol.transfer({ assetName: labeledAssetName(100, name), … })   // erased the metadata
++ protocol.transfer({ assetName: labeledAssetName(333, name), … })
+```
+
+⚠ **There is no supported way to move a datum-carrying programmable output.** A carry-forward is
+the operation a caller actually wants and it is deliberately **not** shipped here: whether the
+on-chain scripts accept a non-void datum on a transfer output is untested, and shipping an
+untested carry-forward would trade silent data loss for a submission failure nobody can read. Ask
+for it if you need it; do not work around the refusal.
+
+`seize`'s guard is **narrower** than `transfer`'s: seize carries the input's datum onto output 1,
+so a datum-carrying input does not lose it — only the (100) token is inseparable from the metadata
+it describes. Seizing a (333) token out of the metadata UTxO is still allowed.
+
+### Four error messages now name their own cause
+
+Nothing to change in your code; everything to change in what you conclude when you see them.
+
+| was | now |
+|---|---|
+| `Sender <hash> is blacklisted — transfer denied`, raised on an **empty** blacklist | names `compliance.init()` and says `THIS IS NOT A BLACKLISTING` — nobody was blacklisted, the proof did not exist yet |
+| the same message when the list is populated but nothing brackets the sender | states **both** readings (the sender is blocked / the list has a gap) with the node count, and picks neither |
+| `ParseError: BaseAddress.FromHex`, three frames deep | names the **missing staking credential**, the address, and that CIP-113 needs a base address |
+| `Registry node not found for <policyId>` | states all three readings: never registered / **belongs to a different deployment** / the read is stale |
+
+The third message matters because only `transfer` and `freeze` need a blacklist non-membership
+proof — register, mint, burn, seize and unfreeze do not. A deployment that skipped
+`compliance.init()` therefore looks healthy through bootstrap, register, mint and **seize**, and
+fails first and only on a transfer.
+
+The fourth matters because a programmable token is **deployment-bound**: its policy id is the hash
+of `issuance_mint` parameterised by its deployment's protocol params, so a protocol re-bootstrap
+produces a new directory that does not contain it. There is no repointing — mint a fresh token
+under the deployment you serve. That reading is invisible to every other check: the token exists,
+its UTxOs exist, and every credential the transaction derives is correct *for the other
+deployment*.
+
+### New exports
+
+`isVoidDatum`, `assertNoDatumLoss`, `registryNodeMissingError`,
+`coveringRegistryNodeMissingError`. If you pre-flight these checks in your own backend, raise
+**these** messages rather than a paraphrase — two texts drifting apart is how one of them ends up
+naming the wrong cause.
+
 ## Migrating to 0.14.0 (provenance on the multisig genesis — additive, nothing to do)
 
 **Nothing changes unless you opt in.** `buildMultisigGenesisTx` gains an optional
