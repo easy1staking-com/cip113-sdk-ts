@@ -487,6 +487,10 @@ export {
   upgradeMultisigAddress,
   locateProtocolParams,
   locateUpgradeMultisig,
+  satisfiesMultisigTree,
+  buildRotateMultisigTx,
+  type MultisigEvidence,
+  type RotateMultisigTxParams,
   type LocatedProtocolParams,
   type LocatedUpgradeMultisig,
 } from "./standard/upgrade.js";
