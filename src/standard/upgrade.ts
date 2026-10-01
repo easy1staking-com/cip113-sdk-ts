@@ -78,9 +78,11 @@ import type { UnsignedTx } from "../substandards/interface.js";
 import type { MultisigScriptTree, ProtocolParamsData } from "../core/evo-utils.js";
 import {
   buildEvoScript,
+  ceilToWholeAda,
   decodeMultisigScript,
   decodeProtocolParams,
   getInlineDatum,
+  mintAssetsFromMap,
   minUtxoAtLeast,
   multisigScriptDatum,
   outputAssets,
@@ -1113,4 +1115,224 @@ function requireParamsDatum(paramsUtxo: UTxO | undefined, label: string): Protoc
     );
   }
   return decodeProtocolParams(datum);
+}
+
+// ---------------------------------------------------------------------------
+// Standing up an authority on its own — no protocol bootstrap involved
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ WHY THESE EXIST SEPARATELY FROM THE BOOTSTRAP'S OWN STEPS, and it is not a
+ * tidiness argument. A multisig → multisig handover needs a SECOND
+ * `upgrade_multisig` instance, and the bootstrap's builders cannot produce one:
+ *
+ *   - `buildMultisigGenesisTx` requires a whole `BootstrapPlan` — it reads
+ *     `plan.addresses.upgradeMultisig`, `plan.assetUnits.upgradeMultisigNft`,
+ *     and cross-checks the seed against `plan.config.seeds.upgradeMultisig`. An
+ *     operator rotating an authority has a `DeploymentParams` and a spare UTxO,
+ *     not a plan, and manufacturing a fake plan to reach the builder would mean
+ *     inventing a protocol bootstrap that is not happening.
+ *   - `buildStakeRegistrationTx` registers ALL SIX of a plan's stake credential
+ *     scripts in one transaction. Using it to register one new authority would
+ *     register five credentials belonging to a protocol that does not exist —
+ *     and since `upgrade_multisig.publish` admits only `RegisterCredential`,
+ *     deregistration is permanently closed and those five deposits are gone.
+ *
+ * ⚑ Giovanni asked for these to be exported in their own right (2026-10-01):
+ * *"build such scripts… so we can reuse in the FE/platform"*. Rotating an
+ * authority without redeploying a protocol is the mainnet operation they serve.
+ */
+
+export interface StandaloneMultisigGenesisParams extends BootstrapBuildContext {
+  readonly blueprint: PlutusBlueprint;
+  /**
+   * The one-shot UTxO this authority's identity is derived from.
+   *
+   * ⛔ THE SCRIPT IS PARAMETERISED FROM THIS UTxO, not from a recorded
+   * coordinate. `upgrade_multisig`'s hash is a function of the outref it
+   * consumes, so deriving from the UTxO actually being spent means the two can
+   * never disagree — the failure mode the bootstrap version has to cross-check
+   * for cannot arise here.
+   */
+  readonly seedUtxo: UTxO;
+  /**
+   * The authority tree. REQUIRED, with no default: who controls a protocol is
+   * the most consequential decision a deployment makes.
+   */
+  readonly tree: MultisigScriptTree;
+}
+
+/**
+ * Mint a new `upgrade_multisig` config NFT and lock it with a signer tree —
+ * a complete, standalone authority, ready to be nominated.
+ *
+ * The four rails `upgrade_multisig.mint` enforces, and where each is met:
+ *   1. the named UTxO is consumed            -> collectFrom
+ *   2. exactly one "UpgradeMultisig" token   -> mintAssets
+ *   3. an output found by `has_nft_strict`   -> the single payToAddress
+ *   4. `well_formed(tree)`, NO reference script, address == from_script(policy)
+ *
+ * ⛔ THE NFT AND NOTHING ELSE in that output. `has_nft_strict` is strict about
+ * the WHOLE value: bundling any other asset means the output is simply NOT
+ * FOUND, and the mint fails naming nothing about bundling. Change is a separate
+ * output, which the builder leaves to coin selection.
+ *
+ * ⚠ THIS AUTHORITY IS NOT YET USABLE. Two more things must happen before it can
+ * authorise anything: its stake credential must be REGISTERED
+ * ({@link buildRegisterCredentialTx}), in a strictly earlier transaction than
+ * any withdrawal it makes; and a sitting authority must NOMINATE it. Neither is
+ * this builder's business, and neither is implied by a successful mint.
+ */
+export async function buildStandaloneMultisigGenesisTx(
+  params: StandaloneMultisigGenesisParams
+): Promise<UnsignedTx> {
+  const label = "standalone-multisig-genesis";
+  const { blueprint, seedUtxo, tree } = params;
+
+  if (!blueprint || typeof blueprint !== "object") {
+    throw new Error(`${label}: blueprint is required — the upgrade_multisig body comes from it.`);
+  }
+  if (!seedUtxo || typeof seedUtxo !== "object" || seedUtxo.transactionId === undefined) {
+    throw new Error(
+      `${label}: seedUtxo is required — an UNSPENT output this authority's one-shot policy is ` +
+        `parameterised by. Its outref becomes the script's only parameter, so it also becomes ` +
+        `this authority's permanent identity.`
+    );
+  }
+  if (!tree || typeof tree !== "object") {
+    throw new Error(
+      `${label}: tree is required — the MultisigScript that IS this authority. There is no ` +
+        `default: shipping one would ship a decision about who controls a protocol.`
+    );
+  }
+
+  // Enforces upstream's `well_formed` before anything is spent.
+  const datum = multisigScriptDatum(tree);
+
+  const seedRef = refOf(seedUtxo);
+  const script = createStandardScripts(blueprint).upgradeMultisig(seedRef);
+  const networkId = params.client.chain.id;
+  const address = scriptAddress(networkId, script.hash);
+  const nftUnit = script.hash + Buffer.from(UPGRADE_MULTISIG_TOKEN_NAME, "utf-8").toString("hex");
+  const assets = new Map([[nftUnit, 1n]]);
+
+  const coinsPerUtxoByte = (await params.client.getProtocolParameters()).coinsPerUtxoByte;
+  const lovelace = ceilToWholeAda(
+    minUtxoAtLeast(2_000_000n, {
+      address,
+      assets: outputAssets(0n, assets),
+      datum,
+      coinsPerUtxoByte,
+    })
+  );
+
+  let tx = params.client.newTx();
+  tx = tx.collectFrom({ inputs: [seedUtxo] });
+  tx = tx.mintAssets({ assets: mintAssetsFromMap(assets), redeemer: voidData() });
+  tx = tx.payToAddress({
+    address: EvoAddress.fromBech32(address),
+    assets: outputAssets(lovelace, assets),
+    datum: new InlineDatum.InlineDatum({ data: datum }),
+  });
+  tx = tx.attachScript({ script: buildEvoScript(script.compiledCode) });
+
+  return finishUnsignedTx(tx, params, label, {
+    scriptHash: script.hash,
+    compiledCode: script.compiledCode,
+    txInput: seedRef,
+    address,
+    nftUnit,
+    configUtxoOutputIndex: 0,
+    tree,
+  });
+}
+
+/** A script credential to register, with the witness its registration needs. */
+export interface RegisterableCredential {
+  readonly scriptHash: ScriptHash;
+  readonly compiledCode: HexString;
+}
+
+export interface RegisterCredentialTxParams extends BootstrapBuildContext {
+  /**
+   * The script credentials to register. Usually ONE.
+   *
+   * ⚠ REGISTRATION IS ONE-WAY for an `upgrade_multisig`: its `publish` handler
+   * admits `RegisterCredential` and nothing else, so deregistration and
+   * delegation are permanently closed and the deposit is unrecoverable. Register
+   * what you need and no more — the bootstrap's six-at-once builder exists for a
+   * protocol genesis, not for this.
+   */
+  readonly credentials: readonly RegisterableCredential[];
+}
+
+/**
+ * Register one or more script stake credentials, so they can make a withdraw-0.
+ *
+ * ⛔ THIS MUST BE A STRICTLY EARLIER TRANSACTION THAN ANY WITHDRAWAL IT ENABLES.
+ * The ledger applies withdrawals against reward-account state BEFORE it applies
+ * certificates, so registering and withdrawing in one transaction is not one
+ * transaction — it is two. This is measured, not inferred: it is why the
+ * protocol bootstrap's own step order puts stake registrations before the
+ * genesis, and omitting it reports as ledger code 3141, "rewards withdrawals
+ * must consume rewards in full", which reads as a balance problem and means an
+ * UNREGISTERED credential.
+ *
+ * ⇒ A full authority handover is therefore a minimum of FOUR ordered
+ * transactions: this authority's config genesis, this registration, the
+ * nomination, and the promotion.
+ */
+export async function buildRegisterCredentialTx(
+  params: RegisterCredentialTxParams
+): Promise<UnsignedTx> {
+  const label = "register-credential";
+  const creds = params.credentials;
+  if (!Array.isArray(creds) || creds.length === 0) {
+    throw new Error(
+      `${label}: credentials is required and must be non-empty — the script credential(s) to ` +
+        `register. Registration is what lets a credential make a withdraw-0 at all.`
+    );
+  }
+  for (const c of creds) {
+    if (!c || typeof c.scriptHash !== "string" || !/^[0-9a-fA-F]{56}$/.test(c.scriptHash)) {
+      throw new Error(
+        `${label}: each credential needs a 28-byte scriptHash; got ` +
+          `${JSON.stringify(c?.scriptHash)}. A reward account is a header byte plus 28 bytes, so ` +
+          `a wrong-length hash names no account the ledger can register.`
+      );
+    }
+    if (typeof c.compiledCode !== "string" || !/^[0-9a-fA-F]+$/.test(c.compiledCode)) {
+      throw new Error(
+        `${label}: credential ${c.scriptHash} needs its compiledCode — a script credential's ` +
+          `registration carries the script as a witness. Without it the ledger answers ` +
+          `"An associated script witness is missing" on purpose=publish.`
+      );
+    }
+  }
+
+  const seen = new Set<string>();
+  for (const c of creds) {
+    const k = c.scriptHash.toLowerCase();
+    if (seen.has(k)) {
+      throw new Error(
+        `${label}: ${c.scriptHash} appears twice. Registering one credential twice in one ` +
+          `transaction is refused by the ledger as an already-known credential (code 3145), and ` +
+          `the second entry buys nothing.`
+      );
+    }
+    seen.add(k);
+  }
+
+  let tx = params.client.newTx();
+  for (const c of creds) {
+    tx = tx.registerStake({
+      stakeCredential: Credential.makeScriptHash(Bytes.fromHex(c.scriptHash)),
+      redeemer: voidData(),
+    });
+    tx = tx.attachScript({ script: buildEvoScript(c.compiledCode) });
+  }
+
+  return finishUnsignedTx(tx, params, label, {
+    credentials: creds.map((c) => c.scriptHash),
+  });
 }
