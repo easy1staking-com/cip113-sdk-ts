@@ -472,6 +472,24 @@ export {
 // from indexer lag), and two texts drifting apart is how one of them ends up
 // naming the wrong cause.
 export { registryNodeMissingError, coveringRegistryNodeMissingError } from "./substandards/registry-guard.js";
+// ---------------------------------------------------------------------------
+// The upgrade lifecycle — locating a protocol's governable state.
+//
+// ⛔ EXPORTED UNDER THE 2026-09-17 BOUNDARY AMENDMENT, extended to the upgrade
+// sequence by Giovanni on 2026-10-01: the platform drives these against a
+// MAINNET deployment, and a consumer that cannot import them keeps its own port
+// of a protocol-critical sequence instead.
+// ---------------------------------------------------------------------------
+export {
+  PROTOCOL_PARAMS_TOKEN_NAME,
+  UPGRADE_MULTISIG_TOKEN_NAME,
+  protocolParamsAddress,
+  upgradeMultisigAddress,
+  locateProtocolParams,
+  locateUpgradeMultisig,
+  type LocatedProtocolParams,
+  type LocatedUpgradeMultisig,
+} from "./standard/upgrade.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
 export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
 export {
