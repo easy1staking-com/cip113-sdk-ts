@@ -464,6 +464,10 @@ export {
   isVoidDatum,
   assertNoDatumLoss,
   assertNotReferenceToken,
+  // ⚑ Every builder in this package takes `availableUtxos` as a REQUIRED input,
+  // so the caller assembling that list needs the "never spend a live reference
+  // script" filter — and until W-G it was private to freeze-and-seize.
+  spendableWalletUtxos,
 } from "./core/evo-utils.js";
 // ⛔ EXPORTED SO A SECOND IMPLEMENTATION DOES NOT HAVE TO INVENT THE WORDS. A
 // consumer that pre-flights "is this token in the deployment I serve?" in its
@@ -472,6 +476,40 @@ export {
 // from indexer lag), and two texts drifting apart is how one of them ends up
 // naming the wrong cause.
 export { registryNodeMissingError, coveringRegistryNodeMissingError } from "./substandards/registry-guard.js";
+// ---------------------------------------------------------------------------
+// The upgrade lifecycle — locating a protocol's governable state.
+//
+// ⛔ EXPORTED UNDER THE 2026-09-17 BOUNDARY AMENDMENT, extended to the upgrade
+// sequence by Giovanni on 2026-10-01: the platform drives these against a
+// MAINNET deployment, and a consumer that cannot import them keeps its own port
+// of a protocol-critical sequence instead.
+// ---------------------------------------------------------------------------
+export {
+  PROTOCOL_PARAMS_TOKEN_NAME,
+  UPGRADE_MULTISIG_TOKEN_NAME,
+  protocolParamsAddress,
+  upgradeMultisigAddress,
+  locateProtocolParams,
+  locateUpgradeMultisig,
+  satisfiesMultisigTree,
+  buildRotateMultisigTx,
+  buildProtocolUpgradeTx,
+  buildNominateAuthorityTx,
+  buildPromoteAuthorityTx,
+  buildStandaloneMultisigGenesisTx,
+  buildRegisterCredentialTx,
+  type StandaloneMultisigGenesisParams,
+  type RegisterCredentialTxParams,
+  type RegisterableCredential,
+  type UpgradeAuthorisation,
+  type ParamsSpendTxParams,
+  type ProtocolUpgradeTxParams,
+  type NominateAuthorityTxParams,
+  type MultisigEvidence,
+  type RotateMultisigTxParams,
+  type LocatedProtocolParams,
+  type LocatedUpgradeMultisig,
+} from "./standard/upgrade.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
 export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
 export {
@@ -588,7 +626,14 @@ export type {
   Cip171ScriptEntry,
 } from "./core/cip171.js";
 export { addressHexToBech32 } from "./provider/address-utils.js";
-export { assembleSignedTx } from "./provider/tx-utils.js";
+export {
+  assembleSignedTx,
+  // M-of-N assembly — several witnesses onto one transaction, and the COUNT
+  // assertion that stops a silently-unsigned transaction reaching the chain.
+  assembleMultiSignedTx,
+  countVKeyWitnesses,
+  assertVKeyWitnessCount,
+} from "./provider/tx-utils.js";
 export type { FESDeploymentParams } from "./substandards/freeze-and-seize/types.js";
 
 // Re-export Evolution SDK essentials so consumers don't need a direct dependency

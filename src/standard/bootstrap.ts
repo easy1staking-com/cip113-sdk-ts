@@ -931,10 +931,23 @@ function buildOptions(ctx: BootstrapBuildContext): BuildOptions {
  * defect `dummy.transfer` already recorded once. `cbor` is the supported path
  * and the one a key-holding caller should prefer; this SDK signs nothing.
  */
-async function finish(
+/**
+ * ⚑ EXPORTED WITHIN THE PACKAGE ONLY (not from `src/index.ts`) so
+ * `src/standard/upgrade.ts` builds its transactions through the SAME glue
+ * rather than a second copy of it. Duplicating a build path is how two
+ * builders come to disagree about `buildOptions` or about what a missing
+ * `_signBuilder` means.
+ */
+export async function finish(
   tx: TxBuilder,
   ctx: BootstrapBuildContext,
-  step: BootstrapStepId,
+  // ⚑ A LABEL, NOT A BOOTSTRAP STEP ID. This was `BootstrapStepId`, which made
+  // the glue unusable by any other builder in this package — `src/standard/upgrade.ts`
+  // emits `rotate-multisig` and friends. The id discipline belongs where the
+  // ids are LOAD-BEARING (the plan, the step sequence, resumption), not on a
+  // field that only ever ends up in informational metadata. Widening it here is
+  // what stops a second copy of this function existing.
+  step: string,
   metadata: Record<string, unknown>
 ): Promise<UnsignedTx> {
   const built: BuiltTx = await tx.build(buildOptions(ctx));

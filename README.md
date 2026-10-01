@@ -58,6 +58,75 @@ await client.awaitTx(txHash);
 | `@easy1staking/cip113-sdk-ts/freeze-and-seize` | Freeze-and-Seize substandard |
 | `@easy1staking/cip113-sdk-ts/dummy` | Dummy substandard |
 
+## Migrating to 0.16.0 (the upgrade lifecycle, exported — additive, and proven on preview)
+
+**Nothing existing changes.** This release adds the transactions that manage a deployed protocol:
+rotate the upgrade authority's signers, rewrite the live wiring, and hand the authority over to a
+different one. Every builder returns an **unsigned** transaction, reads the UTxOs you hand it, and
+never signs, submits, awaits, holds a key or names an endpoint.
+
+```ts
+import {
+  locateProtocolParams, locateUpgradeMultisig,          // read the governable state
+  buildRotateMultisigTx,                                // signer rotation
+  buildProtocolUpgradeTx,                               // rewrite the wiring
+  buildNominateAuthorityTx, buildPromoteAuthorityTx,     // hand the authority over
+  buildStandaloneMultisigGenesisTx, buildRegisterCredentialTx,  // stand up a successor
+  satisfiesMultisigTree,                                // offline preflight
+  assembleMultiSignedTx, assertVKeyWitnessCount,        // M-of-N assembly
+  spendableWalletUtxos,                                 // never spend a live reference script
+} from "@easy1staking/cip113-sdk-ts";
+```
+
+**All three operations were executed on the preview testnet** before this release — twelve
+transactions, listed with their hashes in [`docs/upgrade-lifecycle.md`](docs/upgrade-lifecycle.md).
+Before that run the signer rotation had never been executed anywhere by anything, and the authority
+handover had only ever been run multisig → *key*.
+
+### Four things that will bite you, and are not visible from the validators
+
+**1. A transaction's signer set is the UNION of two unrelated requirements.** The authority's
+satisfying subset is read out of `required_signers` — so a wallet that merely *signs* is not enough,
+the key hash must be **named** — and separately, whoever **owns the inputs** must sign for the fee.
+Signing a promotion with the nominee's quorum alone is refused with ledger code **3101** naming a
+key and nothing else. `signerKeyHashes` on the authorisation is the first set; your signing set is
+the union.
+
+**2. Recorded UTxO coordinates go stale, by construction.** `protocolParams.utxo` moves on every
+upgrade and `upgradeMultisig.utxo` moves on every rotation. Use `locateProtocolParams` /
+`locateUpgradeMultisig` over a fresh read; the recorded coordinate is a record of the bootstrap, not
+an identity. The identity is the NFT.
+
+**3. An authority handover is a minimum of FOUR ordered transactions.** The ledger applies
+withdrawals against reward-account state **before** certificates, so a credential cannot be
+registered and withdrawn from in one transaction: successor genesis → registration → nomination →
+promotion. Omitting the registration reports as code **3141**, which reads as a balance problem.
+
+**4. A rotation and an upgrade can never share a transaction.** The config UTxO cannot be both spent
+and referenced — `ConwayUtxoBabbageNonDisjointRefInputs` — which is exactly why rotation is a datum
+edit that leaves `upgrade_cred` untouched.
+
+### What the SDK refuses, and what it deliberately does not
+
+It refuses only the **provably fatal** and the **honestly unbuildable**: a credential that is not a
+28-byte hash (the one-way brick — every future upgrade is authorised by a withdrawal, and a
+wrong-length hash can never appear in one); a tree upstream's `well_formed` rejects, including
+`AllOf []`, which is **vacuously true on chain** and therefore a permissionless authority; an arm
+asked to move a field it freezes; a promotion with no standing nomination, or authorised by the
+sitting authority instead of the nominee; a quorum that cannot satisfy the current tree; and a
+current tree with `Before`/`After`/`Script` leaves, which need a validity interval or another
+script's withdraw-0 that these builders do not marshal.
+
+It does **not** check that a credential is live on chain. A nomination to an unregistered credential
+is legal and recoverable — the promotion simply cannot run until it is registered — and only a
+malformed credential is terminal.
+
+⚠ `satisfiesMultisigTree` is a second implementation of an on-chain rule and can drift. Its contract
+is **one-directional**: consult it to refuse, never to permit. A `true` is a prediction; the ledger
+decides. Note that its `Before`/`After` arms return **false** for an absent bound, because upstream's
+do — reading "unbounded" as "therefore fine" is the inversion that makes a port say yes where the
+chain says no.
+
 ## Migrating to 0.15.0 (`transfer` stops destroying CIP-68 metadata — BREAKING, and you want it)
 
 **What breaks:** `transfer` and `seize` now refuse the CIP-68 **(100) reference token** outright,

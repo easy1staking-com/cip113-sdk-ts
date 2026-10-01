@@ -27,7 +27,14 @@ import {
 } from "@evolution-sdk/evolution";
 import * as Label from "@evolution-sdk/evolution/Label";
 
-import type { HexString, PlutusScript, PolicyId, ScriptHash, TxInput } from "../types.js";
+import type {
+  DeploymentParams,
+  HexString,
+  PlutusScript,
+  PolicyId,
+  ScriptHash,
+  TxInput,
+} from "../types.js";
 
 const PlutusV3 = Script.Script.members[3] as { new (opts: { bytes: Uint8Array }): Script.Script };
 
@@ -1316,6 +1323,91 @@ export function assertNotReferenceToken(
       `holders are meant to hold, and leave the (100) token where \`register\` put it (the ` +
       `issuer's programmable-logic-base address).`
   );
+}
+
+/**
+ * Wallet UTxOs that are SAFE TO SPEND.
+ *
+ * A deployment's reference scripts live in outputs somewhere on chain, and if
+ * that somewhere is the operator's own wallet — which is exactly what the
+ * devnet harness does — then `getUtxos(wallet)` hands them back alongside
+ * ordinary funds. Spending one DESTROYS protocol infrastructure: the
+ * `script_ref` is not carried into the change output, so the reference input
+ * every later operation depends on simply ceases to exist.
+ *
+ * ⚑ EXPORTED (W-G, 2026-10-01). It began life private to freeze-and-seize, and
+ * every builder in this package takes `availableUtxos` as a REQUIRED input —
+ * so an operator assembling that list needs this filter and had no way to
+ * reach it. The platform building an upgrade transaction is exactly the caller
+ * who would otherwise spend a live reference script.
+ *
+ * MEASURED, not theorised: `seize` consumed the deployment's `third_party`
+ * reference-script UTxO this way, which is why it appeared to work at all —
+ * a spent input's reference script counts as supplied (CIP-33) — and why the
+ * next run failed with 3011.
+ */
+export function spendableWalletUtxos(
+  walletUtxos: readonly EvoUTxO.UTxO[],
+  deployment: DeploymentParams
+): EvoUTxO.UTxO[] {
+  const reservedRefs = [
+      deployment.programmableBaseRefInput,
+      // alpha.3: the dispatcher's reference script joined the set the bootstrap
+      // publishes. Naming it here keeps the explicit list complete — the general
+      // scriptRef rule below already covers it, but a named list that silently
+      // omits a live deployment's script invites the next reader to trust it.
+      // alpha.4 adds issuance_logic and upgrade_multisig; the newest member is
+      // exactly the one least likely to be covered anywhere else.
+      deployment.programmableLogicGlobalRefInput,
+      deployment.transferRefInput,
+      deployment.thirdPartyRefInput,
+      deployment.unfrackingRefInput,
+      deployment.issuanceLogicRefInput,
+      deployment.upgradeMultisigRefInput,
+    ].filter(Boolean);
+  if (reservedRefs.length !== 7) {
+    throw new Error(
+      `spendableWalletUtxos: the named deployment reference-script reservation list must ` +
+        `contain exactly 7 entries; got ${reservedRefs.length}. A membership-only list ` +
+        `decays into a stale subset and silently stops protecting its newest member.`
+    );
+  }
+  // ⚠ BOTH SIDES LOWERCASED. The reserved keys come from a RECORDED
+  // `DeploymentParams` and the candidates from a live chain read; a case
+  // difference between them would make this filter silently reserve nothing,
+  // and the damage it prevents is invisible until a later operation needs the
+  // script.
+  const reserved = new Set(
+    reservedRefs.map((r) => `${r.txHash.toLowerCase()}#${r.outputIndex}`)
+  );
+  return walletUtxos.filter((u) => {
+    // ⛔ ANY UTxO CARRYING A REFERENCE SCRIPT IS OFF LIMITS, not merely the four
+    // this deployment names.
+    //
+    // MEASURED, THE EXPENSIVE WAY: the named-four filter was not enough. A
+    // long-lived wallet accumulates reference scripts from EVERY deployment it
+    // has ever made, and coin selection is free to spend any of them. On
+    // preview it consumed two of the LIVE deployment's own four during a
+    // failed retry — the deployment two VERIFIED CIP-171 records describe —
+    // because those four were reached through a path that did not consult this
+    // filter at all.
+    //
+    // Spending one destroys protocol infrastructure silently: the script_ref is
+    // not carried into the change output, nothing errors, and the damage
+    // surfaces only when a later operation needs the script. On mainnet this is
+    // spending live reference scripts that running contracts depend on, and it
+    // would look like a successful transaction.
+    //
+    // The safe rule needs no knowledge of WHOSE deployment a script belongs to:
+    // if a wallet UTxO carries a reference script, it is infrastructure, not
+    // funds.
+    if ((u as { scriptRef?: unknown }).scriptRef) return false;
+    // ⚑ Computed inline rather than via `utxoToTxInput`, which lives in
+    // `core/registry.ts` — a module that imports FROM here, so reaching for it
+    // would make the dependency circular.
+    const txHash = TransactionHash.toHex(u.transactionId).toLowerCase();
+    return !reserved.has(`${txHash}#${Number(u.index)}`);
+  });
 }
 
 /**
