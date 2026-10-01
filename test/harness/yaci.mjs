@@ -164,11 +164,21 @@ export async function latestBlock() {
  *
  * Kupo is NOT started by `--enable-kupomios`; see docs/devnet.md.
  */
-export async function makeClient(mnemonic = TEST_MNEMONIC) {
+export async function makeClient(mnemonic = TEST_MNEMONIC, seedOpts = {}) {
   const chain = await getYaciChain();
   return Client.make(chain)
     .withKupmios({ kupoUrl: KUPO_URL, ogmiosUrl: OGMIOS_URL })
-    .withSeed({ mnemonic });
+    // ⚑ `seedOpts` carries `accountIndex` / `paymentIndex` / `stakeIndex`, which
+    // is how ONE mnemonic yields the several distinct signers an M-of-N
+    // authority needs. Added for the W-G rotation: a 2-of-3 tree cannot be
+    // exercised by a single-key wallet, and three mnemonics would be three
+    // secrets to manage where one derivation path suffices.
+    //
+    // ⚠ The extra accounts need NO FUNDS. Evolution's signer adds the
+    // transaction's `requiredSigners` to its required-key set independently of
+    // which UTxOs the wallet owns, so an unfunded account can still witness a
+    // transaction whose fee another account pays.
+    .withSeed({ mnemonic, ...seedOpts });
 }
 
 /** Poll until `fn()` returns truthy, or throw. For waiting on chain state. */

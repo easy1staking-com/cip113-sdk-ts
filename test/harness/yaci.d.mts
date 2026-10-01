@@ -11,7 +11,16 @@ export declare function getYaciChain(): Promise<any>;
 export declare function topupAddress(address: string, ada: number | bigint): Promise<void>;
 export declare function resetDevnet(): Promise<void>;
 export declare function latestBlock(): Promise<any>;
-export declare function makeClient(mnemonic?: string): Promise<any>;
+export declare function makeClient(
+  mnemonic?: string,
+  /**
+   * `accountIndex` / `paymentIndex` / `stakeIndex` — how ONE mnemonic yields the
+   * several distinct signers an M-of-N authority needs. The extra accounts need
+   * no funds: Evolution adds a transaction's `requiredSigners` to its
+   * required-key set independently of which UTxOs the wallet owns.
+   */
+  seedOpts?: { accountIndex?: number; paymentIndex?: number; stakeIndex?: number },
+): Promise<any>;
 
 export interface WaitOptions {
   timeoutMs?: number;

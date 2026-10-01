@@ -464,6 +464,10 @@ export {
   isVoidDatum,
   assertNoDatumLoss,
   assertNotReferenceToken,
+  // ⚑ Every builder in this package takes `availableUtxos` as a REQUIRED input,
+  // so the caller assembling that list needs the "never spend a live reference
+  // script" filter — and until W-G it was private to freeze-and-seize.
+  spendableWalletUtxos,
 } from "./core/evo-utils.js";
 // ⛔ EXPORTED SO A SECOND IMPLEMENTATION DOES NOT HAVE TO INVENT THE WORDS. A
 // consumer that pre-flights "is this token in the deployment I serve?" in its
