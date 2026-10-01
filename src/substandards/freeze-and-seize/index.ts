@@ -84,6 +84,7 @@ import {
   inlineDatumBytes,
   assertInlineDatumWithinBound,
   assertNoDatumLoss,
+  assertNotReferenceToken,
   minUtxoAtLeast,
   ceilToWholeAda,
   minUtxoForOutput,
@@ -1167,6 +1168,17 @@ export function freezeAndSeizeSubstandard(config: {
       const { selected, totalTokenAmount } = selectUtxosForAmount(tokenUtxos, unit, quantity);
       const returningAmount = totalTokenAmount - quantity;
 
+      // ⛔ THE (100) TOKEN IS REFUSED ON ITS LABEL, ahead of the datum check and
+      // regardless of what datum it currently carries — see
+      // assertNotReferenceToken. A reference token whose metadata is ALREADY
+      // gone passes the datum check and still must not move: the canonical
+      // reference NFT would land at an address the issuer does not control.
+      assertNotReferenceToken(
+        assetName,
+        "freeze-and-seize.transfer",
+        "Every token output this transfer creates is built"
+      );
+
       // BOTH of this operation's token outputs — the recipient's and the
       // sender's change — are built with `voidData()` below, so a datum on any
       // selected input is destroyed whichever side the tokens land on.
@@ -1729,21 +1741,22 @@ export function freezeAndSeizeSubstandard(config: {
       const seizedAmount = utxoUnitQty(utxoToSeize, unit);
       if (seizedAmount <= 0n) throw new Error(`No tokens of ${unit} in UTxO`);
 
-      // ⚠ NARROWER THAN `transfer`'s GUARD, DELIBERATELY. Seize writes the
-      // seized assets to output 0 with a void datum but carries the input's own
-      // datum onto output 1, so a datum-carrying input does NOT lose its datum
-      // here — the datum stays behind. What breaks is the LINK: a CIP-68 (100)
-      // reference token seized out of the UTxO that holds its metadata leaves
-      // the metadata on an output that no longer holds the token, which is
-      // exactly as unresolvable as erasing it. Every other seizure leaves the
-      // datum and the token it describes together, so it is allowed.
-      if (assetName.startsWith(labeledAssetName(100, ""))) {
-        assertNoDatumLoss(
-          [utxoToSeize],
-          "freeze-and-seize.seize",
-          "the destination's programmable-logic-base output (output 0)"
-        );
-      }
+      // ⚠ NARROWER THAN `transfer`'s GUARD, DELIBERATELY, and this is the whole
+      // of it: only the (100) token is refused. Seize writes the seized assets
+      // to output 0 with a void datum but carries the input's own datum onto
+      // output 1, so a datum-carrying input does NOT lose its datum here — the
+      // datum stays behind. What breaks is the LINK: a reference token seized
+      // out of the UTxO holding its metadata leaves that metadata on an output
+      // that no longer holds the token, which is exactly as unresolvable as
+      // erasing it. Every other seizure leaves the datum and the token it
+      // describes together, so it is allowed — and a control asserts that,
+      // because refusing it would block a legitimate seizure while still
+      // passing every assertion about refusals.
+      assertNotReferenceToken(
+        assetName,
+        "freeze-and-seize.seize",
+        "The destination's output (output 0) is built"
+      );
 
       // 2. Find reference inputs
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);

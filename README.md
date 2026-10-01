@@ -60,9 +60,9 @@ await client.awaitTx(txHash);
 
 ## Migrating to 0.15.0 (`transfer` stops destroying CIP-68 metadata — BREAKING, and you want it)
 
-**What breaks:** `transfer` now refuses any input carrying a non-void inline datum, and `seize`
-refuses a **(100)**-labelled asset whose UTxO still holds one. Calls that used to succeed now
-throw.
+**What breaks:** `transfer` and `seize` now refuse the CIP-68 **(100) reference token** outright,
+on its CIP-67 label, whatever datum its UTxO currently holds; `transfer` additionally refuses any
+input carrying a non-void inline datum. Calls that used to succeed now throw.
 
 **Why that is the fix and not a regression.** Asked to move a CIP-68 (100) reference token, 0.14.0
 built the transaction without complaint, **the ledger accepted it**, and the output's datum changed:
@@ -74,9 +74,13 @@ after:  d87980                                    Constr(0, []) — the void dat
 
 Measured twice on devnet (txs `df4db48f…`, `7ee37fd2…`). The metadata was **gone from the live
 UTxO set** and the reference NFT sat at an address its issuer no longer controlled. Nothing failed
-anywhere — not the build, the evaluation, the submission, or this package's test suite. The
-independent Java implementation of the same operation already refused it, so the SDK was strictly
-worse than the reference on a data-destroying path.
+anywhere — not the build, the evaluation, the submission, or this package's test suite.
+
+⚠ **And the independent Java implementation had the same hole**, checked and confirmed after an
+early report that it refused the operation turned out to be wrong: `Cip68.LABEL_REFERENCE` existed
+and nothing on its transfer or seize path called it. Two implementations lost the same data in two
+languages, and neither side's tests saw it — which is the useful fact here, because it says the
+defect was invisible to the way both were being tested rather than to one team.
 
 **What to do:** move the **(333)** user token — the one holders are meant to hold — and leave the
 (100) reference token where `register` put it, at the issuer's programmable-logic-base address.
@@ -86,6 +90,19 @@ worse than the reference on a data-destroying path.
 + protocol.transfer({ assetName: labeledAssetName(333, name), … })
 ```
 
+**Two guards, and the label one is the important half.** `assertNotReferenceToken` keys on the
+label because a reference token carries metadata *by construction*: that settles it offline, with
+no chain read and no race against an indexer, and a UTxO whose datum merely *looks* empty cannot
+slip the asset through. A (100) token whose metadata is already gone still must not move — the
+canonical reference NFT would land at an address the issuer does not control, and nothing restores
+either. `assertNoDatumLoss` stays as the broader net for any *other* datum-carrying output. Both
+are exported. (The label keying is the independent Java implementation's reasoning, adopted here
+after it proved stronger than mine.)
+
+It does **not** widen to "any CIP-67 label": the (333) user token is labelled too, and refusing it
+would block every CIP-68 transfer — a worse defect than the one being fixed, and one that would
+pass every assertion about refusals. There is a control for exactly that.
+
 ⚠ **There is no supported way to move a datum-carrying programmable output.** A carry-forward is
 the operation a caller actually wants and it is deliberately **not** shipped here: whether the
 on-chain scripts accept a non-void datum on a transfer output is untested, and shipping an
@@ -94,7 +111,7 @@ for it if you need it; do not work around the refusal.
 
 `seize`'s guard is **narrower** than `transfer`'s: seize carries the input's datum onto output 1,
 so a datum-carrying input does not lose it — only the (100) token is inseparable from the metadata
-it describes. Seizing a (333) token out of the metadata UTxO is still allowed.
+it describes. Seizing a (333) token out of the metadata UTxO is still allowed, and asserted to be.
 
 ### Four error messages now name their own cause
 
@@ -121,7 +138,7 @@ deployment*.
 
 ### New exports
 
-`isVoidDatum`, `assertNoDatumLoss`, `registryNodeMissingError`,
+`isVoidDatum`, `assertNoDatumLoss`, `assertNotReferenceToken`, `registryNodeMissingError`,
 `coveringRegistryNodeMissingError`. If you pre-flight these checks in your own backend, raise
 **these** messages rather than a paraphrase — two texts drifting apart is how one of them ends up
 naming the wrong cause.

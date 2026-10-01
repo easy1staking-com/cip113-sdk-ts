@@ -1218,6 +1218,12 @@ export function isVoidDatum(datum: Data.Data | undefined | null): boolean {
  * address the issuer no longer controlled. Measured twice, identically, on two
  * independent deployments (txs df4db48f… and 7ee37fd2…).
  *
+ * ⚠ THE INDEPENDENT JAVA IMPLEMENTATION HAD THE SAME HOLE — an early report
+ * that it refused the operation was wrong, checked and corrected at source:
+ * `Cip68.LABEL_REFERENCE` existed and nothing on its transfer or seize path
+ * called it. Two implementations lost the same data in two languages, which
+ * says the defect was invisible to how BOTH were tested.
+ *
  * ⚠ WHY A REFUSAL AND NOT A CARRY-FORWARD. Carrying the datum onto the new
  * output is the operation a caller actually wants, and it is NOT what this
  * does — because whether the on-chain scripts accept a non-void datum on a
@@ -1261,6 +1267,55 @@ export function assertNoDatumLoss(
         `a change to request rather than a call to work around.`
     );
   }
+}
+
+/**
+ * Refuse an operation on the CIP-68 **(100) reference token**, keyed on the
+ * CIP-67 label rather than on the datum the UTxO happens to carry.
+ *
+ * ⛔ WHY THE LABEL IS THE STRONGER TEST, and it is the independent Java
+ * implementation's reasoning rather than mine: a reference token holds metadata
+ * BY CONSTRUCTION, so the label settles the question offline — no chain read, no
+ * race against an indexer, and a UTxO whose datum merely LOOKS empty cannot slip
+ * the asset through. {@link assertNoDatumLoss} stays as the broader net for any
+ * OTHER datum-carrying output; this one closes the case the broader net lets
+ * past.
+ *
+ * ⚠ AND THE CASE IT LETS PAST IS REAL, not hypothetical: a (100) token whose
+ * metadata datum is already gone still passes a datum check, and moving it
+ * relocates the canonical reference NFT to an address the issuer does not
+ * control. Nothing afterwards restores either the datum or the custody.
+ *
+ * ⚠ IT MUST NOT WIDEN TO "ANY LABELLED ASSET". The (333) user token is labelled
+ * too, and refusing it would block every CIP-68 transfer — a worse defect than
+ * the one this prevents, and one that would still pass every assertion about
+ * refusals. There is a control for exactly that.
+ *
+ * @param assetNameHex the raw asset name, CIP-67 label included
+ * @param operation    the operation's name, for the refusal
+ * @param moves        what the operation would write, e.g. "every token output
+ *                     this transfer creates"
+ */
+export function assertNotReferenceToken(
+  assetNameHex: HexString,
+  operation: string,
+  moves: string,
+): void {
+  const referenceLabel = labeledAssetName(100, "");
+  if (!assetNameHex || !assetNameHex.startsWith(referenceLabel)) return;
+
+  throw new Error(
+    `${operation}: asset name ${assetNameHex} carries CIP-67 label 100 — it is the CIP-68 ` +
+      `REFERENCE TOKEN, and this operation cannot move it.\n` +
+      `The reference token is where the metadata lives: CIP-68 consumers resolve a token's ` +
+      `metadata from the UTxO holding THIS asset. ${moves} with the void datum Constr(0, []), ` +
+      `so moving it erases that metadata — and even when the datum is ALREADY absent, the move ` +
+      `still relocates the canonical reference NFT to an address the issuer does not control. ` +
+      `Neither is recoverable afterwards.\n` +
+      `Remedy: move the (333) USER token — labeledAssetName(333, name) — which is the one ` +
+      `holders are meant to hold, and leave the (100) token where \`register\` put it (the ` +
+      `issuer's programmable-logic-base address).`
+  );
 }
 
 /**

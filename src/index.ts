@@ -463,6 +463,7 @@ export {
   // operation erase a CIP-68 (100) reference token's metadata?" offline.
   isVoidDatum,
   assertNoDatumLoss,
+  assertNotReferenceToken,
 } from "./core/evo-utils.js";
 // ⛔ EXPORTED SO A SECOND IMPLEMENTATION DOES NOT HAVE TO INVENT THE WORDS. A
 // consumer that pre-flights "is this token in the deployment I serve?" in its

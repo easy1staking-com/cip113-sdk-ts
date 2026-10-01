@@ -129,13 +129,16 @@ await client.awaitTx(txHash);
   freeze splits the covering node, which is how a block is represented), *or* the list has a gap.
   The refusal states both readings and prints the node count; it does not pick one.
 
-**⛔ Do not transfer the CIP-68 (100) reference token.** `transfer` builds every token output
-with the void datum, so moving a UTxO that carries an inline datum would **replace that datum
-with `Constr(0, [])`** — and the ledger accepts such a transaction, so the metadata would be
-destroyed silently and irreversibly. Measured on devnet before the guard existed. The SDK now
-refuses it by name. Move the **(333)** user token and leave the (100) reference token where
-`register` put it (the issuer's programmable-logic-base address). There is no operation in this
-SDK that moves a datum-carrying programmable output while preserving its datum.
+**⛔ The CIP-68 (100) reference token cannot be moved.** `transfer` and `seize` refuse it on its
+CIP-67 label, whatever datum its UTxO currently holds. Before the guard existed, `transfer` built
+every token output with the void datum, so moving the reference token **replaced its metadata
+datum with `Constr(0, [])`** — and the ledger accepts such a transaction, so the metadata was
+destroyed silently and irreversibly (measured on devnet). Even with the datum already gone the
+move is refused, because it would relocate the canonical reference NFT to an address the issuer
+does not control. Move the **(333)** user token and leave the (100) token where `register` put it
+(the issuer's programmable-logic-base address). `transfer` additionally refuses any input carrying
+a non-void inline datum; there is no operation in this SDK that moves a datum-carrying
+programmable output while preserving its datum.
 
 **If the token has no registry node**, the refusal states all three readings — never registered,
 registered under a **different deployment**, or a stale read — because the SDK cannot tell them
@@ -267,8 +270,9 @@ Asset names are always **raw hex** — the full on-chain byte representation:
 - CIP-68 FT: `labeledAssetName(333, stringToHex("DEMO"))` = `"0014df1044454d4f"`
 - CIP-68 (100) reference token: `labeledAssetName(100, …)` = `"000643b0…"` — minted by
   `register` alongside the (333) token, carries the metadata datum, and **cannot be moved**:
-  `transfer` refuses it, and `seize` refuses it when its UTxO still holds the metadata datum,
-  because separating the two leaves the metadata unresolvable.
+  `transfer` and `seize` both refuse it, on the label rather than on the datum, because
+  separating the metadata from the asset leaves it unresolvable and relocating the reference NFT
+  is irreversible either way.
 
 The CIP-68 prefix is part of the raw name. Only strip it for display purposes.
 

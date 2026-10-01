@@ -14,10 +14,15 @@
  *
  * ⚠ WHY NO TEST COULD HAVE CAUGHT IT BEFORE, which is the part worth keeping:
  * nothing failed. Not the build, not the evaluation, not the submission, not
- * the suite. The independent Java implementation of the same operation REFUSES
- * this transfer, so the SDK was strictly worse than the reference on a
- * data-destroying path, and the only instrument that could see it was reading
- * the datum back off the chain afterwards.
+ * the suite. The only instrument that could see it was reading the datum back
+ * off the chain afterwards.
+ *
+ * ⛔ AND THE INDEPENDENT JAVA IMPLEMENTATION HAD THE SAME HOLE. An early report
+ * said it refused this operation; checked, it did not — `Cip68.LABEL_REFERENCE`
+ * existed and nothing on its transfer or seize path called it. Two
+ * implementations lost the same data in two languages. That is the useful fact,
+ * because it says the defect was invisible to the way BOTH were tested rather
+ * than to one team's diligence.
  *
  * ⛔ WHAT THE FOUR CONTROLS ARE FOR, and why the refusals alone would be a
  * worse test than none. A guard that refuses too much converts a working
@@ -146,7 +151,11 @@ const workingUtxos = (unit, datum) => ({
 // ---------------------------------------------------------------------------
 
 test("DEFECT — transfer REFUSES an input carrying a CIP-68 metadata datum instead of erasing it", async () => {
-  const result = await run(fes, "transfer", transferParams(REF_NAME), workingUtxos(REF_UNIT, CIP68_DATUM));
+  // ⚠ DRIVEN WITH THE (333) NAME ON PURPOSE, so this exercises the DATUM guard
+  // and not the label one. With a (100) name the label refusal fires first and
+  // this test would pass while saying nothing about datum loss — the two guards
+  // have to be separable or neither is really tested.
+  const result = await run(fes, "transfer", transferParams(USER_NAME), workingUtxos(USER_UNIT, CIP68_DATUM));
 
   assert.ok(result.error instanceof Error, "the transfer must be refused");
   assert.ok(!(result.error instanceof HarnessStop), "it built an output instead of refusing — the defect is back");
@@ -160,7 +169,7 @@ test("DEFECT — transfer REFUSES an input carrying a CIP-68 metadata datum inst
 });
 
 test("DEFECT — transfer's refusal precedes every chain read after selection", async () => {
-  const result = await run(fes, "transfer", transferParams(REF_NAME), workingUtxos(REF_UNIT, CIP68_DATUM));
+  const result = await run(fes, "transfer", transferParams(USER_NAME), workingUtxos(USER_UNIT, CIP68_DATUM));
   assert.deepEqual(
     result.getUtxos,
     [plb(HOLDER)],
@@ -169,6 +178,9 @@ test("DEFECT — transfer's refusal precedes every chain read after selection", 
 });
 
 test("DEFECT — seize REFUSES taking a (100) reference token out of the UTxO holding its metadata", async () => {
+  // The devnet-measured case, now caught by the LABEL rather than by the datum:
+  // seize keeps the input's datum on output 1, so what breaks here is the LINK
+  // between the metadata and the asset, and the asset is what the label names.
   const result = await run(fes, "seize", seizeParams(REF_NAME), {
     ...REGISTRY_UTXOS,
     [plb(HOLDER)]: [senderUtxo(REF_UNIT, CIP68_DATUM)],
@@ -176,10 +188,10 @@ test("DEFECT — seize REFUSES taking a (100) reference token out of the UTxO ho
 
   assert.ok(result.error instanceof Error, "the seizure must be refused");
   assert.ok(!(result.error instanceof HarnessStop), "it built an output instead of refusing");
-  assert.equal(result.payTo.length, 0, "nothing may be paid once the datum loss is detected");
+  assert.equal(result.payTo.length, 0, "nothing may be paid once the reference token is recognised");
   assert.match(result.error.message, /freeze-and-seize\.seize/, "the refusal names the OPERATION");
-  assert.match(result.error.message, /INLINE DATUM/);
-  assert.ok(result.error.message.includes(CIP68_HEX), "the refusal prints the datum it is protecting");
+  assert.match(result.error.message, /CIP-67 label 100/, "and why it matched");
+  assert.match(result.error.message, /output 0/, "and which output would have carried it away");
 });
 
 // ---------------------------------------------------------------------------
@@ -198,13 +210,44 @@ test("CONTROL 2 — transfer of an input with NO datum at all still builds", asy
   assert.deepEqual(result.payTo, [plb(RECIPIENT)]);
 });
 
-test("CONTROL 3 — seize of a (100) token whose UTxO carries NO datum still builds", async () => {
-  const result = await run(fes, "seize", seizeParams(REF_NAME), {
-    ...REGISTRY_UTXOS,
-    [plb(HOLDER)]: [senderUtxo(REF_UNIT, undefined)],
-  });
-  assert.ok(result.error instanceof HarnessStop, `there is no metadata left to lose; got: ${result.error?.message}`);
-  assert.deepEqual(result.payTo, [plb(DESTINATION)], "output 0 is the destination's");
+// ---------------------------------------------------------------------------
+// The case a datum check LETS PAST — keyed on the label instead
+// ---------------------------------------------------------------------------
+
+/**
+ * ⛔ THIS WAS A CONTROL ASSERTING THE OPPOSITE, AND IT WAS WRONG. It read
+ * "seize of a (100) token whose UTxO carries NO datum still builds — there is
+ * no metadata left to lose", which is true about the DATUM and misses the
+ * asset: moving the canonical reference NFT puts it at an address the issuer
+ * does not control, and nothing afterwards restores either the metadata or the
+ * custody. The independent Java implementation keys its own refusal on the
+ * CIP-67 LABEL for exactly this reason, and keying on the label also removes a
+ * chain read and any race against an indexer. Both guards now stand: the label
+ * one closes this case, the datum one remains the broader net.
+ */
+test("the (100) token is refused on its LABEL even when its UTxO carries NO datum", async () => {
+  for (const [op, params, utxos] of [
+    ["transfer", transferParams(REF_NAME), workingUtxos(REF_UNIT, undefined)],
+    ["seize", seizeParams(REF_NAME), { ...REGISTRY_UTXOS, [plb(HOLDER)]: [senderUtxo(REF_UNIT, undefined)] }],
+  ]) {
+    const result = await run(fes, op, params, utxos);
+    assert.ok(result.error instanceof Error, `${op}: the reference token must not move`);
+    assert.ok(!(result.error instanceof HarnessStop), `${op}: it built an output for the reference token`);
+    assert.equal(result.payTo.length, 0, `${op}: nothing may be paid`);
+    assert.match(result.error.message, /CIP-67 label 100/, `${op}: the refusal names WHY it matched`);
+    assert.match(result.error.message, /REFERENCE TOKEN/, `${op}: and what the asset is`);
+    assert.match(result.error.message, /does not control/, `${op}: and the custody consequence, not just the datum one`);
+    assert.match(result.error.message, /\(333\)/, `${op}: and the remedy`);
+  }
+});
+
+test("CONTROL 3 — the (333) USER token is NOT refused, though it is labelled too", async () => {
+  // ⛔ THE WIDENING THIS FORBIDS. A guard keyed on "has a CIP-67 label" rather
+  // than "has label 100" would refuse every CIP-68 transfer — a worse defect
+  // than the one being fixed, and one that passes every assertion above.
+  const result = await run(fes, "transfer", transferParams(USER_NAME), workingUtxos(USER_UNIT, voidData()));
+  assert.ok(result.error instanceof HarnessStop, `a labelled USER token must still move; got: ${result.error?.message}`);
+  assert.deepEqual(result.payTo, [plb(RECIPIENT)]);
 });
 
 test("CONTROL 4 — seize of a (333) token OUT OF the metadata UTxO is ALLOWED: seize carries the datum to output 1", async () => {
