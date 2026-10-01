@@ -246,6 +246,25 @@ The FES chain (`src/substandards/freeze-and-seize/scripts.ts`) mirrors this shap
   directory and updating every explicit path.
 - **`npm audit` reports 3 vulnerabilities (1 moderate, 2 high)** in the dev/transitive tree as
   of 2026-08-14. Not triaged. Not a build blocker.
+- **`npm test` does not clean `dist/`, and every test imports from `dist/`.** `tsc` never removes
+  orphaned output, so a deleted or renamed source leaves a working `.js` behind and the test
+  importing it stays green forever. Verified first-hand 2026-10-01 (a probe module survived its own
+  deletion and a test passed against it). CI builds from a fresh `npm ci`, so a ghost cannot *ship*
+  — the exposure is your belief about a local green. **Run `npm run clean && npm test` before
+  claiming a release is verified.**
+- **The devnet harness does NOT persist its deployment record, and `deployments/devnet/` was empty
+  after a full matrix run.** `test/harness/bootstrap.ts` assembles `DeploymentParams` in memory and
+  never calls `saveInstance`, so the record dies with the process while its seed UTxOs stay spent.
+  A devnet run whose deployment anyone else will consume must save it — `saveInstance("devnet",
+  <name>, deployment)` from `test/harness/instances.mjs`.
+  ⚑ **It IS recoverable, and the technique is worth knowing because it generalises.** `planBootstrap`
+  is pure, so each unknown input can be identified by matching what it *produces* against what the
+  chain *serves*: the PLB hash depends only on `seeds.protocolParams` and the nonce, so brute-forcing
+  the genesis transactions' inputs pins it; the registry address pins `seeds.issuance`; the multisig
+  genesis has a single input. Then `assertDeploymentScripts` re-derives all ten hashes and refuses a
+  reconstruction that merely looks right. Done 2026-10-01 for bootstrap `49c3328d…` →
+  `deployments/devnet/matrix-49c3328d.json` (untracked). Cost: minutes, not the session the
+  `instances.mjs` header warns it cost in 2026-08.
 - Two lockfiles exist (root and `examples/`); they are independent.
 
 ## Factory state
