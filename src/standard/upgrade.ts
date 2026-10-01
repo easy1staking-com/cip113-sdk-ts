@@ -81,10 +81,15 @@ import {
   decodeMultisigScript,
   decodeProtocolParams,
   getInlineDatum,
+  minUtxoAtLeast,
   multisigScriptDatum,
   outputAssets,
+  protocolParamsDatum,
+  protocolParamsRedeemer,
   scriptAddress,
   voidData,
+  Credential,
+  type ProtocolParamsActVariant,
 } from "../core/evo-utils.js";
 import { createStandardScripts } from "./scripts.js";
 import type { BootstrapBuildContext } from "./bootstrap.js";
@@ -635,3 +640,477 @@ export async function buildRotateMultisigTx(params: RotateMultisigTxParams): Pro
 }
 
 const bigintReplacer = (_k: string, v: unknown) => (typeof v === "bigint" ? `${v}` : v);
+
+// ---------------------------------------------------------------------------
+// Operations 2 and 3 — the three `protocol_params` spend arms
+// ---------------------------------------------------------------------------
+
+/**
+ * How a transaction satisfies the credential that must authorise a
+ * `protocol_params` spend.
+ *
+ * ⛔ THIS SHAPE IS WHAT MAKES A MULTISIG → MULTISIG HANDOVER POSSIBLE, and its
+ * absence is why no such handover has ever been executed. The harness's router
+ * refuses any script authority that is not *this deployment's* `upgradeMultisig`
+ * by name, because it reconstructs the script body and config UTxO from
+ * `DeploymentParams`. A nominee authority has a different hash, a different
+ * seed, a different config UTxO and a different body — exactly the case that
+ * guard rejects. So the only handover the harness can perform is multisig → KEY.
+ *
+ * ⇒ Here the caller supplies the credential, its body and its config UTxO.
+ * Nothing is reconstructed, nothing is compared against the deployment, and a
+ * promotion can therefore be authorised by an authority the deployment has
+ * never heard of — which is precisely what a promotion is.
+ */
+export type UpgradeAuthorisation =
+  | {
+      readonly kind: "key";
+      /**
+       * The key credential's hash. A key withdrawal carries no script and so
+       * needs no witness and no redeemer; the entry's PRESENCE is the
+       * authorisation.
+       */
+      readonly keyHash: HexString;
+    }
+  | {
+      readonly kind: "script";
+      /** The script credential's hash. Must equal the credential the datum names. */
+      readonly scriptHash: ScriptHash;
+      /** The script body, attached as the withdrawal's witness. */
+      readonly compiledCode: HexString;
+      /**
+       * The UTxO whose datum this script reads to decide, supplied as a
+       * REFERENCE input.
+       *
+       * ⛔ A REFERENCE INPUT, NEVER A SPENT ONE. Upstream is explicit: the
+       * config UTxO cannot be spent and referenced in one transaction — the
+       * ledger's `ConwayUtxoBabbageNonDisjointRefInputs` rule forbids it — which
+       * is why a signer rotation and a protocol upgrade are always two
+       * transactions.
+       */
+      readonly configUtxo: UTxO;
+      /**
+       * Key hashes to name as `required_signers`.
+       *
+       * ⚠ A WALLET THAT MERELY SIGNS IS NOT ENOUGH. `satisfied` on a
+       * `Signature` leaf reads `extra_signatories`, which is the transaction's
+       * `required_signers` field, so the hash must be named explicitly.
+       */
+      readonly signerKeyHashes: readonly HexString[];
+    };
+
+/** Common inputs to every `protocol_params` spend. */
+export interface ParamsSpendTxParams extends BootstrapBuildContext {
+  readonly blueprint: PlutusBlueprint;
+  readonly deployment: DeploymentParams;
+  /**
+   * The params UTxO, as {@link locateProtocolParams} found it.
+   *
+   * ⚠ NOT `deployment.protocolParams.utxo` — every upgrade moves it.
+   */
+  readonly paramsUtxo: UTxO;
+  /** Who authorises, and how. See {@link UpgradeAuthorisation}. */
+  readonly authorisation: UpgradeAuthorisation;
+}
+
+const credKey = (c: { type: string; hash: string }): string =>
+  `${c.type}:${c.hash.toLowerCase()}`;
+
+function sameCred(
+  a: { type: string; hash: string } | null,
+  b: { type: string; hash: string } | null
+): boolean {
+  if (a === null || b === null) return a === b;
+  return credKey(a) === credKey(b);
+}
+
+const renderCred = (c: { type: string; hash: string } | null): string =>
+  c === null ? "None" : `${c.type}(${c.hash})`;
+
+/** Every credential in the datum must be a 28-byte hash, or upgrades brick forever. */
+function assertCredentialsWellFormed(p: ProtocolParamsData, where: string): void {
+  const fields: Array<[string, { type: string; hash: string } | null]> = [
+    ["plgCred", p.plgCred],
+    ["issuanceLogicCred", p.issuanceLogicCred],
+    ["transferCred", p.transferCred],
+    ["thirdPartyCred", p.thirdPartyCred],
+    ["upgradeCred", p.upgradeCred],
+    ["pendingUpgradeCred", p.pendingUpgradeCred],
+  ];
+  for (const [name, cred] of fields) {
+    if (cred === null || cred === undefined) continue;
+    if (typeof cred.hash !== "string" || !/^[0-9a-fA-F]{56}$/.test(cred.hash)) {
+      throw new Error(
+        `${where}: the new params datum's ${name} is not a 28-byte hash ` +
+          `(${JSON.stringify(cred.hash)}). ⛔ THIS IS THE ONE-WAY BRICK. A reward account is a ` +
+          `header byte plus a 28-byte hash, so a wrong-length credential can never appear in ` +
+          `tx.withdrawals — and every future ProtocolUpgrade, NominateAuthority and ` +
+          `PromoteAuthority is authorised by a withdrawal. Writing one ends the protocol's ` +
+          `upgradability permanently, with no repair path at any timescale. ` +
+          `${"`params_well_formed`"} refuses it on chain; this refuses it before a fee is paid.`
+      );
+    }
+  }
+}
+
+/**
+ * Build any of the three `protocol_params` spend arms.
+ *
+ * Shared by the three exported entry points so the redeemer, the value rails
+ * and the authorisation wiring have ONE implementation. The arm-specific rules
+ * are applied by the caller before this runs.
+ */
+async function buildParamsSpend(
+  params: ParamsSpendTxParams,
+  act: ProtocolParamsActVariant,
+  nextParams: ProtocolParamsData,
+  label: string,
+  extraMetadata: Record<string, unknown>
+): Promise<UnsignedTx> {
+  const { blueprint, deployment, paramsUtxo, authorisation } = params;
+
+  if (!blueprint || typeof blueprint !== "object") {
+    throw new Error(`${label}: blueprint is required — the protocol_params body is attached from it.`);
+  }
+  if (!paramsUtxo || typeof paramsUtxo !== "object" || paramsUtxo.transactionId === undefined) {
+    throw new Error(
+      `${label}: paramsUtxo is required — the UTxO holding the params NFT, as ` +
+        `locateProtocolParams() found it. Do not pass deployment.protocolParams.utxo: every ` +
+        `upgrade moves that coordinate.`
+    );
+  }
+  if (unitsOfPolicy(paramsUtxo, deployment.protocolParams.policyId).length === 0) {
+    throw new Error(
+      `${label}: the UTxO ${refOf(paramsUtxo).txHash}#${refOf(paramsUtxo).outputIndex} carries no ` +
+        `asset of policy ${deployment.protocolParams.policyId}, so it is not this deployment's ` +
+        `params UTxO. Spending it upgrades nothing.`
+    );
+  }
+
+  assertCredentialsWellFormed(nextParams, label);
+
+  const networkId = params.client.chain.id;
+  const scripts = createStandardScripts(blueprint);
+  const paramsScript = scripts.protocolParams(deployment.protocolParams.txInput);
+  if (paramsScript.hash.toLowerCase() !== deployment.protocolParams.policyId.toLowerCase()) {
+    throw new Error(
+      `${label}: the blueprint and seed in this deployment parameterise protocol_params to ` +
+        `${paramsScript.hash}, but the deployment records ${deployment.protocolParams.policyId}. ` +
+        `One of the two belongs to a different protocol instance.`
+    );
+  }
+
+  const nextDatum = protocolParamsDatum(nextParams);
+  const address = protocolParamsAddress(networkId, deployment);
+
+  let tx = params.client.newTx();
+
+  // ⛔ THE REDEEMER DECLARES THE ACT, through exactly one call site for all
+  // three arms. `ProtocolUpgrade` encodes as `Constr(0, [])`, byte-identical to
+  // the `voidData()` it replaced, so a defaulted or duplicated call site could
+  // emit the old bytes forever with no decoder anywhere — on chain or off —
+  // able to tell. Arms 1 and 2 cannot be represented by `voidData()`, so
+  // routing all three through here is what proves the call site is live.
+  tx = tx.collectFrom({ inputs: [paramsUtxo], redeemer: protocolParamsRedeemer(act) });
+  tx = tx.attachScript({ script: buildEvoScript(paramsScript.compiledCode) });
+
+  // ⛔ THE ADA LEG IS RE-FLOORED, AND THE FLOOR ARGUMENT IS LOAD-BEARING.
+  // min-UTxO scales with serialised output size, and `pendingUpgradeCred` is
+  // the one field whose size changes — `None` is 3 bytes of CBOR,
+  // `Some(Credential)` about 40. So a NOMINATION widens this output past the
+  // floor the genesis funded it to.
+  //
+  // MEASURED on devnet 2026-09-10, before the re-flooring existed: carrying the
+  // input's 2,000,000 lovelace through a nomination was rejected at SUBMISSION
+  // with ledger code 3125, `minimumRequiredValue 2,012,770`. ⚠ Evolution does
+  // NOT rescue an under-funded explicit `payToAddress` — its min-UTxO arithmetic
+  // applies to CHANGE outputs only — and the ledger says "insufficient Ada",
+  // never "your datum grew". Nothing offline notices.
+  //
+  // ⛔ AND `minUtxoAtLeast` TAKES THE CURRENT LOVELACE AS ITS FLOOR, so this
+  // only ever RAISES. Audit r1 M11 replaced that floor with `0n` and the whole
+  // suite stayed green: the measured consequence was a promotion — which
+  // shrinks the datum back to `None` — re-setting this output from 2,012,770
+  // down to 1,861,920, draining 150,850 lovelace per promotion into change,
+  // with the chain permitting it because lovelace is unconstrained relative to
+  // the input. The floor is the only thing stopping it.
+  const carried = paramsUtxo.assets;
+  const coinsPerUtxoByte = (await params.client.getProtocolParameters()).coinsPerUtxoByte;
+  const outAssets = EvoAssets.withLovelace(
+    carried,
+    minUtxoAtLeast(EvoAssets.lovelaceOf(carried), {
+      address,
+      assets: carried,
+      datum: nextDatum,
+      coinsPerUtxoByte,
+    })
+  );
+
+  tx = tx.payToAddress({
+    address: EvoAddress.fromBech32(address),
+    assets: outAssets,
+    datum: new InlineDatum.InlineDatum({ data: nextDatum }),
+  });
+
+  // ⛔⛔ EXACTLY ONE WITHDRAWAL, and for a promotion that is not a style point.
+  // Upstream's promote rail is `pairs.has_key(withdrawals, nominee)` — an
+  // EXISTENCE check that never mentions the sitting authority — so a promotion
+  // carrying BOTH withdrawals is ACCEPTED on chain. The property "a promotion
+  // does not need the outgoing authority" is therefore unenforceable by any
+  // on-chain negative, and the only guard is that there is one `withdraw` call
+  // here and the built transaction's withdrawal set is returned in `metadata`
+  // for a caller to assert on.
+  const withdrewFrom: Array<{ type: string; hash: string }> = [];
+  if (authorisation.kind === "script") {
+    // A script withdraw-0 needs FOUR things, and three are invisible offline:
+    //   1. the withdrawal entry        -> withdraw() below
+    //   2. a SCRIPT WITNESS            -> attachScript below
+    //   3. a REGISTERED stake credential -> the caller's job, before this tx
+    //   4. the CONFIG UTxO as a REFERENCE INPUT -> readFrom below
+    // (4) is what a plain script withdraw-0 does not need: upgrade_multisig's
+    // withdraw handler finds its tree among `self.reference_inputs` and can do
+    // nothing without it. Omitting (3) reports as code 3141, "rewards
+    // withdrawals must consume rewards in full", which reads as a balance
+    // problem and means an UNREGISTERED credential.
+    if (!authorisation.configUtxo || authorisation.configUtxo.transactionId === undefined) {
+      throw new Error(
+        `${label}: a script authorisation requires configUtxo — the UTxO whose datum the ` +
+          `authorising script reads. upgrade_multisig.withdraw finds its tree among the ` +
+          `reference inputs and can decide nothing without it, so a withdrawal built without ` +
+          `it fails on chain with an empty trace list.`
+      );
+    }
+    if (!/^[0-9a-fA-F]+$/.test(authorisation.compiledCode ?? "")) {
+      throw new Error(
+        `${label}: a script authorisation requires compiledCode — the authorising script's ` +
+          `body, attached as the withdrawal's witness. Without it the ledger answers ` +
+          `"An associated script witness is missing" on purpose=withdraw, which names the ` +
+          `shape but not the script.`
+      );
+    }
+    tx = tx.withdraw({
+      stakeCredential: Credential.makeScriptHash(Bytes.fromHex(authorisation.scriptHash)),
+      amount: 0n,
+      // The withdraw handler ignores its redeemer; a script-witnessed
+      // withdrawal still requires one to be present.
+      redeemer: voidData(),
+    });
+    tx = tx.attachScript({ script: buildEvoScript(authorisation.compiledCode) });
+    tx = tx.readFrom({ referenceInputs: [authorisation.configUtxo] });
+    for (const keyHash of authorisation.signerKeyHashes ?? []) {
+      tx = tx.addSigner({ keyHash: KeyHash.fromHex(keyHash) });
+    }
+    withdrewFrom.push({ type: "script", hash: authorisation.scriptHash });
+  } else {
+    tx = tx.withdraw({
+      stakeCredential: Credential.makeKeyHash(Bytes.fromHex(authorisation.keyHash)),
+      amount: 0n,
+    });
+    tx = tx.addSigner({ keyHash: KeyHash.fromHex(authorisation.keyHash) });
+    withdrewFrom.push({ type: "key", hash: authorisation.keyHash });
+  }
+
+  return finishUnsignedTx(tx, params, label, {
+    act,
+    paramsUtxoSpent: refOf(paramsUtxo),
+    withdrewFrom,
+    nextParams,
+    ...extraMetadata,
+  });
+}
+
+/** Which credential each arm requires, and refuse a mismatch by name. */
+function assertAuthorisationMatches(
+  authorisation: UpgradeAuthorisation,
+  required: { type: string; hash: string },
+  label: string,
+  role: string
+): void {
+  const offered =
+    authorisation.kind === "script"
+      ? { type: "script", hash: authorisation.scriptHash }
+      : { type: "key", hash: authorisation.keyHash };
+  if (sameCred(offered, required)) return;
+  throw new Error(
+    `${label}: this arm is authorised by ${role}, which the on-chain datum names as ` +
+      `${renderCred(required)} — but the authorisation you supplied is ${renderCred(offered)}.\n` +
+      `⚠ THE WRONG CHOICE IS SILENT ON THE BUILD SIDE: the validator does not refuse an extra ` +
+      `withdrawal for being extra, it simply does not read it, so the transaction is refused for ` +
+      `MISSING the one the rule names — and a reader who assumed the arms are symmetric sees a ` +
+      `bare script failure rather than their own mistake. ` +
+      `ProtocolUpgrade and NominateAuthority want the SITTING authority; PromoteAuthority wants ` +
+      `the STANDING NOMINEE and the sitting authority does not appear in it at all.`
+  );
+}
+
+export interface ProtocolUpgradeTxParams extends ParamsSpendTxParams {
+  /**
+   * The current params in, the desired params out.
+   *
+   * ⚠ BOTH AUTHORITY FIELDS ARE FROZEN BY THIS ARM. Moving `upgradeCred` or
+   * `pendingUpgradeCred` here is refused below, because the validator refuses
+   * it on chain: an authority handover can never ride inside a transaction that
+   * looks like a parameter change.
+   */
+  readonly change: (current: ProtocolParamsData) => ProtocolParamsData;
+}
+
+/**
+ * Operation 2 — rewrite the live wiring in place, under `ProtocolUpgrade`.
+ *
+ * Authorised by the SITTING authority's withdraw-0. Everything except the two
+ * authority fields may change, subject to every credential being a well-formed
+ * 28-byte hash.
+ *
+ * ⚑ THE NEW CREDENTIALS NEED NOT BE DEPLOYED OR REGISTERED. `params_well_formed`
+ * length-checks them and nothing more, which is what makes a deliberate break
+ * (pointing the protocol at credentials that do not exist) possible — and
+ * recoverable, because the revert is authorised by `upgradeCred`, which this
+ * arm freezes and which no delegate credential influences.
+ */
+export async function buildProtocolUpgradeTx(params: ProtocolUpgradeTxParams): Promise<UnsignedTx> {
+  const label = "protocol-upgrade";
+  const current = requireParamsDatum(params.paramsUtxo, label);
+  if (typeof params.change !== "function") {
+    throw new Error(`${label}: change is required — a function from the current params to the new ones.`);
+  }
+  const next = params.change(current);
+  if (!next || typeof next !== "object") {
+    throw new Error(`${label}: change() must return a params object; got ${JSON.stringify(next)}.`);
+  }
+
+  if (!sameCred(next.upgradeCred, current.upgradeCred)) {
+    throw new Error(
+      `${label}: this arm FREEZES upgradeCred, and your change moved it from ` +
+        `${renderCred(current.upgradeCred)} to ${renderCred(next.upgradeCred)}. ` +
+        `An authority handover can never ride inside a parameter change — that separation is ` +
+        `the reason the three arms exist. Changing the authority is two transactions: ` +
+        `buildNominateAuthorityTx then buildPromoteAuthorityTx, the second authorised by the ` +
+        `nominee itself.`
+    );
+  }
+  if (!sameCred(next.pendingUpgradeCred, current.pendingUpgradeCred)) {
+    throw new Error(
+      `${label}: this arm FREEZES pendingUpgradeCred, and your change moved it from ` +
+        `${renderCred(current.pendingUpgradeCred)} to ${renderCred(next.pendingUpgradeCred)}. ` +
+        `Use buildNominateAuthorityTx to write a nomination.`
+    );
+  }
+
+  assertAuthorisationMatches(params.authorisation, current.upgradeCred, label, "the SITTING authority");
+  return buildParamsSpend(params, "PROTOCOL_UPGRADE", next, label, {
+    previousParams: current,
+  });
+}
+
+export interface NominateAuthorityTxParams extends ParamsSpendTxParams {
+  /**
+   * The successor credential to write into `pendingUpgradeCred`, or `null` to
+   * withdraw a standing nomination.
+   *
+   * ⚑ NO LIVENESS CHECK, by ruling (Giovanni, 2026-10-01). A nomination to a
+   * credential that is not yet registered is legal and recoverable — the
+   * promotion simply cannot run until it is. Only a MALFORMED credential is
+   * fatal, and that is refused.
+   */
+  readonly nominee: { readonly type: "key" | "script"; readonly hash: HexString } | null;
+}
+
+/**
+ * Operation 3, phase 1 — write a nomination, under `NominateAuthority`.
+ *
+ * Authorised by the SITTING authority. The arm freezes everything except
+ * `pendingUpgradeCred`, so this cannot smuggle a parameter change.
+ *
+ * ⚑ REVERSIBLE. A nomination is an ordinary upgrade of one field; writing
+ * `null` withdraws it. Only the promotion is one-way.
+ */
+export async function buildNominateAuthorityTx(params: NominateAuthorityTxParams): Promise<UnsignedTx> {
+  const label = "nominate-authority";
+  const current = requireParamsDatum(params.paramsUtxo, label);
+  if (params.nominee !== null && (!params.nominee || typeof params.nominee !== "object")) {
+    throw new Error(
+      `${label}: nominee is required — a credential to nominate, or an explicit null to ` +
+        `withdraw a standing nomination. There is no default: who may take over a protocol is ` +
+        `not a value this SDK will choose.`
+    );
+  }
+  const next: ProtocolParamsData = { ...current, pendingUpgradeCred: params.nominee };
+
+  if (sameCred(next.pendingUpgradeCred, current.pendingUpgradeCred)) {
+    throw new Error(
+      `${label}: the nomination already reads ${renderCred(current.pendingUpgradeCred)} on chain, ` +
+        `so this transaction would spend the params UTxO, pay a fee and change nothing.`
+    );
+  }
+
+  assertAuthorisationMatches(params.authorisation, current.upgradeCred, label, "the SITTING authority");
+  return buildParamsSpend(params, "NOMINATE_AUTHORITY", next, label, {
+    nominee: params.nominee,
+    previousNomination: current.pendingUpgradeCred,
+  });
+}
+
+/**
+ * Operation 3, phase 2 — promote the standing nominee, under
+ * `PromoteAuthority`.
+ *
+ * ⛔ AUTHORISED BY THE NOMINEE'S OWN WITHDRAW-0, and the sitting authority does
+ * not appear at all. This is the only transaction shape that may move
+ * `upgradeCred`, and the evidence it demands is that the incoming authority
+ * EXISTS, RUNS and CONSENTS — so a typo, or the hash of a script nobody
+ * deployed, can never take over.
+ *
+ * ⚠ THE NOMINEE'S STAKE CREDENTIAL MUST ALREADY BE REGISTERED, in a STRICTLY
+ * EARLIER transaction. The ledger applies withdrawals against reward-account
+ * state BEFORE it applies certificates, so registering and withdrawing in one
+ * transaction is not one transaction, it is two. Omitting the registration
+ * reports as code 3141, which reads as a balance problem.
+ *
+ * ⚑ THE NEW DATUM IS COMPUTED, NOT SUPPLIED. The arm permits exactly
+ * `{...old, upgradeCred: nominee, pendingUpgradeCred: None}`, so there is
+ * nothing for a caller to decide and a `change` hook here could only be used to
+ * build a transaction the chain refuses.
+ */
+export async function buildPromoteAuthorityTx(params: ParamsSpendTxParams): Promise<UnsignedTx> {
+  const label = "promote-authority";
+  const current = requireParamsDatum(params.paramsUtxo, label);
+  const nominee = current.pendingUpgradeCred;
+  if (nominee === null || nominee === undefined) {
+    throw new Error(
+      `${label}: there is NO STANDING NOMINATION in the params datum, so there is nothing to ` +
+        `promote. ${"`promote_authority`"} begins ` +
+        `${"`expect Some(nominee) = old.pending_upgrade_cred`"}, so this transaction cannot ` +
+        `validate. Write a nomination first with buildNominateAuthorityTx — authorised by the ` +
+        `sitting authority ${renderCred(current.upgradeCred)} — and promote it in a later ` +
+        `transaction.`
+    );
+  }
+
+  const next: ProtocolParamsData = { ...current, upgradeCred: nominee, pendingUpgradeCred: null };
+  assertAuthorisationMatches(params.authorisation, nominee, label, "the STANDING NOMINEE");
+
+  return buildParamsSpend(params, "PROMOTE_AUTHORITY", next, label, {
+    promoted: nominee,
+    previousAuthority: current.upgradeCred,
+  });
+}
+
+/** The current params, read off the UTxO being spent — the only source of truth. */
+function requireParamsDatum(paramsUtxo: UTxO | undefined, label: string): ProtocolParamsData {
+  if (!paramsUtxo || typeof paramsUtxo !== "object" || paramsUtxo.transactionId === undefined) {
+    throw new Error(
+      `${label}: paramsUtxo is required — the UTxO holding the params NFT, as ` +
+        `locateProtocolParams() found it.`
+    );
+  }
+  const datum = getInlineDatum(paramsUtxo);
+  if (!datum) {
+    throw new Error(
+      `${label}: the params UTxO carries no inline datum, so the current wiring cannot be read. ` +
+        `Every arm's rules are evaluated against the datum being SPENT — the state decides who ` +
+        `may spend it — so there is nothing to build from.`
+    );
+  }
+  return decodeProtocolParams(datum);
+}
