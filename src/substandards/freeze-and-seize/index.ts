@@ -83,10 +83,16 @@ import {
   buildCIP68FTDatum,
   inlineDatumBytes,
   assertInlineDatumWithinBound,
+  assertNoDatumLoss,
+  assertNotReferenceToken,
   minUtxoAtLeast,
   ceilToWholeAda,
   minUtxoForOutput,
 } from "../../core/evo-utils.js";
+import {
+  registryNodeMissingError,
+  coveringRegistryNodeMissingError,
+} from "../registry-guard.js";
 import {
   baseSpendRedeemer,
   transferRedeemer,
@@ -546,7 +552,14 @@ export function freezeAndSeizeSubstandard(config: {
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const coveringNodeUtxo = findCoveringNode(registryUtxos, scripts.tokenPolicyId);
-      if (!coveringNodeUtxo) throw new Error("Could not find covering registry node for insertion");
+      if (!coveringNodeUtxo) {
+        throw coveringRegistryNodeMissingError({
+          operation: "freeze-and-seize.register",
+          tokenPolicyId: scripts.tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }
 
       const coveringDatum = getInlineDatum(coveringNodeUtxo);
       const coveringKey = extractConstrBytesField(coveringDatum, 0) ?? "";
@@ -846,9 +859,14 @@ export function freezeAndSeizeSubstandard(config: {
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
-
-      // 2. Find the two alpha.4 protocol reference inputs. The params input is
+      if (!registryUtxo) {
+        throw registryNodeMissingError({
+          operation: "freeze-and-seize.mint",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }// 2. Find the two alpha.4 protocol reference inputs. The params input is
       // NEW here: with_protocol_params_fields begins with a hard expect_at,
       // and S-7's open mint-vs-burn inconsistency is answered at this site.
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
@@ -972,8 +990,14 @@ export function freezeAndSeizeSubstandard(config: {
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
-      const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo(client, ctx.deployment);
+      if (!registryUtxo) {
+        throw registryNodeMissingError({
+          operation: "freeze-and-seize.burn",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo(client, ctx.deployment);
       const refUtxos = [protocolParamsUtxo, registryUtxo, issuanceLogicRefUtxo];
 
       // 0.5.x third-party route. `ThirdPartyAct` was DELETED by #110: the
@@ -1088,9 +1112,13 @@ export function freezeAndSeizeSubstandard(config: {
         assets: outputAssets(utxoLovelace(utxoToBurn), remainingTokens.size > 0 ? remainingTokens : undefined),
         // The PAIRED continuation: `third_party` requires it to preserve the
         // input's ADDRESS, DATUM and REFERENCE SCRIPT exactly. Carry the input's
-        // own datum rather than a fresh void one — they happen to be equal today
-        // because every programmable output here is void-datumed, and that is a
-        // coincidence rather than a guarantee.
+        // own datum rather than a fresh void one.
+        // ⛔ AND THE TWO ARE NOT EQUAL — an earlier version of this comment said
+        // they "happen to be equal today because every programmable output here
+        // is void-datumed". FALSE, and measured false: `register` mints the
+        // CIP-68 (100) reference token to a programmable-logic-base output
+        // carrying the METADATA datum. `tokenDatum` there would erase it. The
+        // `??` is load-bearing, not defensive.
         datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToBurn) ?? tokenDatum }),
       });
       tx = tx.mintAssets({ assets: burnAssets, redeemer: plan.issuanceRedeemer });
@@ -1140,13 +1168,41 @@ export function freezeAndSeizeSubstandard(config: {
       const { selected, totalTokenAmount } = selectUtxosForAmount(tokenUtxos, unit, quantity);
       const returningAmount = totalTokenAmount - quantity;
 
+      // ⛔ THE (100) TOKEN IS REFUSED ON ITS LABEL, ahead of the datum check and
+      // regardless of what datum it currently carries — see
+      // assertNotReferenceToken. A reference token whose metadata is ALREADY
+      // gone passes the datum check and still must not move: the canonical
+      // reference NFT would land at an address the issuer does not control.
+      assertNotReferenceToken(
+        assetName,
+        "freeze-and-seize.transfer",
+        "Every token output this transfer creates is built"
+      );
+
+      // BOTH of this operation's token outputs — the recipient's and the
+      // sender's change — are built with `voidData()` below, so a datum on any
+      // selected input is destroyed whichever side the tokens land on.
+      // MEASURED: moving a CIP-68 (100) reference token this way replaced its
+      // metadata datum with `d87980` and the ledger ACCEPTED it. Refused here,
+      // before any further chain read, so the diagnosis costs nothing.
+      assertNoDatumLoss(
+        selected,
+        "freeze-and-seize.transfer",
+        "both of this transfer's token outputs (the recipient's and the sender's change)"
+      );
+
       // 4. Find registry node reference input
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
-
-      // 5. Find protocol params reference input
+      if (!registryUtxo) {
+        throw registryNodeMissingError({
+          operation: "freeze-and-seize.transfer",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }// 5. Find protocol params reference input
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
 
       // 6. Find blacklist non-membership proofs
@@ -1154,11 +1210,50 @@ export function freezeAndSeizeSubstandard(config: {
       const blacklistSpendAddr = scriptAddress(networkId, scripts.blacklistSpend.hash);
       const blacklistUtxos = await client.getUtxos(EvoAddress.fromBech32(blacklistSpendAddr));
 
+      // ⛔ TWO CAUSES, ONE MESSAGE, AND IT NAMED THE WRONG ONE.
+      //
+      // A missing covering node used to raise "Sender X is blacklisted —
+      // transfer denied". That asserts a fact this code has not established.
+      // The FAR likelier cause on a fresh deployment is that the blacklist has
+      // no nodes at all, because `compliance.init()` was never called — and
+      // then nobody is blacklisted, the proof simply does not exist yet.
+      //
+      // ⚠ WHY THIS SURFACES ON TRANSFER SPECIFICALLY, which is what makes the
+      // wrong message expensive: of the seven FES operations only `transfer`
+      // and `freeze` need a non-membership proof. register, mint, burn, seize
+      // and unfreeze do not. So a deployment that skipped the blacklist init
+      // looks entirely healthy — bootstrap, register, issue and a dummy
+      // transfer all pass — and fails first, and only, on the FES transfer,
+      // with a message telling the operator to go looking for a blacklist
+      // entry that does not exist.
+      if (blacklistUtxos.length === 0) {
+        throw new Error(
+          `freeze-and-seize.transfer: THE BLACKLIST HAS NO NODES at ${blacklistSpendAddr}, so ` +
+            `no non-membership proof exists for any sender. THIS IS NOT A BLACKLISTING — the ` +
+            `compliance blacklist has never been initialised for this FES instance.\n` +
+            `Call compliance.init() (initCompliance) once per deployment before any transfer ` +
+            `or freeze: it mints the blacklist origin node, whose (key, next) bounds are what ` +
+            `every later proof brackets against.\n` +
+            `⚠ Only transfer and freeze need this proof — register, mint, burn, seize and ` +
+            `unfreeze do not — which is why a deployment missing the init looks healthy until ` +
+            `the first transfer.`
+        );
+      }
+
       const proofUtxos: EvoUTxO.UTxO[] = [];
       for (const _inputUtxo of selected) {
         const proofUtxo = findBlacklistCoveringNode(blacklistUtxos, senderStakingHash);
         if (!proofUtxo) {
-          throw new Error(`Sender ${senderStakingHash} is blacklisted — transfer denied`);
+          throw new Error(
+            `freeze-and-seize.transfer: no blacklist node BRACKETS the sender's staking hash ` +
+              `${senderStakingHash} (${blacklistUtxos.length} node(s) exist at ` +
+              `${blacklistSpendAddr}).\n` +
+              `A proof needs a node with key < senderStakingHash < next. Either this sender IS ` +
+              `blacklisted — a freeze splits the covering node so nothing brackets them any ` +
+              `more, which is exactly how a block is represented — or the list has a gap that ` +
+              `does not span this hash.\n` +
+              `Check the nodes' (key, next) bounds before concluding which.`
+          );
         }
         if (!proofUtxos.some(p =>
           utxoTxHash(p) === utxoTxHash(proofUtxo) && utxoOutputIndex(p) === utxoOutputIndex(proofUtxo)
@@ -1443,8 +1538,26 @@ export function freezeAndSeizeSubstandard(config: {
 
       const blacklistSpendAddr = scriptAddress(networkId, scripts.blacklistSpend.hash);
       const blacklistUtxos = await client.getUtxos(EvoAddress.fromBech32(blacklistSpendAddr));
+      // Same two causes as `transfer`, and the same fix: an empty list is not a
+      // blacklisting. `freeze`'s old message at least hedged with "may", but it
+      // still sent the reader to the wrong place on a fresh deployment.
+      if (blacklistUtxos.length === 0) {
+        throw new Error(
+          `freeze-and-seize.freeze: THE BLACKLIST HAS NO NODES at ${blacklistSpendAddr}. ` +
+            `THIS IS NOT AN EXISTING BLOCK — the compliance blacklist has never been ` +
+            `initialised for this FES instance. Call compliance.init() (initCompliance) once ` +
+            `per deployment first: freezing works by SPLITTING the node that brackets the ` +
+            `target, and with no origin node there is nothing to split.`
+        );
+      }
       const coveringNode = findBlacklistCoveringNode(blacklistUtxos, targetStakingHash);
-      if (!coveringNode) throw new Error(`Cannot find blacklist covering node for ${targetStakingHash} — may already be blacklisted`);
+      if (!coveringNode)
+        throw new Error(
+          `freeze-and-seize.freeze: no blacklist node BRACKETS ${targetStakingHash} ` +
+            `(${blacklistUtxos.length} node(s) exist). Freezing splits the covering node, so ` +
+            `without one there is nothing to split — which is also what an ALREADY-FROZEN ` +
+            `target looks like. Check the nodes' (key, next) bounds to tell the two apart.`
+        );
 
       const coveringDatum = getInlineDatum(coveringNode);
       const coveringKey = extractConstrBytesField(coveringDatum, 0) ?? "";
@@ -1628,14 +1741,36 @@ export function freezeAndSeizeSubstandard(config: {
       const seizedAmount = utxoUnitQty(utxoToSeize, unit);
       if (seizedAmount <= 0n) throw new Error(`No tokens of ${unit} in UTxO`);
 
+      // ⚠ NARROWER THAN `transfer`'s GUARD, DELIBERATELY, and this is the whole
+      // of it: only the (100) token is refused. Seize writes the seized assets
+      // to output 0 with a void datum but carries the input's own datum onto
+      // output 1, so a datum-carrying input does NOT lose its datum here — the
+      // datum stays behind. What breaks is the LINK: a reference token seized
+      // out of the UTxO holding its metadata leaves that metadata on an output
+      // that no longer holds the token, which is exactly as unresolvable as
+      // erasing it. Every other seizure leaves the datum and the token it
+      // describes together, so it is allowed — and a control asserts that,
+      // because refusing it would block a legitimate seizure while still
+      // passing every assertion about refusals.
+      assertNotReferenceToken(
+        assetName,
+        "freeze-and-seize.seize",
+        "The destination's output (output 0) is built"
+      );
+
       // 2. Find reference inputs
       const protocolParamsUtxo = await findProtocolParamsUtxo(client, networkId, ctx.deployment);
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!registryUtxo) throw new Error(`Registry node not found for ${tokenPolicyId}`);
-
-      // 3. Sort reference inputs
+      if (!registryUtxo) {
+        throw registryNodeMissingError({
+          operation: "freeze-and-seize.seize",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }// 3. Sort reference inputs
       // `third_party`'s script is supplied EXPLICITLY, as a reference input.
       //
       // ⚠ It used to arrive BY ACCIDENT: the bootstrap publishes reference
@@ -1776,9 +1911,13 @@ export function freezeAndSeizeSubstandard(config: {
         assets: outputAssets(utxoLovelace(utxoToSeize), remainingTokens.size > 0 ? remainingTokens : undefined),
         // The PAIRED continuation: `third_party` requires it to preserve the
         // input's ADDRESS, DATUM and REFERENCE SCRIPT exactly. Carry the input's
-        // own datum rather than a fresh void one — they happen to be equal today
-        // because every programmable output here is void-datumed, and that is a
-        // coincidence rather than a guarantee.
+        // own datum rather than a fresh void one.
+        // ⛔ AND THE TWO ARE NOT EQUAL — an earlier version of this comment said
+        // they "happen to be equal today because every programmable output here
+        // is void-datumed". FALSE, and measured false: `register` mints the
+        // CIP-68 (100) reference token to a programmable-logic-base output
+        // carrying the METADATA datum. `tokenDatum` there would erase it. The
+        // `??` is load-bearing, not defensive.
         datum: new InlineDatum.InlineDatum({ data: getInlineDatum(utxoToSeize) ?? tokenDatum }),
       });
 

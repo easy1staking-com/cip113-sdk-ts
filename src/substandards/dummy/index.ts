@@ -96,6 +96,10 @@ import {
   KeyHash,
   InlineDatum,
 } from "../../core/evo-utils.js";
+import {
+  registryNodeMissingError,
+  coveringRegistryNodeMissingError,
+} from "../registry-guard.js";
 
 const DUMMY_VALIDATORS = {
   ISSUE: "transfer.issue.withdraw",
@@ -619,9 +623,14 @@ export function dummySubstandard(config: {
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const node = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!node) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
-
-      const paramsUtxo = await findParamsUtxo();
+      if (!node) {
+        throw registryNodeMissingError({
+          operation: "dummy.mint",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }const paramsUtxo = await findParamsUtxo();
       const issuanceLogicRefUtxo = await findIssuanceLogicRefUtxo();
       // ⛔ ONE ARRAY, TWO USES, DECLARED ONCE. The plan computes `params_idx`
       // and the registry-node proof over this set; `readFrom` supplies this same
@@ -753,9 +762,14 @@ export function dummySubstandard(config: {
       const registryAddr = scriptAddress(networkId, ctx.standardScripts.registry.hash);
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
-      if (!registryUtxo) throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
-
-      const protocolParamsUtxo = await findParamsUtxo();
+      if (!registryUtxo) {
+        throw registryNodeMissingError({
+          operation: "dummy.thirdPartyTransfer",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
+      }const protocolParamsUtxo = await findParamsUtxo();
 
       const refUtxos = [protocolParamsUtxo, registryUtxo];
       const refInputs = refUtxos.map(utxoToTxInput);
@@ -918,7 +932,12 @@ export function dummySubstandard(config: {
       const registryUtxos = await client.getUtxos(EvoAddress.fromBech32(registryAddr));
       const registryUtxo = findRegistryNode(registryUtxos, tokenPolicyId);
       if (!registryUtxo) {
-        throw new Error(`Registry node not found for policy ${tokenPolicyId}`);
+        throw registryNodeMissingError({
+          operation: "dummy.transfer",
+          tokenPolicyId,
+          registryAddress: registryAddr,
+          nodesRead: registryUtxos.length,
+        });
       }
 
       // 5. Get the coordination (protocol params) UTxO
