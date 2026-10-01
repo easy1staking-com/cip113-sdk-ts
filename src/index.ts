@@ -622,7 +622,14 @@ export type {
   Cip171ScriptEntry,
 } from "./core/cip171.js";
 export { addressHexToBech32 } from "./provider/address-utils.js";
-export { assembleSignedTx } from "./provider/tx-utils.js";
+export {
+  assembleSignedTx,
+  // M-of-N assembly — several witnesses onto one transaction, and the COUNT
+  // assertion that stops a silently-unsigned transaction reaching the chain.
+  assembleMultiSignedTx,
+  countVKeyWitnesses,
+  assertVKeyWitnessCount,
+} from "./provider/tx-utils.js";
 export type { FESDeploymentParams } from "./substandards/freeze-and-seize/types.js";
 
 // Re-export Evolution SDK essentials so consumers don't need a direct dependency
