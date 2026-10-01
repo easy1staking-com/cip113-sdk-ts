@@ -131,8 +131,31 @@ export function baseAddress(networkId: number, scriptHash: ScriptHash, userAddre
  */
 export function stakingCredentialHash(address: string): HexString {
   const evoAddr = EvoAddress.fromBech32(address);
-  const ba = BaseAddress.fromHex(EvoAddress.toHex(evoAddr));
-  return Bytes.toHex(ba.stakeCredential.hash);
+  const hex = EvoAddress.toHex(evoAddr);
+  // ⛔ AN ENTERPRISE ADDRESS HAS NO STAKING PART, AND THE RAW FAILURE NAMES A
+  // TYPE RATHER THAN THE PROBLEM.
+  //
+  // MEASURED: `BaseAddress.fromHex` on an enterprise address throws
+  // `ParseError: BaseAddress.FromHex` — three frames inside this module, naming
+  // neither the address, nor the caller, nor the fact that a staking credential
+  // is what was missing. Every CIP-113 programmable address is a BASE address
+  // (script payment credential + the holder's staking credential), and FES
+  // transfer and freeze additionally need that staking hash to bracket against
+  // the blacklist. So "no staking part" is a complete answer to why the
+  // operation cannot proceed, and it is the answer the caller needs.
+  try {
+    const ba = BaseAddress.fromHex(hex);
+    return Bytes.toHex(ba.stakeCredential.hash);
+  } catch {
+    throw new Error(
+      `This address has no staking credential, so no staking hash can be derived from it: ` +
+        `${address}\n` +
+        `CIP-113 derives a programmable address from a SCRIPT payment credential plus the ` +
+        `holder's STAKING credential, and freeze-and-seize brackets that staking hash against ` +
+        `the blacklist. An enterprise address (payment credential only) cannot serve either ` +
+        `purpose. Use a base address — one with a stake part.`
+    );
+  }
 }
 
 /**
@@ -1161,6 +1184,83 @@ export function getInlineDatum(utxo: EvoUTxO.UTxO): Data.Data | undefined {
     return datumOpt.data as Data.Data;
   }
   return undefined;
+}
+
+/**
+ * True when `datum` is the void datum — `Constr(0, [])` — that every
+ * programmable-token output carries by convention.
+ *
+ * ⚠ ABSENT IS NOT VOID, and this returns false for `undefined` on purpose. A
+ * UTxO with no datum at all and a UTxO with an inline `Constr(0, [])` are
+ * different outputs on chain; callers that want to treat both as "nothing to
+ * lose" must say so themselves, as {@link assertNoDatumLoss} does.
+ */
+export function isVoidDatum(datum: Data.Data | undefined | null): boolean {
+  if (datum == null) return false;
+  if (!Data.isConstr(datum)) return false;
+  const constr = datum as unknown as { index: bigint; fields: readonly Data.Data[] };
+  return constr.index === 0n && constr.fields.length === 0;
+}
+
+/**
+ * Refuse to spend a UTxO whose inline datum the operation's own output will not
+ * carry forward.
+ *
+ * ⛔ MEASURED ON DEVNET, 2026-09-30 — THIS IS DATA DESTRUCTION THE LEDGER
+ * ACCEPTS. `freeze-and-seize.transfer` was asked to move a CIP-68 (100)
+ * reference token. It built the transaction without complaint, the ledger
+ * accepted it, and the output's datum was
+ *
+ *   before: d8799fbf446e616d654543656c6c31...ff0101ff   (the CIP-68 metadata)
+ *   after:  d87980                                      (Constr(0, []))
+ *
+ * The metadata was gone from the live UTxO set, and the reference NFT sat at an
+ * address the issuer no longer controlled. Measured twice, identically, on two
+ * independent deployments (txs df4db48f… and 7ee37fd2…).
+ *
+ * ⚠ WHY A REFUSAL AND NOT A CARRY-FORWARD. Carrying the datum onto the new
+ * output is the operation a caller actually wants, and it is NOT what this
+ * does — because whether the on-chain scripts accept a non-void datum on a
+ * transfer output is UNTESTED, and shipping an untested carry-forward would
+ * replace silent data loss with a transaction that fails at submission for
+ * reasons the caller cannot read. A refusal is the part that is provable
+ * offline. Supporting the move properly is a separate, chain-verified change.
+ *
+ * ⚠ AND NOTE WHAT ESCAPES IT: nothing here can see a datum the CALLER will
+ * lose elsewhere. This guards the inputs THIS transaction spends, which is the
+ * case that was measured.
+ *
+ * @param utxos      the inputs about to be spent
+ * @param operation  the operation's name, for the refusal
+ * @param destination what the operation does with them, e.g. "the recipient's
+ *                    programmable-logic-base output"
+ */
+export function assertNoDatumLoss(
+  utxos: readonly EvoUTxO.UTxO[],
+  operation: string,
+  destination: string,
+): void {
+  for (const utxo of utxos) {
+    const datum = getInlineDatum(utxo);
+    if (datum === undefined || isVoidDatum(datum)) continue;
+
+    const hex = Bytes.toHex(Data.toCBORBytes(datum));
+    throw new Error(
+      `${operation}: UTxO ${utxoTxHash(utxo)}#${utxoOutputIndex(utxo)} carries an INLINE DATUM ` +
+        `(${inlineDatumBytes(datum)} bytes: ${hex}), and ${destination} carries the void datum ` +
+        `Constr(0, []). Spending it here would REPLACE that datum with the void one, and the ` +
+        `ledger accepts such a transaction — so the datum would be destroyed silently and ` +
+        `irreversibly.\n` +
+        `THE KNOWN CASE IS THE CIP-68 (100) REFERENCE TOKEN: \`register\` mints it to the ` +
+        `issuer's programmable-logic-base address carrying the metadata datum, which is where ` +
+        `CIP-68 consumers resolve the metadata from. Moving that token through this operation ` +
+        `erases the metadata and hands the reference NFT to someone else.\n` +
+        `Remedy: move the (333) user token — the one holders are meant to hold — and leave the ` +
+        `(100) reference token where \`register\` put it. This SDK has no operation that moves a ` +
+        `datum-carrying programmable output while preserving its datum; if you need one, that is ` +
+        `a change to request rather than a call to work around.`
+    );
+  }
 }
 
 /**

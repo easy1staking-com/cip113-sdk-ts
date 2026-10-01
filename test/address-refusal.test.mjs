@@ -74,265 +74,55 @@ import { freezeAndSeizeSubstandard } from "../dist/substandards/freeze-and-seize
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const BP_DIR = new URL("../blueprints/substandards/", import.meta.url);
-const FES_BP = JSON.parse(readFileSync(new URL("freeze-and-seize/v0.1.0/plutus.json", BP_DIR), "utf8"));
+import {
+  ADMIN_PKH,
+  ALWAYS_FAIL_ADDR,
+  ALWAYS_FAIL_HASH,
+  ASSET_NAME,
+  COVERING_NODE,
+  CORE_TRANSFER_HASH,
+  DEPLOYMENT,
+  DESTINATION,
+  DUMMY_BP,
+  FEE_PAYER,
+  HOLDER,
+  HarnessStop,
+  ISSUANCE_LOGIC_HASH,
+  ISSUANCE_POLICY,
+  NETWORK_ID,
+  OWN_NODE,
+  PLB_HASH,
+  PLG_HASH,
+  PP_ADDR,
+  PP_DATUM,
+  PP_POLICY,
+  RECIPIENT,
+  REGISTRY_ADDR,
+  REGISTRY_HASH,
+  STANDARD_SCRIPTS,
+  TARGET_INDEX,
+  TARGET_TX_HASH,
+  THIRD_PARTY_HASH,
+  TOKEN_POLICY,
+  UNIT,
+  assertRefusedByName,
+  assertTargeted,
+  dummy,
+  fes,
+  h,
+  initPlugin,
+  keyCred,
+  makeRig,
+  node,
+  plb,
+  refInput,
+  run,
+  scriptCred,
+  tokenUtxo,
+  utxo,
+  wallet,
+} from "./support/fes-rig.mjs";
 
-/**
- * ⚠ The SHIPPED dummy blueprint cannot be initialised: `requirePublishHandlers`
- * refuses it because its validators carry no `.publish` handler (a real,
- * separate blocker — PLAN.md workstream W-D / T-D08). That refusal sits in
- * `init`, ahead of every operation, so dummy's address sites are unreachable
- * through the shipped artefact today. They are still live code and still ship,
- * so they are tested here against a blueprint that declares those handlers —
- * the minimum fixture that lets the address decision run at all.
- */
-const DUMMY_BP = (() => {
-  const bp = JSON.parse(readFileSync(new URL("dummy/v0.1.0/plutus.json", BP_DIR), "utf8"));
-  const code = bp.validators.find((v) => v.title === "transfer.issue.withdraw").compiledCode;
-  bp.validators = [
-    ...bp.validators,
-    { title: "transfer.issue.publish", compiledCode: code },
-    { title: "transfer.transfer.publish", compiledCode: code },
-  ];
-  return bp;
-})();
-
-const NETWORK_ID = 0;
-const h = (byte, n = 28) => byte.repeat(n);
-const keyCred = (hex) => new KeyHash.KeyHash({ hash: Bytes.fromHex(hex) });
-const wallet = (payment, stake) =>
-  AddressEras.toBech32(
-    new BaseAddress.BaseAddress({
-      networkId: NETWORK_ID,
-      paymentCredential: keyCred(payment),
-      stakeCredential: keyCred(stake),
-    }),
-  );
-
-// Four distinct wallets. Distinct STAKE credentials are what matters: the PLB
-// address a transaction targets is derived from the staking credential, so two
-// wallets sharing one would make "wrong address" and "right address" the same
-// string and every assertion below vacuous.
-const FEE_PAYER = wallet(h("11"), h("22"));
-const RECIPIENT = wallet(h("33"), h("44"));
-const HOLDER = wallet(h("55"), h("66"));
-const DESTINATION = wallet(h("77"), h("88"));
-
-const PLB_HASH = h("aa");
-const PLG_HASH = h("ab");
-const THIRD_PARTY_HASH = h("ac");
-const REGISTRY_HASH = h("bb");
-const TOKEN_POLICY = h("cc");
-const ISSUANCE_LOGIC_HASH = h("dd");
-const PP_POLICY = h("ee");
-const ISSUANCE_POLICY = h("3c");
-const ALWAYS_FAIL_HASH = h("1a");
-const ADMIN_PKH = h("2b");
-const ASSET_NAME = "4142";
-const UNIT = TOKEN_POLICY + ASSET_NAME;
-
-const REGISTRY_ADDR = scriptAddress(NETWORK_ID, REGISTRY_HASH);
-const PP_ADDR = scriptAddress(NETWORK_ID, PP_POLICY);
-const ALWAYS_FAIL_ADDR = scriptAddress(NETWORK_ID, ALWAYS_FAIL_HASH);
-
-const plb = (addr) => baseAddress(NETWORK_ID, PLB_HASH, addr);
-
-const refInput = (index) => ({ txHash: h("9", 64), outputIndex: index });
-const DEPLOYMENT = {
-  maxInlineDatumBytes: 1024,
-  issuanceLogic: { scriptHash: ISSUANCE_LOGIC_HASH },
-  protocolParams: { policyId: PP_POLICY },
-  issuance: { policyId: ISSUANCE_POLICY, alwaysFailScriptHash: ALWAYS_FAIL_HASH },
-  programmableBaseRefInput: refInput(0),
-  programmableLogicGlobalRefInput: refInput(1),
-  transferRefInput: refInput(2),
-  thirdPartyRefInput: refInput(3),
-  unfrackingRefInput: refInput(4),
-  issuanceLogicRefInput: refInput(5),
-  upgradeMultisigRefInput: refInput(6),
-};
-
-const scriptCred = (hash) => ({ type: "script", hash });
-
-const PP_DATUM = protocolParamsDatum({
-  plgCred: scriptCred(PLG_HASH),
-  issuanceLogicCred: scriptCred(ISSUANCE_LOGIC_HASH),
-  transferCred: scriptCred(h("5e")),
-  thirdPartyCred: scriptCred(THIRD_PARTY_HASH),
-  upgradeCred: scriptCred(h("70")),
-  pendingUpgradeCred: null,
-});
-
-const node = (key, next) =>
-  registryNodeDatum({
-    key,
-    next,
-    mintingLogicScript: scriptCred(h("81")),
-    transferLogicScript: scriptCred(h("82")),
-    thirdPartyTransferLogicScript: scriptCred(h("83")),
-    unfrackingLogicScript: scriptCred(h("84")),
-    globalStateCs: "",
-  });
-
-/** The node whose key IS the token — what mint/burn/seize look up. */
-const OWN_NODE = node(TOKEN_POLICY, "ff".repeat(30));
-/** The node that COVERS the token — what register inserts after. */
-const COVERING_NODE = node(h("00"), "ff".repeat(30));
-
-const TARGET_TX_HASH = "7e".repeat(32);
-const TARGET_INDEX = 0;
-
-let utxoSeq = 0;
-function utxo({ address, lovelace = 20_000_000n, units = {}, datum, txHash, index = 0 }) {
-  const record = { lovelace };
-  for (const [unit, qty] of Object.entries(units)) record[unit] = qty;
-  utxoSeq += 1;
-  return new EvoUTxO.UTxO({
-    transactionId: TransactionHash.fromHex(txHash ?? utxoSeq.toString(16).padStart(4, "0").repeat(16)),
-    index: BigInt(index),
-    address: EvoAddress.fromBech32(address),
-    assets: Assets.fromRecord(record),
-    ...(datum ? { datumOption: new InlineDatum.InlineDatum({ data: datum }) } : {}),
-  });
-}
-
-/** A UTxO holding the token, at `address`, addressable as TARGET_TX_HASH#0. */
-const tokenUtxo = (address) =>
-  utxo({ address, units: { [UNIT]: 100n }, txHash: TARGET_TX_HASH, index: TARGET_INDEX });
-
-// ---------------------------------------------------------------------------
-// The recording client
-// ---------------------------------------------------------------------------
-
-/** Thrown from the first `payToAddress`: everything asserted here is decided by then. */
-class HarnessStop extends Error {}
-
-/**
- * @param {Record<string, any[]>} utxosByAddress bech32 → UTxOs. Any address not
- *   named gets two plain wallet UTxOs, so coin selection never starves.
- */
-function makeRig(utxosByAddress = {}) {
-  const seen = { payTo: [], getUtxos: [], stopped: false };
-
-  const builder = new Proxy(
-    {},
-    {
-      get(_target, property) {
-        if (property === "then") return undefined;
-        return (arg) => {
-          if (property === "payToAddress") {
-            seen.payTo.push(EvoAddress.toBech32(arg.address));
-            seen.stopped = true;
-            throw new HarnessStop("harness stop: first payToAddress reached");
-          }
-          return builder;
-        };
-      },
-    },
-  );
-
-  const client = {
-    chain: { id: NETWORK_ID },
-    async getProtocolParameters() {
-      return { coinsPerUtxoByte: 4310n };
-    },
-    async getUtxos(address) {
-      const bech32 = EvoAddress.toBech32(address);
-      seen.getUtxos.push(bech32);
-      if (bech32 in utxosByAddress) return utxosByAddress[bech32];
-      return [utxo({ address: bech32, lovelace: 50_000_000n }), utxo({ address: bech32, lovelace: 60_000_000n })];
-    },
-    async getUtxosWithUnit(address, unit) {
-      const bech32 = EvoAddress.toBech32(address);
-      if (bech32 === PP_ADDR) return [utxo({ address: bech32, datum: PP_DATUM, units: { [unit]: 1n } })];
-      return [utxo({ address: bech32, units: { [unit]: 1n } })];
-    },
-    async getUtxosByOutRef() {
-      return [utxo({ address: FEE_PAYER })];
-    },
-    newTx() {
-      return builder;
-    },
-  };
-
-  return { seen, client };
-}
-
-const STANDARD_SCRIPTS = {
-  programmableLogicBase: { hash: PLB_HASH },
-  programmableLogicGlobal: { hash: PLG_HASH },
-  thirdParty: { hash: THIRD_PARTY_HASH },
-  registry: { hash: REGISTRY_HASH },
-  buildIssuanceMint: () => ({ hash: TOKEN_POLICY, compiledCode: "00" }),
-};
-
-function initPlugin(plugin, client) {
-  plugin.init({
-    client,
-    standardScripts: STANDARD_SCRIPTS,
-    deployment: DEPLOYMENT,
-    network: "preprod",
-  });
-  return plugin;
-}
-
-const fes = (client) =>
-  initPlugin(
-    freezeAndSeizeSubstandard({
-      blueprint: FES_BP,
-      deployment: {
-        adminPkh: ADMIN_PKH,
-        assetName: ASSET_NAME,
-        blacklistNodePolicyId: h("92"),
-        blacklistInitTxInput: { txHash: h("a", 64), outputIndex: 0 },
-      },
-    }),
-    client,
-  );
-
-const dummy = (client) => initPlugin(dummySubstandard({ blueprint: DUMMY_BP }), client);
-
-/**
- * Drive one operation and return what the transaction actually aimed at.
- * Errors are captured rather than thrown so a test can assert on the CONTRAST
- * between "no error, wrong address" and "named refusal" — but every caller
- * below asserts on `error` explicitly, so a harness failure cannot pass as a
- * result.
- */
-async function run(makePlugin, operation, params, utxosByAddress) {
-  const { seen, client } = makeRig(utxosByAddress);
-  const plugin = makePlugin(client);
-  let error;
-  try {
-    await plugin[operation](params);
-  } catch (err) {
-    error = err;
-  }
-  return { ...seen, error };
-}
-
-/** The shared shape of every refusal assertion: the parameter AND the operation, by name. */
-function assertRefusedByName(result, { operation, parameter, received = '"" (the empty string)' }) {
-  assert.ok(result.error instanceof Error, "the empty address must be refused, not accepted");
-  assert.ok(
-    !(result.error instanceof HarnessStop),
-    `${operation}: the empty ${parameter} built a transaction instead of being refused`,
-  );
-  assert.match(result.error.message, new RegExp(parameter), "the refusal must name the PARAMETER");
-  assert.match(
-    result.error.message,
-    new RegExp(operation.replace(/\./g, "\\.")),
-    "the refusal must name the OPERATION",
-  );
-  assert.match(result.error.message, new RegExp(received.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.equal(result.payTo.length, 0, "nothing may be paid to anyone once the address is refused");
-}
-
-/** Asserts the run got as far as building an output, and names the address it targeted. */
-function assertTargeted(result, expected, why) {
-  assert.ok(result.error instanceof HarnessStop, `the run must reach payToAddress; got: ${result.error?.message}`);
-  assert.deepEqual(result.payTo, [expected], why);
-}
 
 // ---------------------------------------------------------------------------
 // Site 1 — freeze-and-seize.register, recipientAddress  (was SILENT)

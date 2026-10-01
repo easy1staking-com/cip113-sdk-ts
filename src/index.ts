@@ -458,7 +458,19 @@ export {
   stripCIP67Label,
   hasCIP67Label,
   buildCIP68FTDatum,
+  // The datum-loss guard, exported because a CALLER can run it before building:
+  // `assertNoDatumLoss` on the UTxOs it is about to spend answers "would this
+  // operation erase a CIP-68 (100) reference token's metadata?" offline.
+  isVoidDatum,
+  assertNoDatumLoss,
 } from "./core/evo-utils.js";
+// ⛔ EXPORTED SO A SECOND IMPLEMENTATION DOES NOT HAVE TO INVENT THE WORDS. A
+// consumer that pre-flights "is this token in the deployment I serve?" in its
+// own backend should raise THIS message, not a paraphrase: the diagnosis is the
+// hard part (a token is deployment-bound and its absence is indistinguishable
+// from indexer lag), and two texts drifting apart is how one of them ends up
+// naming the wrong cause.
+export { registryNodeMissingError, coveringRegistryNodeMissingError } from "./substandards/registry-guard.js";
 export { sortTxInputs, findRefInputIndex } from "./core/registry.js";
 export { mintAssetsFromMap, outputAssets } from "./core/evo-utils.js";
 export {
