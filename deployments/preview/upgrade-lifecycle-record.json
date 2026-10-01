@@ -1,0 +1,212 @@
+{
+  "network": "preview",
+  "instance": "upgrade-lifecycle",
+  "protocolTxHash": "28cda7d1fc8e05408fc3194a1746a4562522e5bc60ae719f32fce71daee7bc67",
+  "protocolParamsAddress": "addr_test1wzk0n3rx9rgd0597zcr2tx4g4a79j7ff8envxdx24d0fvdgj3l57a",
+  "protocolParamsPolicyId": "acf9c46628d0d7d0be1606a59aa8af7c5979293e66c334caab5e9635",
+  "upgradeMultisigAtBootstrap": "8d94ea6c71fbce6a0c055f54627bf317481043e50a143e72c206585b",
+  "upgradeMultisigAddress": "addr_test1wzxef6nvw8auu6svq404gcnm7vt5syzru59pg0njcgr9skcp98ln2",
+  "nomineeAuthority": {
+    "scriptHash": "09cdc422e85525f8149b523b8dad143854aad73d21cb6ccdc399b42e",
+    "address": "addr_test1wqyum3pzap2jt7q5ndfrhrddzsu9f2kh85sukmxdcwvmgts6jyfxq",
+    "tree": {
+      "type": "at-least",
+      "required": 2,
+      "scripts": [
+        {
+          "type": "signature",
+          "keyHash": "cc1752722c295b11a2bc7496f49bc503794bae25aa4428006385be65"
+        },
+        {
+          "type": "signature",
+          "keyHash": "8596ef9c04aee86d9ac3c80268d67e2511498a72586dea4038683990"
+        }
+      ]
+    }
+  },
+  "signers": [
+    {
+      "label": "acct0/admin",
+      "paymentKeyHash": "ae0e585474fd30f5c82440e10b29565cbd3c64210838bdc898b86f42"
+    },
+    {
+      "label": "acct1",
+      "paymentKeyHash": "4a3c7b1573af3d61e02cd9fa23b5d8188ba1ff15469e59df07157b03"
+    },
+    {
+      "label": "acct2",
+      "paymentKeyHash": "cc1752722c295b11a2bc7496f49bc503794bae25aa4428006385be65"
+    },
+    {
+      "label": "acct3",
+      "paymentKeyHash": "8596ef9c04aee86d9ac3c80268d67e2511498a72586dea4038683990"
+    }
+  ],
+  "treeAtBootstrap": {
+    "type": "signature",
+    "keyHash": "ae0e585474fd30f5c82440e10b29565cbd3c64210838bdc898b86f42"
+  },
+  "treeAfterRotation1": {
+    "type": "at-least",
+    "required": 2,
+    "scripts": [
+      {
+        "type": "signature",
+        "keyHash": "ae0e585474fd30f5c82440e10b29565cbd3c64210838bdc898b86f42"
+      },
+      {
+        "type": "signature",
+        "keyHash": "4a3c7b1573af3d61e02cd9fa23b5d8188ba1ff15469e59df07157b03"
+      },
+      {
+        "type": "signature",
+        "keyHash": "cc1752722c295b11a2bc7496f49bc503794bae25aa4428006385be65"
+      }
+    ]
+  },
+  "treeAfterRotation2": {
+    "type": "at-least",
+    "required": 2,
+    "scripts": [
+      {
+        "type": "signature",
+        "keyHash": "ae0e585474fd30f5c82440e10b29565cbd3c64210838bdc898b86f42"
+      },
+      {
+        "type": "signature",
+        "keyHash": "4a3c7b1573af3d61e02cd9fa23b5d8188ba1ff15469e59df07157b03"
+      },
+      {
+        "type": "signature",
+        "keyHash": "8596ef9c04aee86d9ac3c80268d67e2511498a72586dea4038683990"
+      }
+    ]
+  },
+  "paramsAtGenesis": {
+    "plgCred": {
+      "type": "script",
+      "hash": "c68fdc149fd939163dab2821f84647ddbcd8016dcaaf450cf901f614"
+    },
+    "issuanceLogicCred": {
+      "type": "script",
+      "hash": "0b348415aa7f1de63f5affb590b8b932815c91340932af8b8eb7394d"
+    },
+    "transferCred": {
+      "type": "script",
+      "hash": "508ae2ae69fa346694619c4f78f325706d44d3f2dcb676ae2a2f93f7"
+    },
+    "thirdPartyCred": {
+      "type": "script",
+      "hash": "29112f8463e8a27142b70b8b3e09a40061338a5bb828938d8aeb290c"
+    },
+    "upgradeCred": {
+      "type": "script",
+      "hash": "8d94ea6c71fbce6a0c055f54627bf317481043e50a143e72c206585b"
+    },
+    "pendingUpgradeCred": null
+  },
+  "paramsFinal": {
+    "plgCred": {
+      "type": "script",
+      "hash": "c68fdc149fd939163dab2821f84647ddbcd8016dcaaf450cf901f614"
+    },
+    "issuanceLogicCred": {
+      "type": "script",
+      "hash": "0b348415aa7f1de63f5affb590b8b932815c91340932af8b8eb7394d"
+    },
+    "transferCred": {
+      "type": "script",
+      "hash": "508ae2ae69fa346694619c4f78f325706d44d3f2dcb676ae2a2f93f7"
+    },
+    "thirdPartyCred": {
+      "type": "script",
+      "hash": "29112f8463e8a27142b70b8b3e09a40061338a5bb828938d8aeb290c"
+    },
+    "upgradeCred": {
+      "type": "script",
+      "hash": "09cdc422e85525f8149b523b8dad143854aad73d21cb6ccdc399b42e"
+    },
+    "pendingUpgradeCred": null
+  },
+  "roundTripByteExact": true,
+  "authorityAtEnd": {
+    "type": "script",
+    "hash": "09cdc422e85525f8149b523b8dad143854aad73d21cb6ccdc399b42e"
+  },
+  "transactions": [
+    {
+      "n": 1,
+      "step": "ROTATION 1: 1-of-1 -> 2-of-3",
+      "txHash": "085b71938a2ee27fb6e2c4f7291380e0704d0986fd0c48836cc35fc83fe7377e",
+      "note": "the bootstrap's single key installs a quorum"
+    },
+    {
+      "n": 2,
+      "step": "ROTATION 2: 2-of-3 -> 2-of-3'",
+      "txHash": "29d1b449200c5cb178dd752d0381a1bac85e2b3bb94e3229828ca4a5b167f4fe",
+      "note": "TWO witnesses; acct2 rotated out, acct3 in"
+    },
+    {
+      "n": 3,
+      "step": "BREAK 1: thirdPartyCred -> de\u2026de",
+      "txHash": "5a61f3092724ec88a91438fec17a8ef928d38ea76d1d6cb316b1fba69c6692c8",
+      "note": "a well-formed hash behind which no script exists"
+    },
+    {
+      "n": 4,
+      "step": "RESTORE 1: thirdPartyCred restored",
+      "txHash": "c2faaff5d6d12279e58cb7b474d02514cb79bc34136d6cc9fa8b19978f2e2f69",
+      "note": "authorised by the same authority the break could not touch"
+    },
+    {
+      "n": 5,
+      "step": "BREAK 4: all four mutable delegates -> fakes",
+      "txHash": "0e4302e4fa8a5a92a8c8955f2374b20295ec3066f11fe34d84f7029bfff52d1d",
+      "note": "the protocol now points at four scripts that do not exist"
+    },
+    {
+      "n": 6,
+      "step": "RESTORE 4: all four restored",
+      "txHash": "eba686445988d18ddc4053f0380d818983a6bcd1be7f0de42db12be37d55f56b",
+      "note": "round trip complete \u2014 the datum is identical to genesis"
+    },
+    {
+      "n": 7,
+      "step": "HANDOVER a: second upgrade_multisig minted",
+      "txHash": "d7c5c1157d17a623fe2053c8c0041d6a2f8a7034d8fce2a249956dd41cdcffa4",
+      "note": "09cdc422e85525f8149b523b8dad143854aad73d21cb6ccdc399b42e \u2014 a 2-of-2 of acct2+acct3"
+    },
+    {
+      "n": 8,
+      "step": "HANDOVER b: the nominee's stake credential registered",
+      "txHash": "ab844871bc878fbc13dd5bf6547d7b11387f434e80f937ad2ac896f38d887acf",
+      "note": "its OWN transaction \u2014 withdrawals apply before certificates"
+    },
+    {
+      "n": 9,
+      "step": "HANDOVER c: NominateAuthority",
+      "txHash": "2ea2fb3b01db07f9c93910cbafeb74e692c0fdb22b68a01e0f65a0727b42d807",
+      "note": "the sitting authority names its successor; upgradeCred unmoved"
+    },
+    {
+      "n": 10,
+      "step": "HANDOVER d: PromoteAuthority",
+      "txHash": "3fa94d24bdcf88acfdfaf4c00fa669092831bb3c6c5c6a4e80002c2b384fc24a",
+      "note": "withdraws ONLY the nominee; acct0 signs as fee payer, not as authority"
+    },
+    {
+      "n": 11,
+      "step": "HANDOVER e: the NEW authority performs an upgrade",
+      "txHash": "0d739c0c8e980cd41dc9caeb6ce8f71ad6fcb7640cbe488d2a125bba4d71f954",
+      "note": "proves the credential is live, registered and satisfied by its own tree"
+    },
+    {
+      "n": 12,
+      "step": "HANDOVER f: restored, under the new authority",
+      "txHash": "e1f1e17f9ed52c9be535e696a73374bbbf20e44bbd0183846a7da171ae009ae9",
+      "note": "the instance is left in a working state"
+    }
+  ],
+  "note": "Operations 1 and 2/3 were submitted in two invocations of test/harness/upgrade-preview.ts: the first was interrupted by a Blockfrost evaluateTx refusal caused by its independently-advancing views (a confirmed transaction while the UTxO set still showed spent outputs), and the second resumed, skipping the two rotations already on chain. Both rotation hashes were verified present on chain before being folded into this record. The chain does not distinguish the two invocations; the order below is the order of submission.",
+  "treeProvenance": "\u26a0 CORRECTED. These three trees are DECODED FROM THE CHAIN \u2014 each from the inline datum of the output that wrote it \u2014 not taken from the script's own intent. The resumed invocation had recorded `treeAtBootstrap` from its own starting state, which was already past both rotations, so the field described the wrong moment. Reading them back off the transactions that wrote them removes the question."
+}
