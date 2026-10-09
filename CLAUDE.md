@@ -8,7 +8,37 @@ Cardano. Published to npm as `@easy1staking/cip113-sdk-ts` (Apache-2.0, currentl
 This repo is factory-operated (fabbrica plugin). Non-trivial requests go through
 `intake` (never straight to code); tickets run as slice contracts with the
 worker/auditor pair; before ending any significant work, run `distill` — "close
-the circle" — even if Giovanni forgets to ask. State lives in PLAN.md + WORKLOG.md.
+the circle" — even if Giovanni forgets to ask. Ticket substrate: plan.
+Fabbrica init schema: 3.
+Authority class: 1 (ours) — governs push/PR limits AND what may be decided without
+Giovanni; see the plugin's `## Authority classes`. Ruled first-hand by Giovanni
+2026-10-09. ⚠ **Class is ownership × criticality and is INDEPENDENT OF VISIBILITY**
+(init item 9): this repo is class 1 *and* **public**, which is an explicitly
+contemplated combination — the class sets push/decision limits, while visibility
+drives only the tracking rule below. Design decisions remain Giovanni's on every
+class; implementation, config and tickets are the factory's here.
+Factory floor: standard — the lowest `Lane:` any slice here may carry
+(`model-routing`). A slice may raise, never lower.
+Providers: single — every role binds to the host runtime's provider, so
+cross-provider audit coverage and `+ cross=` bindings are inapplicable. This
+matches Giovanni's standing ruling to dispatch Claude subagents only.
+State lives in WORKLOG.md plus the substrate (PLAN.md), plus the local
+`.fabbrica/` state-owning checkout at `/home/giovanni/Development/workspace/cip113-sdk-ts`.
+An open slice forbids switching or deleting it.
+
+⛔ **WHERE STATE LIVES vs WHAT TRAVELS — the public-repo resolution (init item 5a).**
+This repo is public, so `PLAN.md`, `WORKLOG.md`, `.fabbrica/` and the generated
+native policy (`.claude/settings*.json`, `.codex/`) are kept in
+`.git/info/exclude` — never `.gitignore`, so the exclusion itself stays off the
+public record. ⇒ Those files are therefore **local to this one machine**, and a
+hand-off written only there travels to NOBODY. It fails in the quiet direction:
+the file is present for anyone looking locally, so nothing announces that it did
+not clone. **So: working state stays in the excluded files; anything a DIFFERENT
+machine or a fresh clone must read — a hand-off, a lead, the current head, how to
+reproduce a result — goes in a TRACKED doc** (`docs/`, or the README). The
+upgrade-lifecycle proof is the worked example: its campaign record is tracked at
+`deployments/preview/upgrade-lifecycle-record.json` and its narrative at
+`docs/upgrade-lifecycle.md`, precisely so neither depends on this checkout.
 <!-- fabbrica:end -->
 
 ## Constitution

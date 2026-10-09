@@ -2,8 +2,14 @@ node_modules/
 dist/
 .next/
 *.tsbuildinfo
-.env
-.env.*
+# ⛔ `.env*`, NOT `.env` + `.env.*` — the second pattern requires a literal dot,
+# so it does NOT match `.env copy`, the duplicate a Finder/editor action creates.
+# Measured elsewhere in the factory: that exact gap put three credential-bearing
+# files on a PUBLIC remote, one with a live wallet mnemonic. This repo is public
+# and `.env.preview` holds a mnemonic, so the gap mattered here too.
+# ⚠ Checked with `git check-ignore -v` against the filenames this repo's own docs
+# tell people to create — a pattern is only as good as the names in use.
+.env*
 .DS_Store
 
 # Yaci DevKit droppings (created when running yaci-devkit from the repo root)
