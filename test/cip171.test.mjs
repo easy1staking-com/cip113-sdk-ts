@@ -162,6 +162,68 @@ test("rejects a raw script hash that is not 28 bytes", () => {
   );
 });
 
+test("chunkBytes refuses a chunk size that cannot advance", () => {
+  // The chunk size is the loop step: 0, negative and NaN sizes never advance
+  // the offset (the loop allocated slices until OOM before this guard), and
+  // a fractional size is truncated by slice into corrupt pieces.
+  for (const bad of [0, -1, 2.5, NaN]) {
+    assert.throws(
+      () => chunkBytes(new Uint8Array(4), bad),
+      /chunk size must be a positive integer/,
+      `chunk size ${bad} must be rejected`
+    );
+  }
+  assert.throws(
+    () => buildCip171PlutusData({ ...record, compilerType: 999 }),
+    /compilerType must be a known compiler index/
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Decoding holds the same line as encoding
+// ---------------------------------------------------------------------------
+//
+// The decoder reads transaction metadata anyone can publish. Before this,
+// it returned whatever it found typed as a Cip171Record: a constructor
+// index of 999 (no such compiler), a 2-byte commit hash, a 2-byte script
+// hash and an empty parameter — every one a claim the encoder refuses to
+// emit. A verifier trusting the decoded shape would chase provenance that
+// was never well-formed.
+
+const utf8Hex = (s) => Buffer.from(new TextEncoder().encode(s)).toString("hex");
+
+function rawRecord({ index = 0n, url = utf8Hex("https://example.com/repo"), commit = "ab".repeat(20), scripts } = {}) {
+  return Data.constr(index, [
+    Data.bytearray(url),
+    Data.bytearray(commit),
+    Data.bytearray(""),
+    Data.bytearray(utf8Hex("v1")),
+    Data.bytearray(""),
+    Data.map(scripts ?? [[Data.bytearray("ab".repeat(28)), [Data.bytearray("aa")]]]),
+  ]);
+}
+
+test("decode refuses an unknown compiler index", () => {
+  assert.throws(() => decodeCip171PlutusData(rawRecord({ index: 999n })), /compilerType must be/);
+});
+
+test("decode refuses truncated commit and script hashes and empty params", () => {
+  assert.throws(() => decodeCip171PlutusData(rawRecord({ commit: "abcd" })), /commitHash must be/);
+  assert.throws(
+    () => decodeCip171PlutusData(rawRecord({ scripts: [[Data.bytearray("aabb"), [Data.bytearray("aa")]]] })),
+    /rawScriptHash must be/
+  );
+  assert.throws(
+    () => decodeCip171PlutusData(rawRecord({ scripts: [[Data.bytearray("ab".repeat(28)), [Data.bytearray("")]]] })),
+    /parameters must be non-empty/
+  );
+});
+
+test("decode refuses a record with no scripts and a non-UTF-8 field", () => {
+  assert.throws(() => decodeCip171PlutusData(rawRecord({ scripts: [] })), /claims nothing/);
+  assert.throws(() => decodeCip171PlutusData(rawRecord({ url: "fffe" })), /valid UTF-8/);
+});
+
 test("rejects an empty record — it would claim nothing", () => {
   assert.throws(() => buildCip171PlutusData({ ...record, scripts: [] }), /claims nothing/);
   assert.throws(() => buildCip171PlutusData({ ...record, sourceUrl: "  " }), /sourceUrl/);

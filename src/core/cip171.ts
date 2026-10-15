@@ -153,6 +153,14 @@ function isHexOfBytes(s: unknown, ...bytes: number[]): boolean {
  * because the blueprint's provenance was never actually established.
  */
 function validateCip171Record(record: Cip171Record): void {
+  if (!(Object.values(CompilerType) as number[]).includes(record.compilerType)) {
+    throw new Error(
+      `CIP-171: compilerType must be a known compiler index ` +
+      `(${Object.values(CompilerType).join(", ")}), got ${JSON.stringify(record.compilerType)}. ` +
+      `The constructor index names the compiler + schema a verifier reproduces with — ` +
+      `an index outside that set names nothing a verifier can build.`
+    );
+  }
   if (!isHexOfBytes(record.commitHash, 20, 32)) {
     throw new Error(
       `CIP-171: commitHash must be a 20- or 32-byte hex string (40 or 64 hex chars), got ` +
@@ -266,8 +274,23 @@ export function buildCip171Metadatum(
   return chunkBytes(cbor, chunkSize);
 }
 
-/** Slice a byte array into ≤ chunkSize pieces in order. */
+/**
+ * Slice a byte array into ≤ chunkSize pieces in order.
+ *
+ * `chunkSize` is the loop step, so it is validated here rather than left to
+ * callers: a size of 0 (or negative, or NaN) never advances the offset and
+ * the loop allocates slices until the process runs out of memory, and a
+ * fractional size is truncated by `slice` into empty and overlapping pieces
+ * that concatenate back to different bytes than the input.
+ * `buildCip171Metadatum` checks its own [1, 64] range before delegating, but
+ * this helper is a public export and direct callers get no such check.
+ */
 export function chunkBytes(bytes: Uint8Array, chunkSize: number): Uint8Array[] {
+  if (!Number.isInteger(chunkSize) || chunkSize < 1) {
+    throw new Error(
+      `CIP-171: chunk size must be a positive integer, got ${chunkSize}`
+    );
+  }
   const chunks: Uint8Array[] = [];
   for (let i = 0; i < bytes.length; i += chunkSize) {
     chunks.push(bytes.slice(i, Math.min(i + chunkSize, bytes.length)));
@@ -328,7 +351,17 @@ export function decodeCip171PlutusData(data: PlutusData): Cip171Record {
     // encoder's input shape so a decode/encode round-trip is lossless.
     scripts.push({ rawScriptHash, params: v.map((p) => Bytes.toHex(asBytes(p))) });
   }
-  return { compilerType, sourceUrl, commitHash, sourcePath, compilerVersion, env, scripts };
+  const record: Cip171Record = {
+    compilerType, sourceUrl, commitHash, sourcePath, compilerVersion, env, scripts,
+  };
+  // A decoded record comes from transaction metadata anyone can publish, so
+  // it is held to exactly the line the encoder holds: an unknown compiler
+  // index, a truncated commit or script hash, an empty parameter, or a
+  // record with no scripts is not a weaker kind of provenance — it is a
+  // claim this SDK refuses to emit, and a verifier must not be handed one
+  // typed as a valid `Cip171Record` either.
+  validateCip171Record(record);
+  return record;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +376,15 @@ function asBytes(d: PlutusData): Uint8Array {
 }
 
 function bytesToUtf8(bytes: Uint8Array): string {
-  return bytes.length === 0 ? "" : new TextDecoder().decode(bytes);
+  if (bytes.length === 0) return "";
+  try {
+    // Fatal, not the default lossy decoding: replacement characters would
+    // silently rewrite the claimed URL / version, and re-encoding the
+    // decoded record would produce different bytes than the ones on chain.
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("CIP-171: expected a valid UTF-8 ByteArray field");
+  }
 }
 
 function utf8ToHex(s: string): HexString {
